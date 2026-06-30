@@ -20,8 +20,8 @@ struct SessionStatusBar: View {
             clock
             closeButton
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
     }
 
     // MARK: - 左: セッション名 + ブランチ + ステータス
@@ -108,9 +108,18 @@ struct SessionStatusBar: View {
                 Label("Finder で表示", systemImage: "folder")
             }
         } label: {
-            Label("IDE で開く", systemImage: "arrow.up.forward.app")
+            HStack(spacing: 6) {
+                Image(systemName: "arrow.up.forward.app")
+                Text("IDE で開く")
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+            }
+            .font(.callout.weight(.medium))
+            .pillFrame(prominent: true)
         }
         .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
         .fixedSize()
         .help("worktree を任意の IDE / Finder で開く")
     }
@@ -138,11 +147,16 @@ struct SessionStatusBar: View {
 
     private var clock: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
-            Text(context.date, format: .dateTime.hour().minute().second())
-                .font(.system(.callout, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .monospacedDigit()
+            HStack(spacing: 6) {
+                Image(systemName: "clock")
+                    .foregroundStyle(.secondary)
+                Text(context.date, format: .dateTime.hour().minute().second())
+                    .monospacedDigit()
+            }
+            .font(.system(.callout, design: .monospaced).weight(.medium))
+            .pillFrame()
         }
+        .fixedSize()
         .help("現在時刻")
     }
 
@@ -183,4 +197,30 @@ private struct Editor: Identifiable {
         Candidate(name: "JetBrains Fleet", bundleID: "Fleet"),
         Candidate(name: "Xcode", bundleID: "com.apple.dt.Xcode")
     ]
+}
+
+// MARK: - ピル型の枠
+
+private extension View {
+    /// Supacode 風の、少し大きめでピル型（角丸全周）の枠に収める。
+    func pillFrame(prominent: Bool = false) -> some View {
+        padding(.horizontal, 14)
+            .padding(.vertical, 7)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(prominent
+                        ? Color.accentColor.opacity(0.16)
+                        : Color(nsColor: .controlBackgroundColor))
+            )
+            .overlay(
+                Capsule(style: .continuous)
+                    .strokeBorder(
+                        prominent
+                            ? Color.accentColor.opacity(0.45)
+                            : Color.primary.opacity(0.12),
+                        lineWidth: 1
+                    )
+            )
+            .contentShape(Capsule(style: .continuous))
+    }
 }
