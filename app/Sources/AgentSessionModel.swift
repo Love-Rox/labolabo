@@ -46,7 +46,8 @@ final class AgentSessionModel {
     /// 設定の書き出しに失敗したら nil。
     func launchCommand() -> String? {
         guard writeSettings() else { return nil }
-        return "claude --settings \(Self.shellQuoted(settingsPath))\n"
+        // 端末の Enter はキャリッジリターン(\r)。\n だと実行されず改行止まりになる。
+        return "claude --settings \(Self.shellQuoted(settingsPath))\r"
     }
 
     // MARK: - settings
