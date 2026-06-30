@@ -10,10 +10,10 @@ packages:
   # Local Swift package at the repo root (LaboLaboEngine et al.).
   LaboLaboCore:
     path: ..
-  # libghostty terminal is wired in the next increment:
-  # LibghosttySPM:
-  #   url: https://github.com/Lakr233/libghostty-spm.git
-  #   from: 1.2.8
+  # Prebuilt libghostty (GhosttyKit.xcframework) + Swift/SwiftUI terminal wrappers.
+  LibghosttySPM:
+    url: https://github.com/Lakr233/libghostty-spm.git
+    from: "1.2.8"
 
 targets:
   LaboLabo:
@@ -24,6 +24,8 @@ targets:
     dependencies:
       - package: LaboLaboCore
         product: LaboLaboEngine
+      - package: LibghosttySPM
+        product: GhosttyTerminal
     configFiles:
       Debug: ../Config/Version.xcconfig
       Release: ../Config/Version.xcconfig
