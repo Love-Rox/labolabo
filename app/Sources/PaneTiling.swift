@@ -362,6 +362,11 @@ extension TilingCoordinator {
 
 final class RatioSplitView: NSSplitView, NSSplitViewDelegate {
     weak var node: TileNode?
+    /// Guards against unbounded recursion: `setPosition` re-triggers `layout()`
+    /// synchronously, which would call `applyRatio()` again, set the position
+    /// again, … until the stack overflows. The flag makes the nested layout a
+    /// no-op so the divider is positioned exactly once per layout pass.
+    private var isApplyingRatio = false
 
     override func layout() {
         super.layout()
@@ -369,14 +374,16 @@ final class RatioSplitView: NSSplitView, NSSplitViewDelegate {
     }
 
     private func applyRatio() {
+        guard !isApplyingRatio else { return }
         guard arrangedSubviews.count == 2 else { return }
         let dim = isVertical ? bounds.width : bounds.height
         guard dim > 0, let ratio = node?.ratio else { return }
-        let target = ratio * dim
+        let target = (ratio * dim).rounded()
         let current = isVertical ? arrangedSubviews[0].frame.width : arrangedSubviews[0].frame.height
-        if abs(current - target) > 0.5 {
-            setPosition(target, ofDividerAt: 0)
-        }
+        guard abs(current - target) > 1 else { return }
+        isApplyingRatio = true
+        setPosition(target, ofDividerAt: 0)
+        isApplyingRatio = false
     }
 
     func splitView(_ splitView: NSSplitView, constrainMinCoordinate proposedMin: CGFloat, ofDividerAt _: Int) -> CGFloat {
