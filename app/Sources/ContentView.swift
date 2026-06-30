@@ -8,15 +8,17 @@ struct SidebarSession: Identifiable, Hashable {
     let repo: String
     let name: String
     let branch: String
+    let workingDirectory: String
 }
 
 struct ContentView: View {
     @State private var selection: SidebarSession.ID?
 
     // Grouped by repo in the sidebar (Supacode-style repo/session tree).
+    // Demo sessions for the Phase-0 shell; real sessions come from GRDB + GitEngine.
     private let sessions: [SidebarSession] = [
-        .init(repo: "labolabo", name: "git-engine", branch: "feature/git-engine"),
-        .init(repo: "labolabo", name: "macos-app", branch: "feature/macos-app"),
+        .init(repo: "labolabo", name: "git-engine", branch: "feature/git-engine", workingDirectory: NSHomeDirectory()),
+        .init(repo: "labolabo", name: "macos-app", branch: "feature/macos-app", workingDirectory: NSHomeDirectory()),
     ]
 
     private var repos: [String] {
@@ -75,7 +77,7 @@ struct SessionDetailView: View {
             SessionHeader(session: session)
             Divider()
             HSplitView {
-                TerminalAreaView()
+                TerminalAreaView(workingDirectory: session.workingDirectory)
                     .frame(minWidth: 360)
                 WorkPaneView()
                     .frame(minWidth: 320)
@@ -100,44 +102,69 @@ struct SessionHeader: View {
     }
 }
 
-/// Foreshadows the multi-terminal area (tabs + split panes). The real
-/// libghostty `TerminalSurfaceView` instances are wired in the next increment.
+struct TerminalTab: Identifiable {
+    let id = UUID()
+    var title: String
+    let workingDirectory: String
+}
+
+/// The multi-terminal area: one or more libghostty terminals as tabs. Panes are
+/// kept mounted (opacity-hidden, not removed) so background surfaces stay alive.
+/// Split panes are added in a later increment (#10).
 struct TerminalAreaView: View {
-    @State private var tabs: [String] = ["zsh"]
-    @State private var selected = 0
+    let workingDirectory: String
+
+    @State private var tabs: [TerminalTab]
+    @State private var selected: UUID
+
+    init(workingDirectory: String) {
+        self.workingDirectory = workingDirectory
+        let first = TerminalTab(title: "shell", workingDirectory: workingDirectory)
+        _tabs = State(initialValue: [first])
+        _selected = State(initialValue: first.id)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 4) {
-                ForEach(Array(tabs.enumerated()), id: \.offset) { index, name in
-                    Text(name)
-                        .font(.caption)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 3)
-                        .background(
-                            index == selected ? Color.accentColor.opacity(0.25) : Color.clear,
-                            in: RoundedRectangle(cornerRadius: 5)
-                        )
-                        .onTapGesture { selected = index }
-                }
-                Button {
-                    tabs.append("zsh")
-                    selected = tabs.count - 1
-                } label: {
-                    Image(systemName: "plus")
-                }
-                .buttonStyle(.borderless)
-                Spacer()
-            }
-            .padding(6)
+            tabBar
             Divider()
             ZStack {
                 Color.black
-                Text("Terminal (libghostty) — 次の増分で埋め込み")
-                    .font(.callout)
-                    .foregroundStyle(.white.opacity(0.45))
+                ForEach(tabs) { tab in
+                    GhosttyTerminalPane(workingDirectory: tab.workingDirectory)
+                        .opacity(tab.id == selected ? 1 : 0)
+                        .allowsHitTesting(tab.id == selected)
+                }
             }
         }
+    }
+
+    private var tabBar: some View {
+        HStack(spacing: 4) {
+            ForEach(tabs) { tab in
+                Text(tab.title)
+                    .font(.caption)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(
+                        tab.id == selected ? Color.accentColor.opacity(0.25) : Color.clear,
+                        in: RoundedRectangle(cornerRadius: 5)
+                    )
+                    .contentShape(Rectangle())
+                    .onTapGesture { selected = tab.id }
+            }
+            Button {
+                let tab = TerminalTab(title: "shell", workingDirectory: workingDirectory)
+                tabs.append(tab)
+                selected = tab.id
+            } label: {
+                Image(systemName: "plus")
+            }
+            .buttonStyle(.borderless)
+            .help("新しい端末タブ")
+            Spacer()
+        }
+        .padding(6)
     }
 }
 
