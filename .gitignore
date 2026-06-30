@@ -1,0 +1,23 @@
+# SwiftPM / build
+.build/
+.swiftpm/
+Package.resolved
+
+# Xcode
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+DerivedData/
+*.xcuserstate
+build/
+
+# macOS
+.DS_Store
+
+# Vendored libghostty build artifacts are large; keep the XCFramework out of git
+# (rebuild via scripts/build-ghostty.sh). The pin (commit SHA + checksum) is tracked
+# in vendor/ghostty.pin instead.
+vendor/GhosttyKit.xcframework/
+vendor/ghostty-src/
+
+# Local app data / scratch
+*.log

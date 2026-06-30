@@ -1,0 +1,10 @@
+// LaboLabo — version source of truth.
+//
+// MARKETING_VERSION (CFBundleShortVersionString) is bumped automatically by
+// release-please from Conventional Commits; do not edit it by hand.
+// The build number (CFBundleVersion / CURRENT_PROJECT_VERSION) is injected at
+// build/archive time from the monotonic git commit count
+// (`git rev-list --count HEAD`); the value below is only a local fallback.
+
+MARKETING_VERSION = 0.1.0 // x-release-please-version
+CURRENT_PROJECT_VERSION = 1

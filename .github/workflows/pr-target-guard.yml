@@ -1,0 +1,20 @@
+name: PR target guard
+
+# main only accepts PRs from `dev` (normal work flows feature/* -> dev -> main),
+# plus release-please's own release branches as a necessary exception.
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  enforce-dev-only:
+    name: enforce-dev-only
+    runs-on: ubuntu-latest
+    steps:
+      - name: Reject non-dev sources into main
+        if: >-
+          github.event.pull_request.head.ref != 'dev' &&
+          !startsWith(github.event.pull_request.head.ref, 'release-please--')
+        run: |
+          echo "::error::main は dev からの PR のみを受け付けます (head=${{ github.event.pull_request.head.ref }})"
+          exit 1
