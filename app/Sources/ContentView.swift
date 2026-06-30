@@ -114,7 +114,7 @@ struct SessionDetailView: View {
         self.onClose = onClose
         _work = State(initialValue: WorkPaneModel(worktree: session.worktreePath))
         _tiling = State(initialValue: PaneTilingModel.defaultLayout())
-        _agent = State(initialValue: AgentSessionModel(sessionID: session.id))
+        _agent = State(initialValue: AgentSessionModel(sessionID: session.id, worktree: session.worktreePath))
         configSource = GhosttyConfig.userConfigSource()
     }
 
@@ -158,9 +158,7 @@ struct SessionDetailView: View {
             Spacer(minLength: 12)
 
             Button {
-                if let command = agent.launchCommand() {
-                    tiling.launchInNewTerminal(title: "Claude", command: command)
-                }
+                tiling.launchInNewTerminal(title: "Claude", command: agent.launchCommand())
             } label: {
                 Image(systemName: "sparkles")
             }

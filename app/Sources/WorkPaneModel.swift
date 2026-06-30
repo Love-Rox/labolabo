@@ -118,7 +118,8 @@ final class WorkPaneModel {
                 items.append(.init(path: entry.path, section: .untracked, adds: nil, dels: nil,
                                    modifiedAt: modifiedDate(for: entry.path)))
             }
-            self.items = items
+            // 我々が注入する hooks 設定は一覧に出さない（ノイズ回避）。
+            self.items = items.filter { $0.path != AgentSessionModel.localSettingsRelativePath }
 
             if let selectedID, !items.contains(where: { $0.id == selectedID }) {
                 self.selectedID = nil
