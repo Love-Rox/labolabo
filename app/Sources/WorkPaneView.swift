@@ -185,18 +185,19 @@ struct FileDetailView: View {
                     Text(item.path)
                         .font(.caption).foregroundStyle(.secondary)
                         .lineLimit(1).truncationMode(.middle)
+                    Spacer()
+                    Picker("", selection: viewModeBinding) {
+                        ForEach(FileViewMode.allCases) { Text($0.rawValue).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    .fixedSize()
                 } else {
                     Text("ファイルを選択").font(.caption).foregroundStyle(.secondary)
+                    Spacer()
                 }
-                Spacer()
-                Picker("", selection: viewModeBinding) {
-                    ForEach(FileViewMode.allCases) { Text($0.rawValue).tag($0) }
-                }
-                .pickerStyle(.segmented)
-                .fixedSize()
-                .disabled(model.selectedItem == nil)
             }
             .padding(.horizontal, 12)
+            .frame(minHeight: 28)
             .padding(.vertical, 6)
             Divider()
 

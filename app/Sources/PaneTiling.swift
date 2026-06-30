@@ -81,12 +81,14 @@ final class PaneTilingModel {
     init(root: TileNode) { self.root = root }
 
     static func defaultLayout() -> PaneTilingModel {
-        // Terminal on top; bottom row = changed-files (left) | diff (right).
+        // Terminal on top; bottom row = changed-files | diff | commit graph.
         let terminal = TileNode(pane: PaneItem(kind: .terminal, title: "端末"))
         let files = TileNode(pane: PaneItem(kind: .files, title: "変更ファイル"))
         let diff = TileNode(pane: PaneItem(kind: .diff, title: "Diff"))
-        let bottom = TileNode(orientation: .horizontal, ratio: 0.42, children: [files, diff])
-        let root = TileNode(orientation: .vertical, ratio: 0.58, children: [terminal, bottom])
+        let commits = TileNode(pane: PaneItem(kind: .commits, title: "履歴"))
+        let diffAndCommits = TileNode(orientation: .horizontal, ratio: 0.58, children: [diff, commits])
+        let bottom = TileNode(orientation: .horizontal, ratio: 0.3, children: [files, diffAndCommits])
+        let root = TileNode(orientation: .vertical, ratio: 0.55, children: [terminal, bottom])
         return PaneTilingModel(root: root)
     }
 
