@@ -169,6 +169,7 @@ struct DiffView: View {
                         }
                     }
                     .padding(.vertical, 4)
+                    .frame(minWidth: geo.size.width, minHeight: geo.size.height, alignment: .topLeading)
                 }
             }
         } else if diff?.isBinary == true {
@@ -254,6 +255,7 @@ struct WholeFileView: View {
                         }
                     }
                     .padding(.vertical, 4)
+                    .frame(minWidth: geo.size.width, minHeight: geo.size.height, alignment: .topLeading)
                 }
             }
         } else {
