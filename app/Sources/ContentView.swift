@@ -94,35 +94,38 @@ struct SessionDetailView: View {
     }
 
     var body: some View {
-        PaneTilingView(
-            model: tiling,
-            context: PaneContext(
-                workingDirectory: session.worktreePath.path,
-                work: work,
-                configSource: configSource
-            ),
-            revision: tiling.revision
-        )
+        VStack(spacing: 0) {
+            sessionBar
+            Divider()
+            PaneTilingView(
+                model: tiling,
+                context: PaneContext(
+                    workingDirectory: session.worktreePath.path,
+                    work: work,
+                    configSource: configSource
+                ),
+                revision: tiling.revision
+            )
+        }
         .navigationTitle(session.name)
         .navigationSubtitle(session.worktreePath.path)
-        .toolbar { toolbarContent }
         .onAppear { work.start() }
         .onDisappear { work.stop() }
     }
 
-    /// すべての操作系を "LaboLabo" タイトルのあるウインドウ上部ツールバーに集約する。
-    /// 右側のコントロールは 1 つのツールバーアイテムにまとめ、システム側の囲いと
-    /// 自前のピル/丸枠が二重にならないよう、各要素はプレーンに自前スタイルだけを当てる。
-    @ToolbarContentBuilder
-    private var toolbarContent: some ToolbarContent {
-        ToolbarItem(placement: .principal) {
+    /// 操作系を集約した自前の 1 本バー。macOS のツールバーが要素をまとめて 1 枚の
+    /// 大きなピルに収めてしまうのを避け、ステータスピル・丸ボタン・IDE/時計ピルを
+    /// それぞれ単一枠で正確に並べる。
+    private var sessionBar: some View {
+        HStack(spacing: 12) {
             SessionStatusPill(
                 status: work.status,
                 fallbackBranch: session.branch,
                 changedCount: work.items.count
             )
-        }
-        ToolbarItemGroup(placement: .primaryAction) {
+
+            Spacer(minLength: 12)
+
             Button {
                 tiling.addPane(PaneItem(kind: .terminal, title: "端末"))
             } label: {
@@ -169,5 +172,8 @@ struct SessionDetailView: View {
             .buttonStyle(CircleIconButtonStyle(tint: .red))
             .help("セッションを閉じる")
         }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(.bar)
     }
 }

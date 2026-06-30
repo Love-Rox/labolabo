@@ -38,10 +38,7 @@ struct SessionStatusPill: View {
                     .foregroundStyle(.tertiary)
             }
         }
-        // 自前のピルは付けない。macOS のツールバーが要素にピル状の背景を付けるため、
-        // ここで Capsule を重ねると二重になる。中身だけを置いてシステムのピルに載せる。
-        // 左右に少し余白を持たせてシステムピルが窮屈にならないようにする。
-        .padding(.horizontal, 6)
+        .pillFrame(horizontalPadding: 18)
         .fixedSize()
     }
 
@@ -115,6 +112,7 @@ struct IDEOpenMenu: View {
                     .foregroundStyle(.secondary)
             }
             .font(.callout.weight(.medium))
+            .pillFrame(prominent: true)
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
@@ -150,6 +148,7 @@ struct SessionClock: View {
                     .monospacedDigit()
             }
             .font(.system(.callout, design: .monospaced).weight(.medium))
+            .pillFrame()
         }
         .fixedSize()
         .help("現在時刻")
@@ -178,6 +177,33 @@ private struct Editor: Identifiable {
         Candidate(name: "JetBrains Fleet", bundleID: "Fleet"),
         Candidate(name: "Xcode", bundleID: "com.apple.dt.Xcode")
     ]
+}
+
+// MARK: - ピル型の枠
+
+extension View {
+    /// 自前バー用のピル型（角丸全周）の枠。中身だけを Capsule に収める。
+    /// `horizontalPadding` で左右の余白を調整できる。
+    func pillFrame(horizontalPadding: CGFloat = 14, prominent: Bool = false) -> some View {
+        padding(.horizontal, horizontalPadding)
+            .padding(.vertical, 7)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(prominent
+                        ? Color.accentColor.opacity(0.16)
+                        : Color(nsColor: .controlBackgroundColor))
+            )
+            .overlay(
+                Capsule(style: .continuous)
+                    .strokeBorder(
+                        prominent
+                            ? Color.accentColor.opacity(0.45)
+                            : Color.primary.opacity(0.12),
+                        lineWidth: 1
+                    )
+            )
+            .contentShape(Capsule(style: .continuous))
+    }
 }
 
 // MARK: - 円形アイコンボタン
