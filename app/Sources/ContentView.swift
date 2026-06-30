@@ -1,57 +1,58 @@
 import SwiftUI
+import UniformTypeIdentifiers
 import LaboLaboEngine
 
-/// Placeholder session model for the Phase-0 shell. Real sessions come from the
-/// GRDB store + GitEngine in a later increment.
-struct SidebarSession: Identifiable, Hashable {
-    let id = UUID()
-    let repo: String
-    let name: String
-    let branch: String
-    let workingDirectory: String
-}
-
 struct ContentView: View {
-    @State private var selection: SidebarSession.ID?
-
-    // Grouped by repo in the sidebar (Supacode-style repo/session tree).
-    // Demo sessions for the Phase-0 shell; real sessions come from GRDB + GitEngine.
-    private let sessions: [SidebarSession] = [
-        .init(repo: "labolabo", name: "git-engine", branch: "feature/git-engine", workingDirectory: NSHomeDirectory()),
-        .init(repo: "labolabo", name: "macos-app", branch: "feature/macos-app", workingDirectory: NSHomeDirectory()),
-    ]
-
-    private var repos: [String] {
-        var seen: [String] = []
-        for s in sessions where !seen.contains(s.repo) { seen.append(s.repo) }
-        return seen
-    }
+    @State private var store = SessionStore()
+    @State private var showImporter = false
 
     var body: some View {
         NavigationSplitView {
-            List(selection: $selection) {
-                ForEach(repos, id: \.self) { repo in
-                    Section(repo) {
-                        ForEach(sessions.filter { $0.repo == repo }) { session in
-                            SessionRow(session: session).tag(session.id)
-                        }
+            List(selection: Binding(get: { store.selection }, set: { store.selection = $0 })) {
+                if store.sessions.isEmpty {
+                    Text("リポジトリを開いてください")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(store.sessions) { session in
+                        SessionRow(session: session).tag(session.id)
                     }
                 }
             }
             .listStyle(.sidebar)
             .navigationTitle("LaboLabo")
+            .toolbar {
+                ToolbarItem {
+                    Button {
+                        showImporter = true
+                    } label: {
+                        Label("リポジトリを開く", systemImage: "plus")
+                    }
+                }
+            }
+            .fileImporter(isPresented: $showImporter, allowedContentTypes: [.folder]) { result in
+                if case let .success(url) = result {
+                    store.openRepository(at: url)
+                }
+            }
         } detail: {
-            if let id = selection, let session = sessions.first(where: { $0.id == id }) {
+            if let session = store.selected {
                 SessionDetailView(session: session)
+                    .id(session.id)
             } else {
-                ContentUnavailableView("セッションを選択してください", systemImage: "sidebar.left")
+                ContentUnavailableView {
+                    Label("セッションがありません", systemImage: "sidebar.left")
+                } description: {
+                    Text("ツールバーの ＋ から git リポジトリ（worktree）を開きます")
+                } actions: {
+                    Button("リポジトリを開く") { showImporter = true }
+                }
             }
         }
     }
 }
 
 struct SessionRow: View {
-    let session: SidebarSession
+    let session: RepoSession
 
     var body: some View {
         HStack(spacing: 8) {
@@ -60,7 +61,7 @@ struct SessionRow: View {
                 .frame(width: 8, height: 8)
             VStack(alignment: .leading, spacing: 1) {
                 Text(session.name)
-                Text(session.branch)
+                Text(session.branch ?? "—")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -70,37 +71,44 @@ struct SessionRow: View {
 }
 
 struct SessionDetailView: View {
-    let session: SidebarSession
+    let session: RepoSession
 
     var body: some View {
         VStack(spacing: 0) {
             SessionHeader(session: session)
             Divider()
             HSplitView {
-                TerminalAreaView(workingDirectory: session.workingDirectory)
+                TerminalAreaView(workingDirectory: session.worktreePath.path)
                     .frame(minWidth: 360)
-                WorkPaneView()
-                    .frame(minWidth: 320)
+                WorkPaneView(worktree: session.worktreePath)
+                    .frame(minWidth: 340)
             }
         }
     }
 }
 
 struct SessionHeader: View {
-    let session: SidebarSession
+    let session: RepoSession
 
     var body: some View {
         HStack(spacing: 10) {
             Text(session.name).font(.headline)
-            Label(session.branch, systemImage: "arrow.triangle.branch")
+            Label(session.branch ?? "—", systemImage: "arrow.triangle.branch")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
             Spacer()
+            Text(session.worktreePath.path)
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+                .lineLimit(1)
+                .truncationMode(.head)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
     }
 }
+
+// MARK: - Terminal area (multiple terminals as tabs)
 
 struct TerminalTab: Identifiable {
     let id = UUID()
@@ -108,9 +116,9 @@ struct TerminalTab: Identifiable {
     let workingDirectory: String
 }
 
-/// The multi-terminal area: one or more libghostty terminals as tabs. Panes are
-/// kept mounted (opacity-hidden, not removed) so background surfaces stay alive.
-/// Split panes are added in a later increment (#10).
+/// One or more libghostty terminals as tabs. Panes are kept mounted
+/// (opacity-hidden, not removed) so background surfaces stay alive. Split panes
+/// arrive in a later increment (#10).
 struct TerminalAreaView: View {
     let workingDirectory: String
 
@@ -166,25 +174,4 @@ struct TerminalAreaView: View {
         }
         .padding(6)
     }
-}
-
-struct WorkPaneView: View {
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Text("Changes")
-                .font(.headline)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-            Divider()
-            List {
-                Text("変更ファイル一覧 ＋ Diff ⇄ 全文切替（GitEngine 連携を次の増分で）")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-            }
-        }
-    }
-}
-
-#Preview {
-    ContentView()
 }
