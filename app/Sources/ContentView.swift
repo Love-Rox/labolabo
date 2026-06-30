@@ -38,6 +38,7 @@ struct ContentView: View {
                 }
                 .listStyle(.sidebar)
             }
+            .ignoresSafeArea(.container, edges: .top)
             .fileImporter(isPresented: $showImporter, allowedContentTypes: [.folder]) { result in
                 if case let .success(url) = result {
                     store.openRepository(at: url)
@@ -57,8 +58,6 @@ struct ContentView: View {
                 }
             }
         }
-        // タイトルバーを隠した分の上部セーフエリアを無視して、自前バーを最上部まで詰める。
-        .ignoresSafeArea(.container, edges: .top)
     }
 
     /// サイドバー上部のヘッダー（OS タイトルバーの代わり）。信号機を避ける左インセット付き。
@@ -131,6 +130,7 @@ struct SessionDetailView: View {
                 revision: tiling.revision
             )
         }
+        .ignoresSafeArea(.container, edges: .top)
         .navigationTitle(session.name)
         .onAppear { work.start() }
         .onDisappear { work.stop() }
