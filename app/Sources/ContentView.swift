@@ -57,6 +57,8 @@ struct ContentView: View {
                 }
             }
         }
+        // タイトルバーを隠した分の上部セーフエリアを無視して、自前バーを最上部まで詰める。
+        .ignoresSafeArea(.container, edges: .top)
     }
 
     /// サイドバー上部のヘッダー（OS タイトルバーの代わり）。信号機を避ける左インセット付き。
