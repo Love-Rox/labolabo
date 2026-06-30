@@ -1,6 +1,7 @@
 import SwiftUI
 import UniformTypeIdentifiers
 import LaboLaboEngine
+import GhosttyTerminal
 
 struct ContentView: View {
     @State private var store = SessionStore()
@@ -80,45 +81,35 @@ struct SessionDetailView: View {
     let session: RepoSession
     let onClose: () -> Void
 
+    @State private var work: WorkPaneModel
+    @State private var tiling: PaneTilingModel
+    private let configSource: TerminalController.ConfigSource
+
+    init(session: RepoSession, onClose: @escaping () -> Void) {
+        self.session = session
+        self.onClose = onClose
+        _work = State(initialValue: WorkPaneModel(worktree: session.worktreePath))
+        _tiling = State(initialValue: PaneTilingModel.defaultLayout())
+        configSource = GhosttyConfig.userConfigSource()
+    }
+
     var body: some View {
         VStack(spacing: 0) {
-            SessionHeader(session: session, onClose: onClose)
+            SessionStatusBar(session: session, status: work.status, onClose: onClose)
             Divider()
-            HSplitView {
-                TerminalAreaView(workingDirectory: session.worktreePath.path)
-                    .frame(minWidth: 320, idealWidth: 520)
-                WorkPaneView(worktree: session.worktreePath)
-                    .frame(minWidth: 420, idealWidth: 680)
-            }
+            PaneToolbar(model: tiling)
+            Divider()
+            PaneTilingView(
+                model: tiling,
+                context: PaneContext(
+                    workingDirectory: session.worktreePath.path,
+                    work: work,
+                    configSource: configSource
+                ),
+                revision: tiling.revision
+            )
         }
-    }
-}
-
-struct SessionHeader: View {
-    let session: RepoSession
-    let onClose: () -> Void
-
-    var body: some View {
-        HStack(spacing: 10) {
-            Text(session.name).font(.headline)
-            Label(session.branch ?? "—", systemImage: "arrow.triangle.branch")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-            Spacer()
-            Text(session.worktreePath.path)
-                .font(.caption)
-                .foregroundStyle(.tertiary)
-                .lineLimit(1)
-                .truncationMode(.head)
-            Button(role: .destructive) {
-                onClose()
-            } label: {
-                Image(systemName: "xmark.circle.fill")
-            }
-            .buttonStyle(.borderless)
-            .help("セッションを閉じる")
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
+        .onAppear { work.start() }
+        .onDisappear { work.stop() }
     }
 }

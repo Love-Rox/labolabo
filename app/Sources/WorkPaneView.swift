@@ -1,27 +1,29 @@
 import SwiftUI
 import LaboLaboEngine
 
-/// Right-hand pane: branch/status bar + changed-files list + per-file Diff/Whole view.
-struct WorkPaneView: View {
-    @State private var model: WorkPaneModel
-
-    init(worktree: URL) {
-        _model = State(initialValue: WorkPaneModel(worktree: worktree))
-    }
+/// "git 部分": branch/status bar + changed-files list. Lives as its own tile so it
+/// can be moved/split independently of the diff. Shares one `WorkPaneModel` with
+/// `FileDetailPane` (selecting a file here drives the diff there). The model's
+/// FileWatcher lifecycle is owned by the session, not this view.
+struct ChangedFilesPane: View {
+    let model: WorkPaneModel
 
     var body: some View {
         VStack(spacing: 0) {
             BranchStatusBar(status: model.status)
             Divider()
-            VSplitView {
-                ChangedFilesList(model: model)
-                    .frame(minHeight: 120)
-                FileDetailView(model: model)
-                    .frame(minHeight: 180)
-            }
+            ChangedFilesList(model: model)
         }
-        .onAppear { model.start() }
-        .onDisappear { model.stop() }
+    }
+}
+
+/// "diff 部分": the selected file's Diff ⇄ Whole-file view. Shares the same
+/// `WorkPaneModel` as `ChangedFilesPane`.
+struct FileDetailPane: View {
+    let model: WorkPaneModel
+
+    var body: some View {
+        FileDetailView(model: model)
     }
 }
 
