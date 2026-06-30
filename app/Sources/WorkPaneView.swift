@@ -27,6 +27,73 @@ struct FileDetailPane: View {
     }
 }
 
+/// Commit-history graph (git log --graph) for the worktree. Lives as its own tile.
+struct CommitGraphPane: View {
+    let model: WorkPaneModel
+
+    var body: some View {
+        if model.commits.isEmpty {
+            ContentUnavailableView("コミットがありません", systemImage: "clock.arrow.circlepath")
+        } else {
+            ScrollView(.vertical) {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(model.commits) { line in
+                        CommitGraphRow(line: line)
+                    }
+                }
+                .padding(.vertical, 4)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
+}
+
+struct CommitGraphRow: View {
+    let line: CommitGraphLine
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text(line.graph.isEmpty ? " " : line.graph)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .fixedSize()
+            if let commit = line.commit {
+                Text(commit.hash)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(Color.accentColor)
+                if !commit.refs.isEmpty {
+                    Text(commit.refs)
+                        .font(.system(size: 10))
+                        .lineLimit(1)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(Capsule().fill(Color.orange.opacity(0.18)))
+                        .foregroundStyle(.orange)
+                }
+                Text(commit.subject)
+                    .font(.system(size: 11))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Spacer(minLength: 8)
+                Text(commit.author)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Text(commit.relativeDate)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .fixedSize()
+            } else {
+                Spacer(minLength: 0)
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 1)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
 struct BranchStatusBar: View {
     let status: GitStatus?
 

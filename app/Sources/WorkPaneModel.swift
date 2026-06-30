@@ -37,6 +37,7 @@ final class WorkPaneModel {
     var viewMode: FileViewMode = .diff
     var diff: FileDiff?
     var wholeText: String?
+    var commits: [CommitGraphLine] = []
     var loadError: String?
 
     private let git = GitEngine()
@@ -97,6 +98,7 @@ final class WorkPaneModel {
             if let selectedID, !items.contains(where: { $0.id == selectedID }) {
                 self.selectedID = nil
             }
+            commits = (try? await git.commitGraph(worktree: worktree, limit: 300)) ?? []
             loadError = nil
             await loadSelection()
         } catch {

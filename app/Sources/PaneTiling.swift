@@ -15,6 +15,7 @@ enum PaneKind: String {
     case terminal
     case files
     case diff
+    case commits
 }
 
 @MainActor
@@ -295,6 +296,8 @@ final class TilingCoordinator: NSObject {
             view = NSHostingView(rootView: ChangedFilesPane(model: context.work))
         case .diff:
             view = NSHostingView(rootView: FileDetailPane(model: context.work))
+        case .commits:
+            view = NSHostingView(rootView: CommitGraphPane(model: context.work))
         }
         contentCache[pane.id] = view
         return view
@@ -394,12 +397,20 @@ final class RatioSplitView: NSSplitView, NSSplitViewDelegate {
         proposedMax - 90
     }
 
-    func splitViewDidResizeSubviews(_: Notification) {
-        guard arrangedSubviews.count == 2 else { return }
-        let dim = isVertical ? bounds.width : bounds.height
-        guard dim > 0 else { return }
-        let size = isVertical ? arrangedSubviews[0].frame.width : arrangedSubviews[0].frame.height
-        node?.ratio = max(0.05, min(0.95, size / dim))
+    /// Persist the ratio only when the *user* drags a divider. `constrainSplitPosition`
+    /// is called during interactive tracking (and by our own `setPosition`, which we
+    /// ignore via `isApplyingRatio`). We deliberately do NOT update the ratio from
+    /// `splitViewDidResizeSubviews`, because that fires for every transient layout
+    /// pass during a rebuild and would clobber the stored ratio with a momentary
+    /// equal-split value — the cause of panes resizing oddly after swap/move.
+    func splitView(_ splitView: NSSplitView, constrainSplitPosition proposedPosition: CGFloat, ofDividerAt _: Int) -> CGFloat {
+        if !isApplyingRatio {
+            let dim = isVertical ? bounds.width : bounds.height
+            if dim > 0 {
+                node?.ratio = max(0.05, min(0.95, proposedPosition / dim))
+            }
+        }
+        return proposedPosition
     }
 }
 
@@ -549,6 +560,7 @@ struct PaneHeader: View {
         case .terminal: return "terminal"
         case .files: return "list.bullet.rectangle"
         case .diff: return "doc.text"
+        case .commits: return "clock.arrow.circlepath"
         }
     }
 }
@@ -570,6 +582,10 @@ struct PaneToolbar: View {
                 Label("Diff", systemImage: "doc.text")
             }
             .disabled(model.hasPane(kind: .diff))
+            Button { model.addPaneIfAbsent(kind: .commits, title: "履歴") } label: {
+                Label("履歴", systemImage: "clock.arrow.circlepath")
+            }
+            .disabled(model.hasPane(kind: .commits))
             Spacer()
             Text("ヘッダーをドラッグ→他ペインの縁で分割 / 中央で入れ替え")
                 .font(.caption2)
