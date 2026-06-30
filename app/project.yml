@@ -24,6 +24,8 @@ targets:
     dependencies:
       - package: LaboLaboCore
         product: LaboLaboEngine
+      - package: LaboLaboCore
+        product: LaboLaboStore
       - package: LibghosttySPM
         product: GhosttyTerminal
     configFiles:
