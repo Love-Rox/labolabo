@@ -142,26 +142,34 @@ struct FileDetailView: View {
     }
 }
 
+private enum DiffGutter {
+    static let numberWidth: CGFloat = 44
+    static let signWidth: CGFloat = 16
+}
+
 struct DiffView: View {
     let diff: FileDiff?
 
     var body: some View {
         if let diff, !diff.hunks.isEmpty {
-            ScrollView([.vertical, .horizontal]) {
-                VStack(alignment: .leading, spacing: 0) {
-                    ForEach(Array(diff.hunks.enumerated()), id: \.offset) { _, hunk in
-                        Text(hunk.header)
-                            .font(.caption.monospaced())
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.vertical, 2)
-                            .background(Color.gray.opacity(0.12))
-                        ForEach(Array(hunk.lines.enumerated()), id: \.offset) { _, line in
-                            DiffLineRow(line: line)
+            GeometryReader { geo in
+                ScrollView([.vertical, .horizontal]) {
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(Array(diff.hunks.enumerated()), id: \.offset) { _, hunk in
+                            Text(hunk.header)
+                                .font(.caption.monospaced())
+                                .foregroundStyle(.secondary)
+                                .padding(.vertical, 2)
+                                .padding(.horizontal, 8)
+                                .frame(minWidth: geo.size.width, alignment: .leading)
+                                .background(Color.gray.opacity(0.12))
+                            ForEach(Array(hunk.lines.enumerated()), id: \.offset) { _, line in
+                                DiffLineRow(line: line, minWidth: geo.size.width)
+                            }
                         }
                     }
+                    .padding(.vertical, 4)
                 }
-                .padding(.vertical, 4)
             }
         } else if diff?.isBinary == true {
             ContentUnavailableView("バイナリファイル", systemImage: "doc")
@@ -173,6 +181,7 @@ struct DiffView: View {
 
 struct DiffLineRow: View {
     let line: DiffLine
+    let minWidth: CGFloat
 
     private var background: Color {
         switch line.kind {
@@ -191,16 +200,27 @@ struct DiffLineRow: View {
         }
     }
 
+    private func gutter(_ number: Int?) -> String { number.map(String.init) ?? "" }
+
     var body: some View {
-        HStack(alignment: .top, spacing: 8) {
-            Text(sign).foregroundStyle(.secondary).frame(width: 10, alignment: .trailing)
+        HStack(spacing: 0) {
+            Text(gutter(line.oldLineNumber))
+                .frame(width: DiffGutter.numberWidth, alignment: .trailing)
+                .foregroundStyle(.secondary)
+            Text(gutter(line.newLineNumber))
+                .frame(width: DiffGutter.numberWidth, alignment: .trailing)
+                .foregroundStyle(.secondary)
+            Text(sign)
+                .frame(width: DiffGutter.signWidth, alignment: .center)
+                .foregroundStyle(.secondary)
             Text(line.text.isEmpty ? " " : line.text)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: true, vertical: false)
                 .textSelection(.enabled)
+                .padding(.leading, 4)
         }
         .font(.caption.monospaced())
-        .padding(.horizontal, 8)
         .padding(.vertical, 1)
+        .frame(minWidth: minWidth, alignment: .leading)
         .background(background)
     }
 }
@@ -208,14 +228,33 @@ struct DiffLineRow: View {
 struct WholeFileView: View {
     let text: String?
 
+    private var lines: [String] {
+        guard let text else { return [] }
+        if text.isEmpty { return ["(空ファイル)"] }
+        return text.components(separatedBy: "\n")
+    }
+
     var body: some View {
-        if let text {
-            ScrollView([.vertical, .horizontal]) {
-                Text(text.isEmpty ? "(空ファイル)" : text)
-                    .font(.caption.monospaced())
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(8)
-                    .textSelection(.enabled)
+        if text != nil {
+            GeometryReader { geo in
+                ScrollView([.vertical, .horizontal]) {
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(Array(lines.enumerated()), id: \.offset) { index, line in
+                            HStack(spacing: 0) {
+                                Text("\(index + 1)")
+                                    .frame(width: DiffGutter.numberWidth, alignment: .trailing)
+                                    .foregroundStyle(.secondary)
+                                Text(line.isEmpty ? " " : line)
+                                    .fixedSize(horizontal: true, vertical: false)
+                                    .textSelection(.enabled)
+                                    .padding(.leading, 8)
+                            }
+                            .font(.caption.monospaced())
+                            .frame(minWidth: geo.size.width, alignment: .leading)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
             }
         } else {
             ContentUnavailableView("表示できません", systemImage: "doc")
