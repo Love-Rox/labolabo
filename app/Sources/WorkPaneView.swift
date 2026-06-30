@@ -1,0 +1,224 @@
+import SwiftUI
+import LaboLaboEngine
+
+/// Right-hand pane: branch/status bar + changed-files list + per-file Diff/Whole view.
+struct WorkPaneView: View {
+    @State private var model: WorkPaneModel
+
+    init(worktree: URL) {
+        _model = State(initialValue: WorkPaneModel(worktree: worktree))
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            BranchStatusBar(status: model.status)
+            Divider()
+            VSplitView {
+                ChangedFilesList(model: model)
+                    .frame(minHeight: 120)
+                FileDetailView(model: model)
+                    .frame(minHeight: 180)
+            }
+        }
+        .onAppear { model.start() }
+        .onDisappear { model.stop() }
+    }
+}
+
+struct BranchStatusBar: View {
+    let status: GitStatus?
+
+    var body: some View {
+        HStack(spacing: 12) {
+            if let status {
+                Label(status.branch ?? "—", systemImage: "arrow.triangle.branch")
+                if status.ahead > 0 { Label("\(status.ahead)", systemImage: "arrow.up") }
+                if status.behind > 0 { Label("\(status.behind)", systemImage: "arrow.down") }
+                Spacer()
+                Text(status.isDirty ? "変更あり" : "クリーン")
+                    .foregroundStyle(status.isDirty ? Color.orange : Color.secondary)
+            } else {
+                Text("読み込み中…").foregroundStyle(.secondary)
+                Spacer()
+            }
+        }
+        .font(.caption)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+    }
+}
+
+struct ChangedFilesList: View {
+    let model: WorkPaneModel
+
+    private var selectionBinding: Binding<ChangedFileItem.ID?> {
+        Binding(
+            get: { model.selectedID },
+            set: { newID in
+                if let newID, let item = model.items.first(where: { $0.id == newID }) {
+                    model.select(item)
+                }
+            }
+        )
+    }
+
+    var body: some View {
+        List(selection: selectionBinding) {
+            if model.items.isEmpty {
+                Text("変更はありません").foregroundStyle(.secondary)
+            }
+            ForEach(ChangedFileItem.Section.allCases, id: \.self) { section in
+                let items = model.items.filter { $0.section == section }
+                if !items.isEmpty {
+                    Section("\(section.rawValue) (\(items.count))") {
+                        ForEach(items) { item in
+                            ChangedFileRow(item: item).tag(item.id)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+struct ChangedFileRow: View {
+    let item: ChangedFileItem
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text(item.fileName).lineLimit(1).truncationMode(.middle)
+            Spacer()
+            if let adds = item.adds, adds > 0 {
+                Text("+\(adds)").foregroundStyle(.green).font(.caption.monospaced())
+            }
+            if let dels = item.dels, dels > 0 {
+                Text("-\(dels)").foregroundStyle(.red).font(.caption.monospaced())
+            }
+        }
+        .help(item.path)
+    }
+}
+
+struct FileDetailView: View {
+    let model: WorkPaneModel
+
+    private var viewModeBinding: Binding<FileViewMode> {
+        Binding(
+            get: { model.viewMode },
+            set: { model.viewMode = $0 }
+        )
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                if let item = model.selectedItem {
+                    Text(item.path)
+                        .font(.caption).foregroundStyle(.secondary)
+                        .lineLimit(1).truncationMode(.middle)
+                } else {
+                    Text("ファイルを選択").font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Picker("", selection: viewModeBinding) {
+                    ForEach(FileViewMode.allCases) { Text($0.rawValue).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .fixedSize()
+                .disabled(model.selectedItem == nil)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            Divider()
+
+            if model.selectedItem == nil {
+                ContentUnavailableView("変更ファイルを選択", systemImage: "doc.text.magnifyingglass")
+            } else if model.viewMode == .diff {
+                DiffView(diff: model.diff)
+            } else {
+                WholeFileView(text: model.wholeText)
+            }
+        }
+    }
+}
+
+struct DiffView: View {
+    let diff: FileDiff?
+
+    var body: some View {
+        if let diff, !diff.hunks.isEmpty {
+            ScrollView([.vertical, .horizontal]) {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(Array(diff.hunks.enumerated()), id: \.offset) { _, hunk in
+                        Text(hunk.header)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.vertical, 2)
+                            .background(Color.gray.opacity(0.12))
+                        ForEach(Array(hunk.lines.enumerated()), id: \.offset) { _, line in
+                            DiffLineRow(line: line)
+                        }
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+        } else if diff?.isBinary == true {
+            ContentUnavailableView("バイナリファイル", systemImage: "doc")
+        } else {
+            ContentUnavailableView("差分なし", systemImage: "equal")
+        }
+    }
+}
+
+struct DiffLineRow: View {
+    let line: DiffLine
+
+    private var background: Color {
+        switch line.kind {
+        case .addition: return .green.opacity(0.15)
+        case .deletion: return .red.opacity(0.15)
+        default: return .clear
+        }
+    }
+
+    private var sign: String {
+        switch line.kind {
+        case .addition: return "+"
+        case .deletion: return "-"
+        case .noNewline: return "\\"
+        case .context: return " "
+        }
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Text(sign).foregroundStyle(.secondary).frame(width: 10, alignment: .trailing)
+            Text(line.text.isEmpty ? " " : line.text)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .textSelection(.enabled)
+        }
+        .font(.caption.monospaced())
+        .padding(.horizontal, 8)
+        .padding(.vertical, 1)
+        .background(background)
+    }
+}
+
+struct WholeFileView: View {
+    let text: String?
+
+    var body: some View {
+        if let text {
+            ScrollView([.vertical, .horizontal]) {
+                Text(text.isEmpty ? "(空ファイル)" : text)
+                    .font(.caption.monospaced())
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(8)
+                    .textSelection(.enabled)
+            }
+        } else {
+            ContentUnavailableView("表示できません", systemImage: "doc")
+        }
+    }
+}
