@@ -12,9 +12,15 @@ struct SessionStatusPill: View {
     let status: GitStatus?
     let fallbackBranch: String?
     let changedCount: Int
+    var agentStatus: AgentStatus = .none
 
     var body: some View {
         HStack(spacing: 8) {
+            if agentStatus != .none {
+                agentSegment
+                Divider().frame(height: 12)
+            }
+
             Circle()
                 .fill(stateColor)
                 .frame(width: 8, height: 8)
@@ -50,6 +56,29 @@ struct SessionStatusPill: View {
     private var stateColor: Color {
         guard let status else { return .secondary }
         return status.isDirty ? .orange : .green
+    }
+
+    private var agentSegment: some View {
+        HStack(spacing: 4) {
+            Image(systemName: "sparkles")
+                .font(.caption2)
+                .foregroundStyle(agentColor)
+            Circle()
+                .fill(agentColor)
+                .frame(width: 7, height: 7)
+            Text(agentStatus.label)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(agentColor)
+        }
+    }
+
+    private var agentColor: Color {
+        switch agentStatus {
+        case .none, .ended: return .secondary
+        case .starting, .running: return .blue
+        case .waitingForInput: return .orange
+        case .idle: return .green
+        }
     }
 
     @ViewBuilder

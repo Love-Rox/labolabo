@@ -77,8 +77,17 @@ final class PaneTilingModel {
     var root: TileNode
     /// Bumped on every structural mutation so SwiftUI re-invokes updateNSView.
     private(set) var revision: Int = 0
+    /// AppKit 側コーディネータ（端末への text 送信に使う）。
+    weak var coordinator: TilingCoordinator?
 
     init(root: TileNode) { self.root = root }
+
+    /// 新しい端末ペインを作り、シェル起動後にコマンドを送る（Claude 起動などに使用）。
+    func launchInNewTerminal(title: String, command: String) {
+        let pane = PaneItem(kind: .terminal, title: title)
+        addPane(pane)
+        coordinator?.scheduleSend(paneID: pane.id, text: command)
+    }
 
     static func defaultLayout() -> PaneTilingModel {
         // Terminal on top; bottom row = commit graph | changed-files | diff (1:1:2).
@@ -210,7 +219,9 @@ struct PaneTilingView: NSViewRepresentable {
     let revision: Int
 
     func makeCoordinator() -> TilingCoordinator {
-        TilingCoordinator(model: model, context: context)
+        let coordinator = TilingCoordinator(model: model, context: context)
+        model.coordinator = coordinator
+        return coordinator
     }
 
     func makeNSView(context nsContext: Context) -> NSView {
@@ -333,6 +344,20 @@ final class TilingCoordinator: NSObject {
 
     func handleDrop(sourceID: UUID, targetID: UUID, edge: DropEdge) {
         model.move(sourceID, toEdgeOf: targetID, edge: edge)
+    }
+
+    /// 新規端末ペインのシェルが立ち上がった頃合いを見てテキスト（コマンド）を送る。
+    /// 生成直後は AppTerminalView が未生成のことがあるので数回リトライする。
+    func scheduleSend(paneID: UUID, text: String, attempt: Int = 0) {
+        let delay = attempt == 0 ? 1.0 : 0.6
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self else { return }
+            if let view = contentCache[paneID] as? AppTerminalView {
+                view.sendText(text)
+            } else if attempt < 6 {
+                scheduleSend(paneID: paneID, text: text, attempt: attempt + 1)
+            }
+        }
     }
 }
 

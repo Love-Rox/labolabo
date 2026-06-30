@@ -106,6 +106,7 @@ struct SessionDetailView: View {
 
     @State private var work: WorkPaneModel
     @State private var tiling: PaneTilingModel
+    @State private var agent: AgentSessionModel
     private let configSource: TerminalController.ConfigSource
 
     init(session: RepoSession, onClose: @escaping () -> Void) {
@@ -113,6 +114,7 @@ struct SessionDetailView: View {
         self.onClose = onClose
         _work = State(initialValue: WorkPaneModel(worktree: session.worktreePath))
         _tiling = State(initialValue: PaneTilingModel.defaultLayout())
+        _agent = State(initialValue: AgentSessionModel(sessionID: session.id))
         configSource = GhosttyConfig.userConfigSource()
     }
 
@@ -132,8 +134,8 @@ struct SessionDetailView: View {
         }
         .ignoresSafeArea(.container, edges: .top)
         .navigationTitle(session.name)
-        .onAppear { work.start() }
-        .onDisappear { work.stop() }
+        .onAppear { work.start(); agent.start() }
+        .onDisappear { work.stop(); agent.stop() }
     }
 
     /// 操作系を集約した自前の 1 本バー。macOS のツールバーが要素をまとめて 1 枚の
@@ -149,10 +151,21 @@ struct SessionDetailView: View {
             SessionStatusPill(
                 status: work.status,
                 fallbackBranch: session.branch,
-                changedCount: work.items.count
+                changedCount: work.items.count,
+                agentStatus: agent.status
             )
 
             Spacer(minLength: 12)
+
+            Button {
+                if let command = agent.launchCommand() {
+                    tiling.launchInNewTerminal(title: "Claude", command: command)
+                }
+            } label: {
+                Image(systemName: "sparkles")
+            }
+            .buttonStyle(CircleIconButtonStyle(tint: .purple))
+            .help("Claude を起動（状態検出 hooks 付き）")
 
             Button {
                 tiling.addPane(PaneItem(kind: .terminal, title: "端末"))
