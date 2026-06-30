@@ -122,54 +122,52 @@ struct SessionDetailView: View {
                 changedCount: work.items.count
             )
         }
-        ToolbarItem(placement: .primaryAction) {
-            HStack(spacing: 8) {
-                Button {
-                    tiling.addPane(PaneItem(kind: .terminal, title: "端末"))
-                } label: {
-                    Image(systemName: "plus.rectangle")
-                }
-                .buttonStyle(CircleIconButtonStyle())
-                .help("端末を追加")
-
-                Button {
-                    tiling.addPaneIfAbsent(kind: .files, title: "変更ファイル")
-                } label: {
-                    Image(systemName: "list.bullet.rectangle")
-                }
-                .buttonStyle(CircleIconButtonStyle())
-                .disabled(tiling.hasPane(kind: .files))
-                .help("変更ファイル一覧を追加")
-
-                Button {
-                    tiling.addPaneIfAbsent(kind: .diff, title: "Diff")
-                } label: {
-                    Image(systemName: "doc.text")
-                }
-                .buttonStyle(CircleIconButtonStyle())
-                .disabled(tiling.hasPane(kind: .diff))
-                .help("Diff を追加")
-
-                Button {
-                    tiling.addPaneIfAbsent(kind: .commits, title: "履歴")
-                } label: {
-                    Image(systemName: "point.3.connected.trianglepath.dotted")
-                }
-                .buttonStyle(CircleIconButtonStyle())
-                .disabled(tiling.hasPane(kind: .commits))
-                .help("コミット履歴グラフを追加")
-
-                IDEOpenMenu(worktree: session.worktreePath)
-                SessionClock()
-
-                Button {
-                    onClose()
-                } label: {
-                    Image(systemName: "xmark")
-                }
-                .buttonStyle(CircleIconButtonStyle(tint: .red))
-                .help("セッションを閉じる")
+        ToolbarItemGroup(placement: .primaryAction) {
+            Button {
+                tiling.addPane(PaneItem(kind: .terminal, title: "端末"))
+            } label: {
+                Image(systemName: "plus.rectangle")
             }
+            .buttonStyle(CircleIconButtonStyle())
+            .help("端末を追加")
+
+            Button {
+                tiling.addPaneIfAbsent(kind: .files, title: "変更ファイル")
+            } label: {
+                Image(systemName: "list.bullet.rectangle")
+            }
+            .buttonStyle(CircleIconButtonStyle())
+            .disabled(tiling.hasPane(kind: .files))
+            .help("変更ファイル一覧を追加")
+
+            Button {
+                tiling.addPaneIfAbsent(kind: .diff, title: "Diff")
+            } label: {
+                Image(systemName: "doc.text")
+            }
+            .buttonStyle(CircleIconButtonStyle())
+            .disabled(tiling.hasPane(kind: .diff))
+            .help("Diff を追加")
+
+            Button {
+                tiling.addPaneIfAbsent(kind: .commits, title: "履歴")
+            } label: {
+                Image(systemName: "point.3.connected.trianglepath.dotted")
+            }
+            .buttonStyle(CircleIconButtonStyle())
+            .disabled(tiling.hasPane(kind: .commits))
+            .help("コミット履歴グラフを追加")
+
+            IDEOpenMenu(worktree: session.worktreePath)
+            SessionClock()
+
+            Button {
+                onClose()
+            } label: {
+                Image(systemName: "xmark")
+            }
+            .buttonStyle(CircleIconButtonStyle(tint: .red))
+            .help("セッションを閉じる")
         }
     }
 }
