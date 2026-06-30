@@ -6,35 +6,40 @@ import LaboLaboEngine
 // 旧 SessionStatusBar（独立した横帯）はツールバーへ集約したため廃止し、
 // ブランチ/状態の表示・IDE で開く・時計を個別の小さな View として提供する。
 
-/// 「今のステータス」: ブランチ + ahead/behind + dirty/clean を 1 行で。
-struct GitStatusBadges: View {
+/// 中央のステータスピル（Supacode 風）。状態ドット + ブランチ + 変更数 + ahead/behind を
+/// 1 つのピルにまとめて具体的に表示する。
+struct SessionStatusPill: View {
     let status: GitStatus?
     let fallbackBranch: String?
+    let changedCount: Int
 
     var body: some View {
         HStack(spacing: 8) {
-            Label(branchLabel, systemImage: "arrow.triangle.branch")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
+            Circle()
+                .fill(stateColor)
+                .frame(width: 8, height: 8)
 
-            if let status {
-                if status.ahead > 0 {
-                    Label("\(status.ahead)", systemImage: "arrow.up")
-                        .labelStyle(.titleAndIcon)
-                        .foregroundStyle(.secondary)
-                }
-                if status.behind > 0 {
-                    Label("\(status.behind)", systemImage: "arrow.down")
-                        .labelStyle(.titleAndIcon)
-                        .foregroundStyle(.secondary)
-                }
-                dirtyChip(isDirty: status.isDirty)
+            HStack(spacing: 4) {
+                Image(systemName: "arrow.triangle.branch")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Text(branchLabel)
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(1)
+            }
+
+            if status != nil {
+                Divider().frame(height: 12)
+                changesLabel
+                aheadBehind
             } else {
-                Text("読み込み中…").foregroundStyle(.tertiary)
+                Text("読み込み中…")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
             }
         }
-        .font(.caption)
+        .pillFrame()
+        .fixedSize()
     }
 
     private var branchLabel: String {
@@ -42,13 +47,42 @@ struct GitStatusBadges: View {
         return status?.branch ?? fallbackBranch ?? "—"
     }
 
-    private func dirtyChip(isDirty: Bool) -> some View {
-        Text(isDirty ? "変更あり" : "クリーン")
-            .font(.caption.weight(.medium))
-            .padding(.horizontal, 8)
-            .padding(.vertical, 2)
-            .background(Capsule().fill((isDirty ? Color.orange : Color.secondary).opacity(0.18)))
-            .foregroundStyle(isDirty ? Color.orange : Color.secondary)
+    private var stateColor: Color {
+        guard let status else { return .secondary }
+        return status.isDirty ? .orange : .green
+    }
+
+    @ViewBuilder
+    private var changesLabel: some View {
+        if changedCount > 0 {
+            Label("\(changedCount) 変更", systemImage: "pencil")
+                .labelStyle(.titleAndIcon)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.orange)
+        } else {
+            Label("クリーン", systemImage: "checkmark.circle")
+                .labelStyle(.titleAndIcon)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.green)
+        }
+    }
+
+    @ViewBuilder
+    private var aheadBehind: some View {
+        if let status, status.ahead > 0 || status.behind > 0 {
+            HStack(spacing: 6) {
+                if status.ahead > 0 {
+                    Label("\(status.ahead)", systemImage: "arrow.up")
+                        .labelStyle(.titleAndIcon)
+                }
+                if status.behind > 0 {
+                    Label("\(status.behind)", systemImage: "arrow.down")
+                        .labelStyle(.titleAndIcon)
+                }
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
     }
 }
 
