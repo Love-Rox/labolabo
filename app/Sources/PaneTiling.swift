@@ -354,6 +354,11 @@ final class TilingCoordinator: NSObject {
             guard let self else { return }
             if let view = contentCache[paneID] as? AppTerminalView {
                 view.sendText(text)
+                // Enter(CR) は sendText だとテキスト扱いで実行されないため、Ghostty の
+                // binding action `text:\r`（生バイト送信）で送って行を実行させる。
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+                    _ = view.performBindingAction("text:\\r")
+                }
             } else if attempt < 6 {
                 scheduleSend(paneID: paneID, text: text, attempt: attempt + 1)
             }
