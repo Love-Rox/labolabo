@@ -311,19 +311,21 @@ final class TilingCoordinator: NSObject {
         )
     }
 
+    // NOTE: these only mutate the model. The rebuild is driven by SwiftUI via
+    // `revision` → updateNSView → reconcile(), which runs on the *next* runloop
+    // turn. Calling reconcile() synchronously here would tear down the very view
+    // currently handling the drag / button tap (self) and crash AppKit.
+
     private func split(_ paneID: UUID, _ orientation: NSUserInterfaceLayoutOrientation) {
         model.split(paneID: paneID, orientation: orientation, newPane: PaneItem(kind: .terminal, title: "端末"))
-        reconcile()
     }
 
     private func close(_ paneID: UUID) {
         model.close(paneID: paneID)
-        reconcile()
     }
 
     func handleDrop(sourceID: UUID, targetID: UUID, edge: DropEdge) {
         model.move(sourceID, toEdgeOf: targetID, edge: edge)
-        reconcile()
     }
 }
 
@@ -351,8 +353,8 @@ final class TerminalLeafDelegate: NSObject, TerminalSurfaceTitleDelegate, Termin
 
 extension TilingCoordinator {
     func handleProcessExit(paneID: UUID) {
+        // Defer past the libghostty close callback; reconcile via `revision`.
         model.close(paneID: paneID)
-        reconcile()
     }
 }
 
