@@ -38,7 +38,8 @@ struct SessionStatusPill: View {
                     .foregroundStyle(.tertiary)
             }
         }
-        .pillFrame()
+        // 自前のピルは付けない。macOS のツールバーが要素にピル状の背景を付けるため、
+        // ここで Capsule を重ねると二重になる。中身だけを置いてシステムのピルに載せる。
         .fixedSize()
     }
 
