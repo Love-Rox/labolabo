@@ -33,8 +33,16 @@ vendor/
 ## 開発
 
 ```sh
-swift test          # エンジン層の単体テスト
+swift test                          # エンジン層の単体テスト
+
+# macOS アプリ（XcodeGen で .xcodeproj を生成してから Xcode/xcodebuild）
+brew install xcodegen
+xcodegen generate --spec app/project.yml
+open app/LaboLabo.xcodeproj         # もしくは:
+xcodebuild -project app/LaboLabo.xcodeproj -scheme LaboLabo -destination 'platform=macOS' build
 ```
+
+`app/LaboLabo.xcodeproj` は `app/project.yml` から生成される成果物なので git 管理外。
 
 詳細な実装計画は別途プランを参照。
 
