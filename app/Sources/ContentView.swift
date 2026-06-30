@@ -94,22 +94,69 @@ struct SessionDetailView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            SessionStatusBar(session: session, status: work.status, onClose: onClose)
-            Divider()
-            PaneToolbar(model: tiling)
-            Divider()
-            PaneTilingView(
-                model: tiling,
-                context: PaneContext(
-                    workingDirectory: session.worktreePath.path,
-                    work: work,
-                    configSource: configSource
-                ),
-                revision: tiling.revision
-            )
-        }
+        PaneTilingView(
+            model: tiling,
+            context: PaneContext(
+                workingDirectory: session.worktreePath.path,
+                work: work,
+                configSource: configSource
+            ),
+            revision: tiling.revision
+        )
+        .navigationTitle(session.name)
+        .navigationSubtitle(session.worktreePath.path)
+        .toolbar { toolbarContent }
         .onAppear { work.start() }
         .onDisappear { work.stop() }
+    }
+
+    /// すべての操作系を "LaboLabo" タイトルのあるウインドウ上部ツールバーに集約する。
+    @ToolbarContentBuilder
+    private var toolbarContent: some ToolbarContent {
+        ToolbarItem(placement: .principal) {
+            GitStatusBadges(status: work.status, fallbackBranch: session.branch)
+        }
+        ToolbarItemGroup(placement: .primaryAction) {
+            Button {
+                tiling.addPane(PaneItem(kind: .terminal, title: "端末"))
+            } label: {
+                Label("端末", systemImage: "plus.rectangle")
+            }
+            .help("端末を追加")
+
+            Button {
+                tiling.addPaneIfAbsent(kind: .files, title: "変更ファイル")
+            } label: {
+                Label("ファイル", systemImage: "list.bullet.rectangle")
+            }
+            .disabled(tiling.hasPane(kind: .files))
+            .help("変更ファイル一覧を追加")
+
+            Button {
+                tiling.addPaneIfAbsent(kind: .diff, title: "Diff")
+            } label: {
+                Label("Diff", systemImage: "doc.text")
+            }
+            .disabled(tiling.hasPane(kind: .diff))
+            .help("Diff を追加")
+
+            Button {
+                tiling.addPaneIfAbsent(kind: .commits, title: "履歴")
+            } label: {
+                Label("履歴", systemImage: "clock.arrow.circlepath")
+            }
+            .disabled(tiling.hasPane(kind: .commits))
+            .help("コミット履歴グラフを追加")
+
+            IDEOpenMenu(worktree: session.worktreePath)
+            SessionClock()
+
+            Button(role: .destructive) {
+                onClose()
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+            }
+            .help("セッションを閉じる")
+        }
     }
 }

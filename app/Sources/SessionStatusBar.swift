@@ -2,75 +2,44 @@ import SwiftUI
 import AppKit
 import LaboLaboEngine
 
-/// セッション 1 つ分のヘッダー（Supacode 風ツールバー）。
-///
-/// 左からセッション名・ブランチ・ライブな Git ステータス、右側へ「IDE で開く」メニュー、
-/// 現在時刻の時計、そして閉じるボタンを並べる。`status` は `WorkPane` 側で監視している
-/// ライブな `GitStatus`（FSEvents 更新）を流し込む想定で、`nil` の間は「読み込み中…」を出す。
-struct SessionStatusBar: View {
-    let session: RepoSession
+// ウインドウ上部のツールバー（"LaboLabo" タイトルのあるバー）に並べる部品群。
+// 旧 SessionStatusBar（独立した横帯）はツールバーへ集約したため廃止し、
+// ブランチ/状態の表示・IDE で開く・時計を個別の小さな View として提供する。
+
+/// 「今のステータス」: ブランチ + ahead/behind + dirty/clean を 1 行で。
+struct GitStatusBadges: View {
     let status: GitStatus?
-    var onClose: () -> Void
+    let fallbackBranch: String?
 
     var body: some View {
-        HStack(spacing: 12) {
-            sessionInfo
-            Spacer()
-            openInIDEMenu
-            clock
-            closeButton
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-    }
-
-    // MARK: - 左: セッション名 + ブランチ + ステータス
-
-    private var sessionInfo: some View {
-        HStack(spacing: 10) {
-            Text(session.name)
-                .font(.headline)
-                .lineLimit(1)
-
+        HStack(spacing: 8) {
             Label(branchLabel, systemImage: "arrow.triangle.branch")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
 
-            statusArea
-        }
-    }
-
-    /// detached の場合はブランチ名の代わりに「detached」を出す。
-    private var branchLabel: String {
-        if let status, status.isDetached { return "detached" }
-        return status?.branch ?? session.branch ?? "—"
-    }
-
-    /// 「今のステータス」: ahead/behind のミニラベルと dirty/clean チップ。
-    @ViewBuilder
-    private var statusArea: some View {
-        if let status {
-            HStack(spacing: 8) {
+            if let status {
                 if status.ahead > 0 {
                     Label("\(status.ahead)", systemImage: "arrow.up")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
                         .labelStyle(.titleAndIcon)
+                        .foregroundStyle(.secondary)
                 }
                 if status.behind > 0 {
                     Label("\(status.behind)", systemImage: "arrow.down")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
                         .labelStyle(.titleAndIcon)
+                        .foregroundStyle(.secondary)
                 }
                 dirtyChip(isDirty: status.isDirty)
+            } else {
+                Text("読み込み中…").foregroundStyle(.tertiary)
             }
-        } else {
-            Text("読み込み中…")
-                .font(.caption)
-                .foregroundStyle(.tertiary)
         }
+        .font(.caption)
+    }
+
+    private var branchLabel: String {
+        if let status, status.isDetached { return "detached" }
+        return status?.branch ?? fallbackBranch ?? "—"
     }
 
     private func dirtyChip(isDirty: Bool) -> some View {
@@ -78,32 +47,25 @@ struct SessionStatusBar: View {
             .font(.caption.weight(.medium))
             .padding(.horizontal, 8)
             .padding(.vertical, 2)
-            .background(
-                Capsule().fill(
-                    (isDirty ? Color.orange : Color.secondary).opacity(0.18)
-                )
-            )
+            .background(Capsule().fill((isDirty ? Color.orange : Color.secondary).opacity(0.18)))
             .foregroundStyle(isDirty ? Color.orange : Color.secondary)
     }
+}
 
-    // MARK: - 中央右: 「IDE で開く」メニュー
+/// 「IDE で開く」メニュー（ピル）。インストール済みエディタのみ表示。
+struct IDEOpenMenu: View {
+    let worktree: URL
 
-    private var openInIDEMenu: some View {
+    var body: some View {
         Menu {
             ForEach(installedEditors) { editor in
-                Button {
-                    open(in: editor)
-                } label: {
+                Button { open(in: editor) } label: {
                     Label(editor.name, systemImage: "chevron.left.forwardslash.chevron.right")
                 }
             }
-
-            if !installedEditors.isEmpty {
-                Divider()
-            }
-
+            if !installedEditors.isEmpty { Divider() }
             Button {
-                NSWorkspace.shared.activateFileViewerSelecting([session.worktreePath])
+                NSWorkspace.shared.activateFileViewerSelecting([worktree])
             } label: {
                 Label("Finder で表示", systemImage: "folder")
             }
@@ -124,17 +86,15 @@ struct SessionStatusBar: View {
         .help("worktree を任意の IDE / Finder で開く")
     }
 
-    /// worktree フォルダを指定エディタで開く。
     private func open(in editor: Editor) {
         NSWorkspace.shared.open(
-            [session.worktreePath],
+            [worktree],
             withApplicationAt: editor.appURL,
             configuration: NSWorkspace.OpenConfiguration(),
             completionHandler: nil
         )
     }
 
-    /// インストール済みの主要エディタだけを `body` から計算で組み立てる。
     private var installedEditors: [Editor] {
         Editor.candidates.compactMap { candidate in
             guard let appURL = NSWorkspace.shared
@@ -142,14 +102,14 @@ struct SessionStatusBar: View {
             return Editor(name: candidate.name, bundleID: candidate.bundleID, appURL: appURL)
         }
     }
+}
 
-    // MARK: - 右: 現在時刻の時計
-
-    private var clock: some View {
+/// 現在時刻の時計（ピル）。
+struct SessionClock: View {
+    var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
             HStack(spacing: 6) {
-                Image(systemName: "clock")
-                    .foregroundStyle(.secondary)
+                Image(systemName: "clock").foregroundStyle(.secondary)
                 Text(context.date, format: .dateTime.hour().minute().second())
                     .monospacedDigit()
             }
@@ -159,30 +119,16 @@ struct SessionStatusBar: View {
         .fixedSize()
         .help("現在時刻")
     }
-
-    // MARK: - 右端: 閉じるボタン
-
-    private var closeButton: some View {
-        Button(role: .destructive) {
-            onClose()
-        } label: {
-            Image(systemName: "xmark.circle.fill")
-        }
-        .buttonStyle(.borderless)
-        .help("セッションを閉じる")
-    }
 }
 
 /// 「IDE で開く」メニューに出すエディタ 1 つ分。
 private struct Editor: Identifiable {
     let name: String
     let bundleID: String
-    /// インストール済みと判明したアプリの URL。
     let appURL: URL
 
     var id: String { bundleID }
 
-    /// 表示名とバンドル ID の候補。`appURL` はインストール判定後に埋める。
     struct Candidate {
         let name: String
         let bundleID: String

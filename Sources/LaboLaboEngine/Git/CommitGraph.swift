@@ -38,8 +38,12 @@ extension GitEngine {
     public func commitGraph(worktree: URL, limit: Int = 300) async throws -> [CommitGraphLine] {
         let us = "\u{1f}"
         let format = "\(us)%h\(us)%s\(us)%an\(us)%ar\(us)%d"
+        // `--all` so branch/merge lanes actually show (a single linear branch would
+        // otherwise render as one straight column). `--topo-order` keeps the lanes
+        // visually coherent rather than strictly by date.
         let raw = try await GitRunner.run(
-            ["log", "--graph", "--color=never", "--pretty=format:\(format)", "-n", "\(limit)"],
+            ["log", "--graph", "--all", "--topo-order", "--color=never",
+             "--pretty=format:\(format)", "-n", "\(limit)"],
             in: worktree
         )
         return CommitGraphParser.parse(raw)

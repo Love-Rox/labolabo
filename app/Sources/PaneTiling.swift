@@ -564,36 +564,3 @@ struct PaneHeader: View {
         }
     }
 }
-
-/// Slim toolbar to add a terminal or re-add the files/diff panes after closing.
-struct PaneToolbar: View {
-    @Bindable var model: PaneTilingModel
-
-    var body: some View {
-        HStack(spacing: 10) {
-            Button { model.addPane(PaneItem(kind: .terminal, title: "端末")) } label: {
-                Label("端末", systemImage: "plus.rectangle")
-            }
-            Button { model.addPaneIfAbsent(kind: .files, title: "変更ファイル") } label: {
-                Label("ファイル", systemImage: "list.bullet.rectangle")
-            }
-            .disabled(model.hasPane(kind: .files))
-            Button { model.addPaneIfAbsent(kind: .diff, title: "Diff") } label: {
-                Label("Diff", systemImage: "doc.text")
-            }
-            .disabled(model.hasPane(kind: .diff))
-            Button { model.addPaneIfAbsent(kind: .commits, title: "履歴") } label: {
-                Label("履歴", systemImage: "clock.arrow.circlepath")
-            }
-            .disabled(model.hasPane(kind: .commits))
-            Spacer()
-            Text("ヘッダーをドラッグ→他ペインの縁で分割 / 中央で入れ替え")
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-        }
-        .buttonStyle(.borderless)
-        .font(.caption)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 4)
-    }
-}
