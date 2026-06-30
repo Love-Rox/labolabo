@@ -10,6 +10,9 @@ DerivedData/
 *.xcuserstate
 build/
 
+# XcodeGen generates the project from app/project.yml — don't track it.
+/app/LaboLabo.xcodeproj/
+
 # macOS
 .DS_Store
 
