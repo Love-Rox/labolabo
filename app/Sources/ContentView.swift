@@ -8,13 +8,19 @@ struct ContentView: View {
 
     var body: some View {
         NavigationSplitView {
-            List(selection: Binding(get: { store.selection }, set: { store.selection = $0 })) {
+            List(selection: Binding(get: { store.selection }, set: { store.select($0) })) {
                 if store.sessions.isEmpty {
                     Text("リポジトリを開いてください")
                         .foregroundStyle(.secondary)
                 } else {
                     ForEach(store.sessions) { session in
-                        SessionRow(session: session).tag(session.id)
+                        SessionRow(session: session)
+                            .tag(session.id)
+                            .contextMenu {
+                                Button("セッションを閉じる", role: .destructive) {
+                                    store.close(session.id)
+                                }
+                            }
                     }
                 }
             }

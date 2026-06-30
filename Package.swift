@@ -8,6 +8,10 @@ let package = Package(
     ],
     products: [
         .library(name: "LaboLaboEngine", targets: ["LaboLaboEngine"]),
+        .library(name: "LaboLaboStore", targets: ["LaboLaboStore"]),
+    ],
+    dependencies: [
+        .package(url: "https://github.com/groue/GRDB.swift", from: "7.0.0"),
     ],
     targets: [
         .target(
@@ -18,9 +22,25 @@ let package = Package(
                 .swiftLanguageMode(.v5)
             ]
         ),
+        .target(
+            name: "LaboLaboStore",
+            dependencies: [
+                .product(name: "GRDB", package: "GRDB.swift")
+            ],
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
         .testTarget(
             name: "LaboLaboEngineTests",
             dependencies: ["LaboLaboEngine"],
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
+        .testTarget(
+            name: "LaboLaboStoreTests",
+            dependencies: ["LaboLaboStore"],
             swiftSettings: [
                 .swiftLanguageMode(.v5)
             ]
