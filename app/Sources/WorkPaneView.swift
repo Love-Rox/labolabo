@@ -8,9 +8,24 @@ import LaboLaboEngine
 struct ChangedFilesPane: View {
     let model: WorkPaneModel
 
+    private var listModeBinding: Binding<FileListMode> {
+        Binding(get: { model.listMode }, set: { model.listMode = $0 })
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             BranchStatusBar(status: model.status)
+            Divider()
+            HStack {
+                Picker("", selection: listModeBinding) {
+                    ForEach(FileListMode.allCases) { Text($0.rawValue).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .fixedSize()
+                Spacer()
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 4)
             Divider()
             ChangedFilesList(model: model)
         }
@@ -135,15 +150,20 @@ struct ChangedFilesList: View {
         List(selection: selectionBinding) {
             if model.items.isEmpty {
                 Text("変更はありません").foregroundStyle(.secondary)
-            }
-            ForEach(ChangedFileItem.Section.allCases, id: \.self) { section in
-                let items = model.items.filter { $0.section == section }
-                if !items.isEmpty {
-                    Section("\(section.rawValue) (\(items.count))") {
-                        ForEach(items) { item in
-                            ChangedFileRow(item: item).tag(item.id)
+            } else if model.listMode == .tree {
+                ForEach(ChangedFileItem.Section.allCases, id: \.self) { section in
+                    let items = model.items.filter { $0.section == section }
+                    if !items.isEmpty {
+                        Section("\(section.rawValue) (\(items.count))") {
+                            ForEach(items) { item in
+                                ChangedFileRow(item: item).tag(item.id)
+                            }
                         }
                     }
+                }
+            } else {
+                ForEach(model.itemsByRecent) { item in
+                    ChangedFileRow(item: item, showsSection: true).tag(item.id)
                 }
             }
         }
@@ -152,16 +172,31 @@ struct ChangedFilesList: View {
 
 struct ChangedFileRow: View {
     let item: ChangedFileItem
+    var showsSection: Bool = false
 
     var body: some View {
         HStack(spacing: 6) {
             Text(item.fileName).lineLimit(1).truncationMode(.middle)
+            if showsSection {
+                Text(item.section.rawValue)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1)
+                    .background(Capsule().fill(Color.secondary.opacity(0.15)))
+            }
             Spacer()
             if let adds = item.adds, adds > 0 {
                 Text("+\(adds)").foregroundStyle(.green).font(.caption.monospaced())
             }
             if let dels = item.dels, dels > 0 {
                 Text("-\(dels)").foregroundStyle(.red).font(.caption.monospaced())
+            }
+            if let modifiedAt = item.modifiedAt {
+                Text(modifiedAt, format: .relative(presentation: .numeric, unitsStyle: .narrow))
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
             }
         }
         .help(item.path)
