@@ -120,42 +120,47 @@ struct SessionDetailView: View {
             Button {
                 tiling.addPane(PaneItem(kind: .terminal, title: "端末"))
             } label: {
-                Label("端末", systemImage: "plus.rectangle")
+                Image(systemName: "plus.rectangle")
             }
+            .buttonStyle(CircleIconButtonStyle())
             .help("端末を追加")
 
             Button {
                 tiling.addPaneIfAbsent(kind: .files, title: "変更ファイル")
             } label: {
-                Label("ファイル", systemImage: "list.bullet.rectangle")
+                Image(systemName: "list.bullet.rectangle")
             }
+            .buttonStyle(CircleIconButtonStyle())
             .disabled(tiling.hasPane(kind: .files))
             .help("変更ファイル一覧を追加")
 
             Button {
                 tiling.addPaneIfAbsent(kind: .diff, title: "Diff")
             } label: {
-                Label("Diff", systemImage: "doc.text")
+                Image(systemName: "doc.text")
             }
+            .buttonStyle(CircleIconButtonStyle())
             .disabled(tiling.hasPane(kind: .diff))
             .help("Diff を追加")
 
             Button {
                 tiling.addPaneIfAbsent(kind: .commits, title: "履歴")
             } label: {
-                Label("履歴", systemImage: "clock.arrow.circlepath")
+                Image(systemName: "point.3.connected.trianglepath.dotted")
             }
+            .buttonStyle(CircleIconButtonStyle())
             .disabled(tiling.hasPane(kind: .commits))
             .help("コミット履歴グラフを追加")
 
             IDEOpenMenu(worktree: session.worktreePath)
             SessionClock()
 
-            Button(role: .destructive) {
+            Button {
                 onClose()
             } label: {
-                Image(systemName: "xmark.circle.fill")
+                Image(systemName: "xmark")
             }
+            .buttonStyle(CircleIconButtonStyle(tint: .red))
             .help("セッションを閉じる")
         }
     }

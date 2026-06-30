@@ -145,6 +145,48 @@ private struct Editor: Identifiable {
     ]
 }
 
+// MARK: - 円形アイコンボタン
+
+/// アイコン 1 つを丸い枠に収めるツールバー用ボタンスタイル。無効時は淡色、押下で軽く縮む。
+struct CircleIconButtonStyle: ButtonStyle {
+    var tint: Color?
+    var diameter: CGFloat = 30
+
+    func makeBody(configuration: Configuration) -> some View {
+        IconBody(configuration: configuration, tint: tint, diameter: diameter)
+    }
+
+    private struct IconBody: View {
+        let configuration: Configuration
+        let tint: Color?
+        let diameter: CGFloat
+        @Environment(\.isEnabled) private var isEnabled
+
+        var body: some View {
+            configuration.label
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(tint ?? .primary)
+                .frame(width: diameter, height: diameter)
+                .background(
+                    Circle().fill(
+                        configuration.isPressed
+                            ? Color.primary.opacity(0.14)
+                            : Color(nsColor: .controlBackgroundColor)
+                    )
+                )
+                .overlay(
+                    Circle().strokeBorder(
+                        (tint ?? Color.primary).opacity(0.18),
+                        lineWidth: 1
+                    )
+                )
+                .opacity(isEnabled ? 1 : 0.4)
+                .scaleEffect(configuration.isPressed ? 0.92 : 1)
+                .contentShape(Circle())
+        }
+    }
+}
+
 // MARK: - ピル型の枠
 
 private extension View {

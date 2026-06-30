@@ -560,7 +560,7 @@ struct PaneHeader: View {
         case .terminal: return "terminal"
         case .files: return "list.bullet.rectangle"
         case .diff: return "doc.text"
-        case .commits: return "clock.arrow.circlepath"
+        case .commits: return "point.3.connected.trianglepath.dotted"
         }
     }
 }
