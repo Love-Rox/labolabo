@@ -79,9 +79,9 @@ struct SessionDetailView: View {
             Divider()
             HSplitView {
                 TerminalAreaView(workingDirectory: session.worktreePath.path)
-                    .frame(minWidth: 360)
+                    .frame(minWidth: 320, idealWidth: 520)
                 WorkPaneView(worktree: session.worktreePath)
-                    .frame(minWidth: 340)
+                    .frame(minWidth: 420, idealWidth: 680)
             }
         }
     }
