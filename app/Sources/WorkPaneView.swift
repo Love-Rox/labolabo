@@ -1,27 +1,111 @@
 import SwiftUI
 import LaboLaboEngine
 
-/// Right-hand pane: branch/status bar + changed-files list + per-file Diff/Whole view.
-struct WorkPaneView: View {
-    @State private var model: WorkPaneModel
+/// "git 部分": branch/status bar + changed-files list. Lives as its own tile so it
+/// can be moved/split independently of the diff. Shares one `WorkPaneModel` with
+/// `FileDetailPane` (selecting a file here drives the diff there). The model's
+/// FileWatcher lifecycle is owned by the session, not this view.
+struct ChangedFilesPane: View {
+    let model: WorkPaneModel
 
-    init(worktree: URL) {
-        _model = State(initialValue: WorkPaneModel(worktree: worktree))
+    private var listModeBinding: Binding<FileListMode> {
+        Binding(get: { model.listMode }, set: { model.listMode = $0 })
     }
 
     var body: some View {
         VStack(spacing: 0) {
             BranchStatusBar(status: model.status)
             Divider()
-            VSplitView {
-                ChangedFilesList(model: model)
-                    .frame(minHeight: 120)
-                FileDetailView(model: model)
-                    .frame(minHeight: 180)
+            HStack {
+                Picker("", selection: listModeBinding) {
+                    ForEach(FileListMode.allCases) { Text($0.rawValue).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .fixedSize()
+                Spacer()
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 4)
+            Divider()
+            ChangedFilesList(model: model)
+        }
+    }
+}
+
+/// "diff 部分": the selected file's Diff ⇄ Whole-file view. Shares the same
+/// `WorkPaneModel` as `ChangedFilesPane`.
+struct FileDetailPane: View {
+    let model: WorkPaneModel
+
+    var body: some View {
+        FileDetailView(model: model)
+    }
+}
+
+/// Commit-history graph (git log --graph) for the worktree. Lives as its own tile.
+struct CommitGraphPane: View {
+    let model: WorkPaneModel
+
+    var body: some View {
+        if model.commits.isEmpty {
+            ContentUnavailableView("コミットがありません", systemImage: "clock.arrow.circlepath")
+        } else {
+            ScrollView(.vertical) {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(model.commits) { line in
+                        CommitGraphRow(line: line)
+                    }
+                }
+                .padding(.vertical, 4)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
-        .onAppear { model.start() }
-        .onDisappear { model.stop() }
+    }
+}
+
+struct CommitGraphRow: View {
+    let line: CommitGraphLine
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text(line.graph.isEmpty ? " " : line.graph)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .fixedSize()
+            if let commit = line.commit {
+                Text(commit.hash)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(Color.accentColor)
+                if !commit.refs.isEmpty {
+                    Text(commit.refs)
+                        .font(.system(size: 10))
+                        .lineLimit(1)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(Capsule().fill(Color.orange.opacity(0.18)))
+                        .foregroundStyle(.orange)
+                }
+                Text(commit.subject)
+                    .font(.system(size: 11))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Spacer(minLength: 8)
+                Text(commit.author)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Text(commit.relativeDate)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .fixedSize()
+            } else {
+                Spacer(minLength: 0)
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 1)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -66,15 +150,20 @@ struct ChangedFilesList: View {
         List(selection: selectionBinding) {
             if model.items.isEmpty {
                 Text("変更はありません").foregroundStyle(.secondary)
-            }
-            ForEach(ChangedFileItem.Section.allCases, id: \.self) { section in
-                let items = model.items.filter { $0.section == section }
-                if !items.isEmpty {
-                    Section("\(section.rawValue) (\(items.count))") {
-                        ForEach(items) { item in
-                            ChangedFileRow(item: item).tag(item.id)
+            } else if model.listMode == .tree {
+                ForEach(ChangedFileItem.Section.allCases, id: \.self) { section in
+                    let items = model.items.filter { $0.section == section }
+                    if !items.isEmpty {
+                        Section("\(section.rawValue) (\(items.count))") {
+                            ForEach(items) { item in
+                                ChangedFileRow(item: item).tag(item.id)
+                            }
                         }
                     }
+                }
+            } else {
+                ForEach(model.itemsByRecent) { item in
+                    ChangedFileRow(item: item, showsSection: true).tag(item.id)
                 }
             }
         }
@@ -83,16 +172,31 @@ struct ChangedFilesList: View {
 
 struct ChangedFileRow: View {
     let item: ChangedFileItem
+    var showsSection: Bool = false
 
     var body: some View {
         HStack(spacing: 6) {
             Text(item.fileName).lineLimit(1).truncationMode(.middle)
+            if showsSection {
+                Text(item.section.rawValue)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1)
+                    .background(Capsule().fill(Color.secondary.opacity(0.15)))
+            }
             Spacer()
             if let adds = item.adds, adds > 0 {
                 Text("+\(adds)").foregroundStyle(.green).font(.caption.monospaced())
             }
             if let dels = item.dels, dels > 0 {
                 Text("-\(dels)").foregroundStyle(.red).font(.caption.monospaced())
+            }
+            if let modifiedAt = item.modifiedAt {
+                Text(modifiedAt, format: .relative(presentation: .numeric, unitsStyle: .narrow))
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
             }
         }
         .help(item.path)
@@ -116,18 +220,19 @@ struct FileDetailView: View {
                     Text(item.path)
                         .font(.caption).foregroundStyle(.secondary)
                         .lineLimit(1).truncationMode(.middle)
+                    Spacer()
+                    Picker("", selection: viewModeBinding) {
+                        ForEach(FileViewMode.allCases) { Text($0.rawValue).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    .fixedSize()
                 } else {
                     Text("ファイルを選択").font(.caption).foregroundStyle(.secondary)
+                    Spacer()
                 }
-                Spacer()
-                Picker("", selection: viewModeBinding) {
-                    ForEach(FileViewMode.allCases) { Text($0.rawValue).tag($0) }
-                }
-                .pickerStyle(.segmented)
-                .fixedSize()
-                .disabled(model.selectedItem == nil)
             }
             .padding(.horizontal, 12)
+            .frame(minHeight: 28)
             .padding(.vertical, 6)
             Divider()
 
