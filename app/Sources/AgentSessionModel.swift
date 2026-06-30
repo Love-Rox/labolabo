@@ -54,15 +54,22 @@ final class AgentSessionModel {
     private func writeSettings() -> Bool {
         guard let binary = Bundle.main.executablePath else { return false }
         let forwarder = "\(Self.shellQuoted(binary)) --hook \(Self.shellQuoted(socketPath))"
-        let entry: [[String: Any]] = [["hooks": [["type": "command", "command": forwarder]]]]
+        // command hook はブロッキング（既定 600s）。フォワーダは即終了だが、万一の
+        // ハングで Claude を止めないよう短い timeout を付ける。
+        let commandHooks: [[String: Any]] = [[
+            "type": "command",
+            "command": forwarder,
+            "timeout": 5,
+        ]]
 
+        // 公式ドキュメント準拠: 全イベントで matcher: ""（空＝全対象）の統一スキーマ。
         let events = [
             "SessionStart", "UserPromptSubmit", "PreToolUse",
             "PostToolUse", "Notification", "Stop", "SessionEnd",
         ]
         var hooks: [String: Any] = [:]
         for event in events {
-            hooks[event] = entry
+            hooks[event] = [["matcher": "", "hooks": commandHooks]]
         }
         let settings: [String: Any] = ["hooks": hooks]
 
