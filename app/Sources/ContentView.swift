@@ -3,38 +3,40 @@ import UniformTypeIdentifiers
 import LaboLaboEngine
 import GhosttyTerminal
 
+/// 上部バーの共有寸法。タイトルバーを隠して自前バー 1 本に統合する際に、
+/// サイドバー側ヘッダーと詳細側バーの高さを揃え、信号機（traffic lights）を避ける。
+enum LayoutMetrics {
+    static let topBar: CGFloat = 52
+    /// 信号機を避けるためのサイドバー左インセット。
+    static let trafficLightInset: CGFloat = 78
+}
+
 struct ContentView: View {
     @State private var store = SessionStore()
     @State private var showImporter = false
 
     var body: some View {
         NavigationSplitView {
-            List(selection: Binding(get: { store.selection }, set: { store.select($0) })) {
-                if store.sessions.isEmpty {
-                    Text("リポジトリを開いてください")
-                        .foregroundStyle(.secondary)
-                } else {
-                    ForEach(store.sessions) { session in
-                        SessionRow(session: session)
-                            .tag(session.id)
-                            .contextMenu {
-                                Button("セッションを閉じる", role: .destructive) {
-                                    store.close(session.id)
+            VStack(spacing: 0) {
+                sidebarHeader
+                Divider()
+                List(selection: Binding(get: { store.selection }, set: { store.select($0) })) {
+                    if store.sessions.isEmpty {
+                        Text("リポジトリを開いてください")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(store.sessions) { session in
+                            SessionRow(session: session)
+                                .tag(session.id)
+                                .contextMenu {
+                                    Button("セッションを閉じる", role: .destructive) {
+                                        store.close(session.id)
+                                    }
                                 }
-                            }
+                        }
                     }
                 }
-            }
-            .listStyle(.sidebar)
-            .navigationTitle("LaboLabo")
-            .toolbar {
-                ToolbarItem {
-                    Button {
-                        showImporter = true
-                    } label: {
-                        Label("リポジトリを開く", systemImage: "plus")
-                    }
-                }
+                .listStyle(.sidebar)
             }
             .fileImporter(isPresented: $showImporter, allowedContentTypes: [.folder]) { result in
                 if case let .success(url) = result {
@@ -49,12 +51,32 @@ struct ContentView: View {
                 ContentUnavailableView {
                     Label("セッションがありません", systemImage: "sidebar.left")
                 } description: {
-                    Text("ツールバーの ＋ から git リポジトリ（worktree）を開きます")
+                    Text("左上の ＋ から git リポジトリ（worktree）を開きます")
                 } actions: {
                     Button("リポジトリを開く") { showImporter = true }
                 }
             }
         }
+    }
+
+    /// サイドバー上部のヘッダー（OS タイトルバーの代わり）。信号機を避ける左インセット付き。
+    private var sidebarHeader: some View {
+        HStack(spacing: 8) {
+            Text("LaboLabo")
+                .font(.headline)
+            Spacer()
+            Button {
+                showImporter = true
+            } label: {
+                Image(systemName: "plus")
+            }
+            .buttonStyle(.borderless)
+            .help("リポジトリを開く")
+        }
+        .padding(.leading, LayoutMetrics.trafficLightInset)
+        .padding(.trailing, 12)
+        .frame(height: LayoutMetrics.topBar)
+        .background(.bar)
     }
 }
 
@@ -108,7 +130,6 @@ struct SessionDetailView: View {
             )
         }
         .navigationTitle(session.name)
-        .navigationSubtitle(session.worktreePath.path)
         .onAppear { work.start() }
         .onDisappear { work.stop() }
     }
@@ -118,6 +139,11 @@ struct SessionDetailView: View {
     /// それぞれ単一枠で正確に並べる。
     private var sessionBar: some View {
         HStack(spacing: 12) {
+            Text(session.name)
+                .font(.headline)
+                .lineLimit(1)
+                .help(session.worktreePath.path)
+
             SessionStatusPill(
                 status: work.status,
                 fallbackBranch: session.branch,
@@ -173,7 +199,7 @@ struct SessionDetailView: View {
             .help("セッションを閉じる")
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 8)
+        .frame(height: LayoutMetrics.topBar)
         .background(.bar)
     }
 }
