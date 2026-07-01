@@ -42,6 +42,7 @@ struct ChangedFilesPane: View {
                 Label(status.branch ?? "—", systemImage: "arrow.triangle.branch")
                     .lineLimit(1)
                     .truncationMode(.middle)
+                    .help(status.branch ?? "—")
                 if status.ahead > 0 {
                     Label("\(status.ahead)", systemImage: "arrow.up").labelStyle(.titleAndIcon)
                 }
@@ -183,22 +184,27 @@ struct CommitInfoRow: View {
                         .padding(.vertical, 1)
                         .background(Capsule().fill(Color.orange.opacity(0.18)))
                         .foregroundStyle(.orange)
+                        .help(commit.refs)
                 }
                 Text(commit.subject)
                     .font(.system(size: 11))
                     .lineLimit(1)
                     .truncationMode(.tail)
+                    .help(commit.subject)
                 Spacer(minLength: 8)
                 Text(commit.author)
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
+                    .help(commit.author)
                 if let date = commit.date {
                     Text(date, format: .relative(presentation: .numeric, unitsStyle: .narrow))
                         .font(.system(size: 10))
                         .foregroundStyle(.tertiary)
                         .lineLimit(1)
                         .fixedSize()
+                        // narrow 相対表示は省略が強いので、ホバーでロケール対応のフル日時を出す。
+                        .help(date.formatted(date: .complete, time: .shortened))
                 }
             } else {
                 Spacer(minLength: 0)
@@ -420,6 +426,7 @@ struct FileDetailView: View {
                 Text(path)
                     .font(.caption).foregroundStyle(.secondary)
                     .lineLimit(1).truncationMode(.middle)
+                    .help(path)
                 Spacer()
                 // 変更ファイルのみ Diff⇄全文 を切替（未変更ファイルは全文のみ）。
                 if model.selectedItem != nil {

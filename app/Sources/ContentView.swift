@@ -150,11 +150,13 @@ struct SessionRow: View {
         HStack(spacing: 8) {
             VStack(alignment: .leading, spacing: 1) {
                 Text(session.name).lineLimit(1).truncationMode(.middle)
+                    .help(session.name)
                 Text(session.branch ?? "—")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
+                    .help(session.branch ?? "—")
             }
             Spacer(minLength: 4)
             if let pr = session.pullRequest {
