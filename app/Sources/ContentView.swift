@@ -371,10 +371,15 @@ struct RepoGroupHeader: View {
                 .fontWeight(.semibold)
                 .lineLimit(1)
                 .truncationMode(.middle)
-            Spacer()
+            // 件数は名前の右隣に小さなピルで（far-right の薄いテキストは見づらいため）。
             Text("\(count)")
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
+                .font(.caption2.weight(.semibold).monospacedDigit())
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 1)
+                .background(Capsule().fill(.quaternary))
+                .help("セッション数: \(count)")
+            Spacer(minLength: 0)
         }
         .contextMenu {
             Menu("色を変更") {
