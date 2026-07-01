@@ -20,6 +20,15 @@ public actor GitEngine {
         return PorcelainStatusParser.parse(raw)
     }
 
+    /// ローカルブランチ名の一覧（最近のコミット順）。New Session のベースブランチ選択に使う。
+    public func localBranches(worktree: URL) async throws -> [String] {
+        let raw = try await GitRunner.run(
+            ["for-each-ref", "--format=%(refname:short)", "--sort=-committerdate", "refs/heads"],
+            in: worktree
+        )
+        return raw.split(separator: "\n").map(String.init).filter { !$0.isEmpty }
+    }
+
     /// Unified diff for the whole worktree. `staged: true` uses the index (`--cached`).
     public func diff(worktree: URL, staged: Bool = false) async throws -> [FileDiff] {
         var args = ["diff"]
