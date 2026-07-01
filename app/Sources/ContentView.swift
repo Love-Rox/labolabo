@@ -211,6 +211,8 @@ struct SessionDetailView: View {
                 revision: tiling.revision
             )
         }
+        // 詳細（ターミナル）側に左余白を入れ、カード型サイドバーとの密着を解消する。
+        .padding(.leading, 10)
         .ignoresSafeArea(.container, edges: .top)
         .navigationTitle(session.name)
         .onAppear { work.start(); agent.start() }
