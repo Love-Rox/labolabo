@@ -11,8 +11,8 @@ struct ClaudeMark: View {
         Canvas { context, size in
             let center = CGPoint(x: size.width / 2, y: size.height / 2)
             let outer = min(size.width, size.height) / 2
-            let inner = outer * 0.16
-            let halfAngle = (CGFloat.pi / CGFloat(rays)) * 0.5 // 各スパイクの根元の半幅
+            let inner = outer * 0.28
+            let halfAngle = (CGFloat.pi / CGFloat(rays)) * 0.92 // 各スパイクの根元の半幅（太め）
 
             // 少しだけ長さを不揃いにして手描き風の有機的な見た目に。
             let lengthFactors: [CGFloat] = [1.0, 0.82, 0.94, 0.86, 1.0, 0.9, 0.84, 0.96, 0.88, 1.0, 0.9]
