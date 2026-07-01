@@ -40,13 +40,38 @@ struct SessionGroup: Identifiable {
 final class SessionStore {
     var sessions: [RepoSession] = []
     var selection: RepoSession.ID?
+    /// リポジトリキー → 色 id。
+    private(set) var repoColors: [String: String] = [:]
 
     private let git = GitEngine()
     private let db: SessionDatabase?
 
     init() {
         db = try? SessionDatabase(url: SessionDatabase.defaultURL())
+        loadRepoColors()
         restore()
+    }
+
+    // MARK: - リポジトリの色
+
+    func colorID(forRepo repoKey: String) -> String? { repoColors[repoKey] }
+
+    func setColorID(_ id: String?, forRepo repoKey: String) {
+        if let id {
+            repoColors[repoKey] = id
+        } else {
+            repoColors.removeValue(forKey: repoKey)
+        }
+        try? db?.setAppState(id, forKey: "repoColor:" + repoKey)
+    }
+
+    private func loadRepoColors() {
+        guard let db, let entries = try? db.appStateEntries(prefix: "repoColor:") else { return }
+        var colors: [String: String] = [:]
+        for (key, value) in entries {
+            colors[String(key.dropFirst("repoColor:".count))] = value
+        }
+        repoColors = colors
     }
 
     var selected: RepoSession? {

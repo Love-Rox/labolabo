@@ -35,7 +35,10 @@ struct ContentView: View {
                         ForEach(store.groupedSessions) { group in
                             Section {
                                 ForEach(group.sessions) { session in
-                                    SessionRow(session: session)
+                                    SessionRow(
+                                        session: session,
+                                        accent: RepoPalette.color(for: store.colorID(forRepo: group.key))
+                                    )
                                         .tag(session.id)
                                         .contextMenu {
                                             Button("セッションを閉じる", role: .destructive) {
@@ -44,7 +47,12 @@ struct ContentView: View {
                                         }
                                 }
                             } header: {
-                                RepoGroupHeader(name: group.name, count: group.sessions.count)
+                                RepoGroupHeader(
+                                    name: group.name,
+                                    count: group.sessions.count,
+                                    colorID: store.colorID(forRepo: group.key),
+                                    onSelectColor: { store.setColorID($0, forRepo: group.key) }
+                                )
                             }
                         }
                     }
@@ -126,11 +134,12 @@ struct ContentView: View {
 
 struct SessionRow: View {
     let session: RepoSession
+    var accent: Color = .secondary
 
     var body: some View {
         HStack(spacing: 8) {
             Circle()
-                .fill(Color.secondary)
+                .fill(accent)
                 .frame(width: 8, height: 8)
             VStack(alignment: .leading, spacing: 1) {
                 Text(session.name).lineLimit(1).truncationMode(.middle)
@@ -147,16 +156,19 @@ struct SessionRow: View {
     }
 }
 
-/// サイドバーのリポジトリ・グループ見出し（フォルダ名 + セッション数）。
+/// サイドバーのリポジトリ・グループ見出し（色ドット + 名前 + セッション数）。
+/// 右クリックで色を変更できる。
 struct RepoGroupHeader: View {
     let name: String
     let count: Int
+    let colorID: String?
+    var onSelectColor: (String?) -> Void
 
     var body: some View {
         HStack(spacing: 6) {
-            Image(systemName: "folder.fill")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
+            Circle()
+                .fill(RepoPalette.color(for: colorID))
+                .frame(width: 8, height: 8)
             Text(name)
                 .font(.caption)
                 .fontWeight(.semibold)
@@ -166,6 +178,23 @@ struct RepoGroupHeader: View {
             Text("\(count)")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
+        }
+        .contextMenu {
+            Menu("色を変更") {
+                ForEach(RepoPalette.entries, id: \.id) { entry in
+                    Button {
+                        onSelectColor(entry.id)
+                    } label: {
+                        if entry.id == colorID {
+                            Label(entry.name, systemImage: "checkmark")
+                        } else {
+                            Text(entry.name)
+                        }
+                    }
+                }
+                Divider()
+                Button("なし") { onSelectColor(nil) }
+            }
         }
     }
 }
