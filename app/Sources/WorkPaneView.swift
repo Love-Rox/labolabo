@@ -135,35 +135,40 @@ struct BranchStatusBar: View {
 struct ChangedFilesList: View {
     let model: WorkPaneModel
 
-    private var selectionBinding: Binding<ChangedFileItem.ID?> {
+    private var selectionBinding: Binding<String?> {
         Binding(
-            get: { model.selectedID },
-            set: { newID in
-                if let newID, let item = model.items.first(where: { $0.id == newID }) {
-                    model.select(item)
-                }
-            }
+            get: { model.selectedPath },
+            set: { newPath in if let newPath { model.select(path: newPath) } }
         )
     }
 
     var body: some View {
-        List(selection: selectionBinding) {
+        switch model.listMode {
+        case .changedTree:
             if model.items.isEmpty {
-                Text("変更はありません").foregroundStyle(.secondary)
-            } else if model.listMode == .tree {
-                ForEach(ChangedFileItem.Section.allCases, id: \.self) { section in
-                    let items = model.items.filter { $0.section == section }
-                    if !items.isEmpty {
-                        Section("\(section.rawValue) (\(items.count))") {
-                            ForEach(items) { item in
-                                ChangedFileRow(item: item).tag(item.id)
-                            }
-                        }
-                    }
-                }
+                List { Text("変更はありません").foregroundStyle(.secondary) }
             } else {
+                FileTreeView(
+                    roots: model.changedTree,
+                    selection: selectionBinding,
+                    isExpanded: { model.isExpanded($0, mode: .changedTree) },
+                    toggle: { model.toggleExpanded($0, mode: .changedTree) }
+                )
+            }
+        case .fullTree:
+            FileTreeView(
+                roots: model.fullTree,
+                selection: selectionBinding,
+                isExpanded: { model.isExpanded($0, mode: .fullTree) },
+                toggle: { model.toggleExpanded($0, mode: .fullTree) }
+            )
+        case .recent:
+            List(selection: selectionBinding) {
+                if model.items.isEmpty {
+                    Text("変更はありません").foregroundStyle(.secondary)
+                }
                 ForEach(model.itemsByRecent) { item in
-                    ChangedFileRow(item: item, showsSection: true).tag(item.id)
+                    ChangedFileRow(item: item, showsSection: true).tag(item.path)
                 }
             }
         }
@@ -216,16 +221,19 @@ struct FileDetailView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                if let item = model.selectedItem {
-                    Text(item.path)
+                if let path = model.selectedPath {
+                    Text(path)
                         .font(.caption).foregroundStyle(.secondary)
                         .lineLimit(1).truncationMode(.middle)
                     Spacer()
-                    Picker("", selection: viewModeBinding) {
-                        ForEach(FileViewMode.allCases) { Text($0.rawValue).tag($0) }
+                    // 変更ファイルのみ Diff⇄全文 を切替（未変更ファイルは全文のみ）。
+                    if model.selectedItem != nil {
+                        Picker("", selection: viewModeBinding) {
+                            ForEach(FileViewMode.allCases) { Text($0.rawValue).tag($0) }
+                        }
+                        .pickerStyle(.segmented)
+                        .fixedSize()
                     }
-                    .pickerStyle(.segmented)
-                    .fixedSize()
                 } else {
                     Text("ファイルを選択").font(.caption).foregroundStyle(.secondary)
                     Spacer()
@@ -236,9 +244,9 @@ struct FileDetailView: View {
             .padding(.vertical, 6)
             Divider()
 
-            if model.selectedItem == nil {
-                ContentUnavailableView("変更ファイルを選択", systemImage: "doc.text.magnifyingglass")
-            } else if model.viewMode == .diff {
+            if model.selectedPath == nil {
+                ContentUnavailableView("ファイルを選択", systemImage: "doc.text.magnifyingglass")
+            } else if model.selectedItem != nil, model.viewMode == .diff {
                 DiffView(diff: model.diff)
             } else {
                 WholeFileView(text: model.wholeText)

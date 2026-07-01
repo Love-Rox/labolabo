@@ -9,17 +9,24 @@ enum LayoutMetrics {
     static let topBar: CGFloat = 52
     /// 信号機を避けるためのサイドバー左インセット。
     static let trafficLightInset: CGFloat = 78
+    /// 折りたたみ時の詳細バー左インセット。展開ボタンが入る分、少し詰める。
+    static let trafficLightInsetCompact: CGFloat = 70
 }
 
 struct ContentView: View {
     @State private var store = SessionStore()
     @State private var showImporter = false
+    @State private var showChangelog = false
+    @State private var columnVisibility: NavigationSplitViewVisibility = .all
+
+    private var sidebarCollapsed: Bool { columnVisibility == .detailOnly }
 
     var body: some View {
-        NavigationSplitView {
+        NavigationSplitView(columnVisibility: $columnVisibility) {
             VStack(spacing: 0) {
                 sidebarHeader
                 Divider()
+                Color.clear.frame(height: 6) // 上部バーとセッション一覧の間に余白
                 List(selection: Binding(get: { store.selection }, set: { store.select($0) })) {
                     if store.sessions.isEmpty {
                         Text("リポジトリを開いてください")
@@ -38,7 +45,12 @@ struct ContentView: View {
                 }
                 .listStyle(.sidebar)
             }
+            .padding(.trailing, 8) // サイドバー外側右の余白（ターミナルとの密着を解消）
             .ignoresSafeArea(.container, edges: .top)
+            .navigationSplitViewColumnWidth(min: 224, ideal: 248)
+            // NavigationSplitView が自動で出すサイドバー開閉ボタンを消す。自前ヘッダーの
+            // ⓘ/＋ と重なるため（折りたたみは自前トグルで行う）。
+            .toolbar(removing: .sidebarToggle)
             .fileImporter(isPresented: $showImporter, allowedContentTypes: [.folder]) { result in
                 if case let .success(url) = result {
                     store.openRepository(at: url)
@@ -46,8 +58,13 @@ struct ContentView: View {
             }
         } detail: {
             if let session = store.selected {
-                SessionDetailView(session: session, onClose: { store.close(session.id) })
-                    .id(session.id)
+                SessionDetailView(
+                    session: session,
+                    onClose: { store.close(session.id) },
+                    sidebarCollapsed: sidebarCollapsed,
+                    onExpandSidebar: { columnVisibility = .all }
+                )
+                .id(session.id)
             } else {
                 ContentUnavailableView {
                     Label("セッションがありません", systemImage: "sidebar.left")
@@ -62,10 +79,19 @@ struct ContentView: View {
 
     /// サイドバー上部のヘッダー（OS タイトルバーの代わり）。信号機を避ける左インセット付き。
     private var sidebarHeader: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 6) {
             Text("LaboLabo")
                 .font(.headline)
-            Spacer()
+                .lineLimit(1)
+                .fixedSize()
+            Spacer(minLength: 4)
+            Button {
+                showChangelog = true
+            } label: {
+                Image(systemName: "info.circle")
+            }
+            .buttonStyle(.borderless)
+            .help("変更履歴を表示")
             Button {
                 showImporter = true
             } label: {
@@ -73,11 +99,21 @@ struct ContentView: View {
             }
             .buttonStyle(.borderless)
             .help("リポジトリを開く")
+            Button {
+                columnVisibility = .detailOnly
+            } label: {
+                Image(systemName: "sidebar.leading")
+            }
+            .buttonStyle(.borderless)
+            .help("サイドバーを折りたたむ")
         }
         .padding(.leading, LayoutMetrics.trafficLightInset)
         .padding(.trailing, 12)
         .frame(height: LayoutMetrics.topBar)
         .background(.bar)
+        .sheet(isPresented: $showChangelog) {
+            ChangelogView()
+        }
     }
 }
 
@@ -90,28 +126,41 @@ struct SessionRow: View {
                 .fill(Color.secondary)
                 .frame(width: 8, height: 8)
             VStack(alignment: .leading, spacing: 1) {
-                Text(session.name)
+                Text(session.name).lineLimit(1).truncationMode(.middle)
                 Text(session.branch ?? "—")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
             }
+            Spacer(minLength: 0)
         }
         .padding(.vertical, 2)
+        .padding(.trailing, 8)
     }
 }
 
 struct SessionDetailView: View {
     let session: RepoSession
     let onClose: () -> Void
+    var sidebarCollapsed: Bool = false
+    var onExpandSidebar: () -> Void = {}
 
     @State private var work: WorkPaneModel
     @State private var tiling: PaneTilingModel
     @State private var agent: AgentSessionModel
     private let configSource: TerminalController.ConfigSource
 
-    init(session: RepoSession, onClose: @escaping () -> Void) {
+    init(
+        session: RepoSession,
+        onClose: @escaping () -> Void,
+        sidebarCollapsed: Bool = false,
+        onExpandSidebar: @escaping () -> Void = {}
+    ) {
         self.session = session
         self.onClose = onClose
+        self.sidebarCollapsed = sidebarCollapsed
+        self.onExpandSidebar = onExpandSidebar
         _work = State(initialValue: WorkPaneModel(worktree: session.worktreePath))
         _tiling = State(initialValue: PaneTilingModel.defaultLayout())
         _agent = State(initialValue: AgentSessionModel(sessionID: session.id, worktree: session.worktreePath))
@@ -143,6 +192,14 @@ struct SessionDetailView: View {
     /// それぞれ単一枠で正確に並べる。
     private var sessionBar: some View {
         HStack(spacing: 12) {
+            if sidebarCollapsed {
+                Button(action: onExpandSidebar) {
+                    Image(systemName: "sidebar.leading")
+                }
+                .buttonStyle(.borderless)
+                .help("サイドバーを表示")
+            }
+
             Text(session.name)
                 .font(.headline)
                 .lineLimit(1)
@@ -211,7 +268,10 @@ struct SessionDetailView: View {
             .buttonStyle(CircleIconButtonStyle(tint: .red))
             .help("セッションを閉じる")
         }
-        .padding(.horizontal, 12)
+        // サイドバー折りたたみ時は詳細が信号機の下に来るので左インセットで避ける。
+        // 展開ボタンが入る分、通常より少し詰める。
+        .padding(.leading, sidebarCollapsed ? LayoutMetrics.trafficLightInsetCompact : 12)
+        .padding(.trailing, 12)
         .frame(height: LayoutMetrics.topBar)
         .background(.bar)
     }

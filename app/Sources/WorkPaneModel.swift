@@ -10,8 +10,9 @@ enum FileViewMode: String, CaseIterable, Identifiable {
 
 /// 変更ファイル一覧の並べ方。
 enum FileListMode: String, CaseIterable, Identifiable {
-    case tree = "ツリー"
-    case recent = "更新順"
+    case changedTree = "変更"   // 変更ファイルだけのディレクトリツリー
+    case fullTree = "全体"       // worktree 全体のツリー（変更をマーク）
+    case recent = "更新順"       // 更新時刻の新しい順（フラット）
     var id: String { rawValue }
 }
 
@@ -42,13 +43,18 @@ final class WorkPaneModel {
 
     var status: GitStatus?
     var items: [ChangedFileItem] = []
-    var selectedID: ChangedFileItem.ID?
+    var allFiles: [String] = []
+    var selectedPath: String?
     var viewMode: FileViewMode = .diff
-    var listMode: FileListMode = .tree
+    var listMode: FileListMode = .changedTree
     var diff: FileDiff?
     var wholeText: String?
     var commits: [CommitGraphLine] = []
     var loadError: String?
+
+    /// 変更ツリーは既定で全展開（折り畳んだものだけ記録）、全体ツリーは既定折り畳み（展開だけ記録）。
+    var changedTreeCollapsed: Set<String> = []
+    var fullTreeExpanded: Set<String> = []
 
     /// 更新時刻の新しい順（取れないものは末尾、同点はファイル名昇順）。
     var itemsByRecent: [ChangedFileItem] {
@@ -83,14 +89,53 @@ final class WorkPaneModel {
         watcher = nil
     }
 
-    func select(_ item: ChangedFileItem) {
-        selectedID = item.id
-        if item.isUntracked { viewMode = .whole }
+    func select(_ item: ChangedFileItem) { select(path: item.path) }
+
+    /// パスで選択（ツリーの葉/フラット行 共通）。変更が無いファイル（全体ツリー）は全文表示。
+    func select(path: String) {
+        selectedPath = path
+        let changed = items.first { $0.path == path }
+        if changed == nil || changed?.isUntracked == true {
+            viewMode = .whole
+        }
         Task { await loadSelection() }
     }
 
     var selectedItem: ChangedFileItem? {
-        items.first { $0.id == selectedID }
+        items.first { $0.path == selectedPath }
+    }
+
+    // MARK: - ツリー
+
+    private var changeByPath: [String: FileTreeNode.Change] {
+        Dictionary(
+            items.map { ($0.path, FileTreeNode.Change(section: $0.section, adds: $0.adds, dels: $0.dels)) },
+            uniquingKeysWith: { first, _ in first }
+        )
+    }
+
+    /// 変更ファイルだけのディレクトリツリー。
+    var changedTree: [FileTreeNode] {
+        FileTreeBuilder.build(paths: items.map(\.path), changeByPath: changeByPath)
+    }
+
+    /// worktree 全体のツリー（変更をマーク）。
+    var fullTree: [FileTreeNode] {
+        var paths = Set(allFiles)
+        for item in items { paths.insert(item.path) }
+        return FileTreeBuilder.build(paths: Array(paths), changeByPath: changeByPath)
+    }
+
+    func isExpanded(_ id: String, mode: FileListMode) -> Bool {
+        mode == .fullTree ? fullTreeExpanded.contains(id) : !changedTreeCollapsed.contains(id)
+    }
+
+    func toggleExpanded(_ id: String, mode: FileListMode) {
+        if mode == .fullTree {
+            if !fullTreeExpanded.insert(id).inserted { fullTreeExpanded.remove(id) }
+        } else {
+            if !changedTreeCollapsed.insert(id).inserted { changedTreeCollapsed.remove(id) }
+        }
     }
 
     func refresh() async {
@@ -120,9 +165,13 @@ final class WorkPaneModel {
             }
             // 我々が注入する hooks 設定は一覧に出さない（ノイズ回避）。
             self.items = items.filter { $0.path != AgentSessionModel.localSettingsRelativePath }
+            allFiles = ((try? await git.listFiles(worktree: worktree)) ?? [])
+                .filter { $0 != AgentSessionModel.localSettingsRelativePath }
 
-            if let selectedID, !items.contains(where: { $0.id == selectedID }) {
-                self.selectedID = nil
+            if let selectedPath,
+               !self.items.contains(where: { $0.path == selectedPath }),
+               !allFiles.contains(selectedPath) {
+                self.selectedPath = nil
             }
             commits = (try? await git.commitGraph(worktree: worktree, limit: 300)) ?? []
             loadError = nil
@@ -133,13 +182,17 @@ final class WorkPaneModel {
     }
 
     func loadSelection() async {
-        guard let item = selectedItem else {
+        guard let path = selectedPath else {
             diff = nil
             wholeText = nil
             return
         }
-        diff = try? await git.diff(worktree: worktree, path: item.path, staged: item.section == .staged)
-        wholeText = try? git.fileContents(worktree: worktree, path: item.path)
+        if let item = items.first(where: { $0.path == path }) {
+            diff = try? await git.diff(worktree: worktree, path: path, staged: item.section == .staged)
+        } else {
+            diff = nil // 全体ツリーの未変更ファイルは diff なし（全文のみ）
+        }
+        wholeText = try? git.fileContents(worktree: worktree, path: path)
     }
 
     /// 作業ツリー上のファイルの最終更新時刻。削除済み等で取得できなければ nil。

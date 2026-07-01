@@ -67,6 +67,16 @@ public actor GitEngine {
         return WorktreeListParser.parse(raw)
     }
 
+    /// 追跡中 + 未追跡（ただし .gitignore 対象は除外）の全ファイル相対パス。
+    /// `git ls-files --cached --others --exclude-standard -z`。全体ツリー表示に使う。
+    public func listFiles(worktree: URL) async throws -> [String] {
+        let raw = try await GitRunner.run(
+            ["ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+            in: worktree
+        )
+        return raw.split(separator: "\u{0}", omittingEmptySubsequences: true).map(String.init)
+    }
+
     // MARK: - Mutate (serialized by the actor)
 
     /// `git worktree add -b <branch> <path> <baseRef>`
