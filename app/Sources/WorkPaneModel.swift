@@ -49,7 +49,10 @@ final class WorkPaneModel {
     var listMode: FileListMode = .changedTree
     var diff: FileDiff?
     var wholeText: String?
-    var commits: [CommitGraphLine] = []
+    var commits: [CommitGraphRow] = []
+    /// 選択中コミット（ハッシュ）。設定時は Diff ペインにそのコミットの差分を出す。
+    var selectedCommit: String?
+    var commitDiff: [FileDiff]?
     var loadError: String?
 
     /// 変更ツリーは既定で全展開（折り畳んだものだけ記録）、全体ツリーは既定折り畳み（展開だけ記録）。
@@ -93,12 +96,26 @@ final class WorkPaneModel {
 
     /// パスで選択（ツリーの葉/フラット行 共通）。変更が無いファイル（全体ツリー）は全文表示。
     func select(path: String) {
+        selectedCommit = nil // ファイル選択に切替
+        commitDiff = nil
         selectedPath = path
         let changed = items.first { $0.path == path }
         if changed == nil || changed?.isUntracked == true {
             viewMode = .whole
         }
         Task { await loadSelection() }
+    }
+
+    /// コミットを選択（履歴グラフ）。Diff ペインにそのコミットの差分（全ファイル）を出す。
+    func selectCommit(_ hash: String) {
+        selectedPath = nil // コミット選択に切替
+        selectedCommit = hash
+        Task { await loadCommitDiff() }
+    }
+
+    private func loadCommitDiff() async {
+        guard let hash = selectedCommit else { commitDiff = nil; return }
+        commitDiff = (try? await git.commitDiff(worktree: worktree, hash: hash)) ?? []
     }
 
     var selectedItem: ChangedFileItem? {

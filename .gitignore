@@ -24,3 +24,6 @@ vendor/ghostty-src/
 
 # Local app data / scratch
 *.log
+
+# Claude Code のローカル権限/フック設定（アプリが実行時に書き込む・機械固有）
+.claude/settings.local.json
