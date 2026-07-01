@@ -93,35 +93,97 @@ struct FileTreeView: View {
     var body: some View {
         List(selection: selection) {
             ForEach(flattened(), id: \.node.id) { entry in
-                FileTreeRow(node: entry.node, depth: entry.depth, expanded: isExpanded(entry.node.id))
-                    .tag(entry.node.id)
-                    .selectionDisabled(entry.node.isDirectory)
-                    .listRowSeparator(.hidden)
-                    .listRowInsets(EdgeInsets(top: 0, leading: 8, bottom: 0, trailing: 8))
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        if entry.node.isDirectory { toggle(entry.node.id) }
-                    }
+                FileTreeRow(
+                    node: entry.node,
+                    depth: entry.depth,
+                    expanded: isExpanded(entry.node.id),
+                    isLast: entry.isLast,
+                    lineage: entry.lineage
+                )
+                .tag(entry.node.id)
+                .selectionDisabled(entry.node.isDirectory)
+                .listRowSeparator(.hidden)
+                .listRowInsets(EdgeInsets(top: 0, leading: 8, bottom: 0, trailing: 8))
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    if entry.node.isDirectory { toggle(entry.node.id) }
+                }
             }
         }
         .listStyle(.plain)
         .environment(\.defaultMinListRowHeight, FileTreeRow.rowHeight)
     }
 
-    private struct Entry { let node: FileTreeNode; let depth: Int }
+    private struct Entry {
+        let node: FileTreeNode
+        let depth: Int
+        let isLast: Bool
+        /// 長さ == depth。lineage[k] = 深さ k の祖先に後続の兄弟がいる（縦線を通す）か。
+        let lineage: [Bool]
+    }
 
     private func flattened() -> [Entry] {
         var out: [Entry] = []
-        func walk(_ nodes: [FileTreeNode], depth: Int) {
-            for node in nodes {
-                out.append(Entry(node: node, depth: depth))
+        func walk(_ nodes: [FileTreeNode], depth: Int, lineage: [Bool]) {
+            for (index, node) in nodes.enumerated() {
+                let isLast = index == nodes.count - 1
+                out.append(Entry(node: node, depth: depth, isLast: isLast, lineage: lineage))
                 if node.isDirectory, isExpanded(node.id) {
-                    walk(node.children, depth: depth + 1)
+                    walk(node.children, depth: depth + 1, lineage: lineage + [!isLast])
                 }
             }
         }
-        walk(roots, depth: 0)
+        walk(roots, depth: 0, lineage: [])
         return out
+    }
+}
+
+/// 親から各項目への接続線（丸角の └ / ├、祖先の │ 通過）を Canvas で滑らかに描く。
+struct TreeGuides: View {
+    let depth: Int
+    let isLast: Bool
+    let lineage: [Bool]
+
+    private let indent = FileTreeRow.indentWidth
+    private let lineX: CGFloat = 5
+    private let radius: CGFloat = 5
+    private let color = Color.secondary.opacity(0.30)
+
+    var body: some View {
+        Canvas { context, size in
+            let mid = size.height / 2
+            for j in 0 ..< depth {
+                let x = CGFloat(j) * indent + lineX
+                if j < depth - 1 {
+                    // 祖先の縦線（後続の兄弟があるときだけ通す）
+                    if j < lineage.count, lineage[j] {
+                        var path = Path()
+                        path.move(to: CGPoint(x: x, y: 0))
+                        path.addLine(to: CGPoint(x: x, y: size.height))
+                        context.stroke(path, with: .color(color), lineWidth: 1)
+                    }
+                } else {
+                    // このノードへのエルボー
+                    var path = Path()
+                    if isLast {
+                        path.move(to: CGPoint(x: x, y: 0))
+                        path.addLine(to: CGPoint(x: x, y: mid - radius))
+                        path.addQuadCurve(
+                            to: CGPoint(x: x + radius, y: mid),
+                            control: CGPoint(x: x, y: mid)
+                        )
+                        path.addLine(to: CGPoint(x: size.width, y: mid))
+                    } else {
+                        path.move(to: CGPoint(x: x, y: 0))
+                        path.addLine(to: CGPoint(x: x, y: size.height))
+                        path.move(to: CGPoint(x: x, y: mid))
+                        path.addLine(to: CGPoint(x: size.width, y: mid))
+                    }
+                    context.stroke(path, with: .color(color), lineWidth: 1)
+                }
+            }
+        }
+        .frame(width: max(0, CGFloat(depth) * indent), height: FileTreeRow.rowHeight)
     }
 }
 
@@ -129,24 +191,16 @@ struct FileTreeRow: View {
     let node: FileTreeNode
     let depth: Int
     let expanded: Bool
+    var isLast: Bool = true
+    var lineage: [Bool] = []
 
     static let rowHeight: CGFloat = 22
-    private static let indentWidth: CGFloat = 14
+    static let indentWidth: CGFloat = 14
 
     var body: some View {
         HStack(spacing: 4) {
-            // VSCode 風のインデントガイド（親シェブロン位置に揃えた淡い縦線）。
-            // 行高いっぱいに描き、行を隙間なく詰めることで縦線が連続して見える。
-            ForEach(0 ..< depth, id: \.self) { _ in
-                Color.clear
-                    .frame(width: Self.indentWidth, height: Self.rowHeight)
-                    .overlay(alignment: .leading) {
-                        Rectangle()
-                            .fill(Color.secondary.opacity(0.22))
-                            .frame(width: 1)
-                            .offset(x: 5)
-                    }
-            }
+            // 親から各項目への滑らかな接続線（丸角の └ / ├、祖先の │）。
+            TreeGuides(depth: depth, isLast: isLast, lineage: lineage)
             // 開閉シェブロン（フォルダのみ、展開で回転）。ファイルは同じ幅の空きで名前を揃える。
             Group {
                 if node.isDirectory {
