@@ -25,6 +25,8 @@ final class AgentSessionModel {
     private let initialResumeID: String?
     /// 新しいセッション ID/transcript を受け取ったら永続化するためのコールバック。
     private let onSessionID: ((String, String?) -> Void)?
+    /// 状態が変化したときに呼ばれる（入力待ちの通知などに使う）。
+    private let onStatusChange: ((AgentStatus) -> Void)?
 
     /// resume に使う ID。今回受信済みなら最新、無ければ前回永続化分。
     private var resumeID: String? { lastSessionID ?? initialResumeID }
@@ -44,11 +46,13 @@ final class AgentSessionModel {
         sessionID: UUID,
         worktree: URL,
         resumeID: String? = nil,
-        onSessionID: ((String, String?) -> Void)? = nil
+        onSessionID: ((String, String?) -> Void)? = nil,
+        onStatusChange: ((AgentStatus) -> Void)? = nil
     ) {
         self.worktree = worktree
         self.initialResumeID = resumeID
         self.onSessionID = onSessionID
+        self.onStatusChange = onStatusChange
         let short = sessionID.uuidString.replacingOccurrences(of: "-", with: "").prefix(10).lowercased()
         let dir = "/tmp/labolabo"
         try? FileManager.default.createDirectory(
@@ -63,12 +67,14 @@ final class AgentSessionModel {
     func start() {
         bus.onEvent = { [weak self] event in
             guard let self else { return }
+            let previous = status
             status = event.status
             if let path = event.transcriptPath { lastTranscriptPath = path }
             if let id = event.sessionID {
                 lastSessionID = id
                 onSessionID?(id, event.transcriptPath) // 次回起動の --resume 用に永続化
             }
+            if status != previous { onStatusChange?(status) }
         }
         bus.start()
         installLocalSettings()

@@ -14,6 +14,7 @@ struct SettingsView: View {
 
 struct GeneralSettingsView: View {
     @AppStorage(AppIconController.defaultsKey) private var iconModeRaw = AppIconMode.auto.rawValue
+    @AppStorage(AgentNotifier.enabledKey) private var notifyWaiting = true
 
     private var iconMode: AppIconMode { AppIconMode(rawValue: iconModeRaw) ?? .auto }
 
@@ -38,6 +39,16 @@ struct GeneralSettingsView: View {
                 }
             } footer: {
                 Text("「自動」はシステムの外観（ライト/ダーク）に合わせて Dock アイコンを切り替えます。反映はアプリ実行中です。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section {
+                Toggle("入力待ちを通知する", isOn: $notifyWaiting)
+            } header: {
+                Text("通知")
+            } footer: {
+                Text("別のセッションで作業中や、アプリが非アクティブのときに、エージェントが入力・許可待ちになったら macOS 通知で知らせます。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import AppKit
 import LaboLaboEngine
 import LaboLaboStore
 
@@ -22,6 +23,9 @@ final class RepoSession: Identifiable {
     var agentSessionID: String?
     /// 直近の transcript(JSONL) パス。
     var transcriptPath: String?
+    /// このセッションのエージェント状態モデル（開いている間 store が保持・監視）。
+    /// 背景セッションでも hooks を受信するため、選択の有無に関係なく生かす。
+    var agent: AgentSessionModel?
 
     init(
         id: UUID = UUID(),
@@ -74,6 +78,38 @@ final class SessionStore {
         Task { [github] in
             let pr = (try? await github.pullRequest(worktree: session.worktreePath)) ?? nil
             session.pullRequest = pr
+        }
+    }
+
+    // MARK: - エージェント状態（セッション寿命で監視）
+
+    /// セッションのエージェント状態モデルを生成・起動して保持する。選択に関係なく
+    /// 生かすことで、背景セッションの「入力待ち」も検知・通知できる。
+    private func attachAgent(_ session: RepoSession) {
+        guard session.agent == nil else { return }
+        let sid = session.id
+        let agent = AgentSessionModel(
+            sessionID: sid,
+            worktree: session.worktreePath,
+            resumeID: session.agentSessionID,
+            onSessionID: { [weak self] id, tp in
+                self?.updateAgentSession(sid, agentSessionID: id, transcriptPath: tp)
+            },
+            onStatusChange: { [weak self] status in
+                self?.handleStatusChange(sid, status)
+            }
+        )
+        session.agent = agent
+        agent.start()
+    }
+
+    /// 入力待ちに入ったら通知（前面かつ当該セッション選択中は不要＝ピルで見えているため）。
+    private func handleStatusChange(_ id: RepoSession.ID, _ status: AgentStatus) {
+        guard status == .waitingForInput,
+              let session = sessions.first(where: { $0.id == id }) else { return }
+        let visibleNow = NSApp.isActive && selection == id
+        if !visibleNow {
+            AgentNotifier.notifyWaiting(sessionName: session.name, branch: session.branch)
         }
     }
 
@@ -139,6 +175,7 @@ final class SessionStore {
         refreshBranch(session)
         resolveRepo(session)
         fetchPR(session)
+        attachAgent(session)
     }
 
     // MARK: - New Session（worktree 作成）
@@ -189,9 +226,13 @@ final class SessionStore {
         select(session.id)
         resolveRepo(session)
         fetchPR(session)
+        attachAgent(session)
     }
 
     func close(_ id: RepoSession.ID) {
+        if let session = sessions.first(where: { $0.id == id }) {
+            session.agent?.stop()  // hooks 撤去 + ソケット停止
+        }
         sessions.removeAll { $0.id == id }
         try? db?.deleteSession(id: id.uuidString)
         if selection == id { select(sessions.first?.id) }
@@ -245,6 +286,7 @@ final class SessionStore {
             refreshBranch(session)
             resolveRepo(session)
             fetchPR(session)
+            attachAgent(session)
         }
 
         let storedSelection = (try? db.selectedSessionID()) ?? nil
