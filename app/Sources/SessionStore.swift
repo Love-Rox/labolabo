@@ -127,6 +127,56 @@ final class SessionStore {
         fetchPR(session)
     }
 
+    // MARK: - New Session（worktree 作成）
+
+    /// リポジトリ選択後に New Session シートへ渡す情報。
+    struct RepoInspect: Sendable, Equatable {
+        let root: URL
+        let name: String
+        let current: String?
+        let branches: [String]
+    }
+
+    /// 選んだフォルダから所属リポジトリの root/名前/現在ブランチ/ブランチ一覧を解決する。
+    func inspectRepo(at url: URL) async -> RepoInspect? {
+        guard let info = try? await git.repoInfo(worktree: url) else { return nil }
+        let current = (try? await git.status(worktree: url))?.branch
+        let branches = (try? await git.localBranches(worktree: url)) ?? []
+        return RepoInspect(
+            root: URL(fileURLWithPath: info.root, isDirectory: true),
+            name: info.name,
+            current: current,
+            branches: branches
+        )
+    }
+
+    /// ブランチ名から worktree ディレクトリ用の slug。
+    static func worktreeSlug(_ branch: String) -> String {
+        branch
+            .replacingOccurrences(of: "/", with: "-")
+            .replacingOccurrences(of: " ", with: "-")
+            .replacingOccurrences(of: "..", with: "-")
+    }
+
+    /// 既定の worktree 配置先。ユーザー慣習に合わせて兄弟 `<repo>-wt-<slug>`。
+    static func defaultWorktreePath(repoRoot: URL, branch: String) -> URL {
+        let parent = repoRoot.deletingLastPathComponent()
+        return parent.appendingPathComponent("\(repoRoot.lastPathComponent)-wt-\(worktreeSlug(branch))")
+    }
+
+    /// 新規ブランチ＋worktree を作成してセッション化する。失敗時は throw（呼び出し側で表示）。
+    func createWorktreeSession(
+        repoRoot: URL, baseRef: String, newBranch: String, name: String, worktreePath: URL
+    ) async throws {
+        try await git.addWorktree(repo: repoRoot, path: worktreePath, branch: newBranch, baseRef: baseRef)
+        let session = RepoSession(worktreePath: worktreePath, name: name, branch: newBranch)
+        sessions.append(session)
+        persist(session)
+        select(session.id)
+        resolveRepo(session)
+        fetchPR(session)
+    }
+
     func close(_ id: RepoSession.ID) {
         sessions.removeAll { $0.id == id }
         try? db?.deleteSession(id: id.uuidString)

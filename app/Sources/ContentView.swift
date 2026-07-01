@@ -16,6 +16,7 @@ enum LayoutMetrics {
 struct ContentView: View {
     @State private var store = SessionStore()
     @State private var showImporter = false
+    @State private var showNewSession = false
     @State private var showChangelog = false
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
 
@@ -67,6 +68,9 @@ struct ContentView: View {
                     store.openRepository(at: url)
                 }
             }
+            .sheet(isPresented: $showNewSession) {
+                NewSessionSheet(store: store)
+            }
         } detail: {
             if let session = store.selected {
                 SessionDetailView(
@@ -80,9 +84,10 @@ struct ContentView: View {
                 ContentUnavailableView {
                     Label("セッションがありません", systemImage: "sidebar.left")
                 } description: {
-                    Text("左上の ＋ から git リポジトリ（worktree）を開きます")
+                    Text("左上の ＋ から新規セッション（worktree 作成）または既存フォルダを開きます")
                 } actions: {
-                    Button("リポジトリを開く") { showImporter = true }
+                    Button("新規セッション…") { showNewSession = true }
+                    Button("既存のフォルダを開く…") { showImporter = true }
                 }
             }
         }
@@ -116,13 +121,16 @@ struct ContentView: View {
             }
             .buttonStyle(.borderless)
             .help("変更履歴を表示")
-            Button {
-                showImporter = true
+            Menu {
+                Button("新規セッション（worktree を作成）…") { showNewSession = true }
+                Button("既存のフォルダを開く…") { showImporter = true }
             } label: {
                 Image(systemName: "plus")
             }
-            .buttonStyle(.borderless)
-            .help("リポジトリを開く")
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("セッションを追加")
             Button {
                 columnVisibility = .detailOnly
             } label: {
