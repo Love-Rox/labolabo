@@ -149,10 +149,41 @@ struct SessionRow: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
-            Spacer(minLength: 0)
+            Spacer(minLength: 4)
+            if let pr = session.pullRequest {
+                PRBadge(pr: pr)
+            }
         }
         .padding(.vertical, 2)
         .padding(.trailing, 8)
+    }
+}
+
+/// セッション行の PR バッジ（状態アイコン + 番号 + checks）。
+struct PRBadge: View {
+    let pr: PullRequestInfo
+
+    var body: some View {
+        HStack(spacing: 2) {
+            Image(systemName: pr.state.icon)
+                .foregroundStyle(pr.state.color)
+                .font(.caption2)
+            Text("#\(pr.number)")
+                .font(.caption2.monospaced())
+                .foregroundStyle(.secondary)
+            if let glyph = pr.checks.glyph {
+                Image(systemName: glyph)
+                    .foregroundStyle(pr.checks.color)
+                    .font(.system(size: 9))
+            }
+        }
+        .help(helpText)
+    }
+
+    private var helpText: String {
+        var text = "PR #\(pr.number)（\(pr.state.label)）\(pr.title)"
+        if let issue = pr.issue { text += "\nIssue #\(issue)" }
+        return text
     }
 }
 

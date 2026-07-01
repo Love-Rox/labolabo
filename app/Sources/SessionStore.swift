@@ -16,6 +16,8 @@ final class RepoSession: Identifiable {
     var repoKey: String?
     /// 所属リポジトリの表示名（owner/repo もしくはフォルダ名）。
     var repoName: String?
+    /// このブランチに対応する PR（gh 取得。無ければ nil）。
+    var pullRequest: PullRequestInfo?
 
     init(id: UUID = UUID(), worktreePath: URL, name: String? = nil, branch: String? = nil) {
         self.id = id
@@ -44,12 +46,21 @@ final class SessionStore {
     private(set) var repoColors: [String: String] = [:]
 
     private let git = GitEngine()
+    private let github = GitHubEngine()
     private let db: SessionDatabase?
 
     init() {
         db = try? SessionDatabase(url: SessionDatabase.defaultURL())
         loadRepoColors()
         restore()
+    }
+
+    /// このブランチに対応する PR を gh から取得（失敗/未検出なら nil）。
+    private func fetchPR(_ session: RepoSession) {
+        Task { [github] in
+            let pr = (try? await github.pullRequest(worktree: session.worktreePath)) ?? nil
+            session.pullRequest = pr
+        }
     }
 
     // MARK: - リポジトリの色
@@ -113,6 +124,7 @@ final class SessionStore {
         select(session.id)
         refreshBranch(session)
         resolveRepo(session)
+        fetchPR(session)
     }
 
     func close(_ id: RepoSession.ID) {
@@ -124,6 +136,7 @@ final class SessionStore {
     func select(_ id: RepoSession.ID?) {
         selection = id
         try? db?.setSelectedSessionID(id?.uuidString)
+        if let session = sessions.first(where: { $0.id == id }) { fetchPR(session) }
     }
 
     // MARK: - Restore on launch
@@ -142,6 +155,7 @@ final class SessionStore {
             sessions.append(session)
             refreshBranch(session)
             resolveRepo(session)
+            fetchPR(session)
         }
 
         let storedSelection = (try? db.selectedSessionID()) ?? nil
