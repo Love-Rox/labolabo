@@ -96,12 +96,16 @@ struct FileTreeView: View {
                 FileTreeRow(node: entry.node, depth: entry.depth, expanded: isExpanded(entry.node.id))
                     .tag(entry.node.id)
                     .selectionDisabled(entry.node.isDirectory)
+                    .listRowSeparator(.hidden)
+                    .listRowInsets(EdgeInsets(top: 0, leading: 8, bottom: 0, trailing: 8))
                     .contentShape(Rectangle())
                     .onTapGesture {
                         if entry.node.isDirectory { toggle(entry.node.id) }
                     }
             }
         }
+        .listStyle(.plain)
+        .environment(\.defaultMinListRowHeight, FileTreeRow.rowHeight)
     }
 
     private struct Entry { let node: FileTreeNode; let depth: Int }
@@ -126,19 +130,21 @@ struct FileTreeRow: View {
     let depth: Int
     let expanded: Bool
 
+    static let rowHeight: CGFloat = 22
     private static let indentWidth: CGFloat = 14
 
     var body: some View {
         HStack(spacing: 4) {
             // VSCode 風のインデントガイド（親シェブロン位置に揃えた淡い縦線）。
+            // 行高いっぱいに描き、行を隙間なく詰めることで縦線が連続して見える。
             ForEach(0 ..< depth, id: \.self) { _ in
                 Color.clear
-                    .frame(width: Self.indentWidth)
+                    .frame(width: Self.indentWidth, height: Self.rowHeight)
                     .overlay(alignment: .leading) {
                         Rectangle()
-                            .fill(Color.secondary.opacity(0.18))
+                            .fill(Color.secondary.opacity(0.22))
                             .frame(width: 1)
-                            .padding(.leading, 5)
+                            .offset(x: 5)
                     }
             }
             // 開閉シェブロン（フォルダのみ、展開で回転）。ファイルは同じ幅の空きで名前を揃える。
@@ -171,6 +177,7 @@ struct FileTreeRow: View {
                 }
             }
         }
+        .frame(height: Self.rowHeight)
         .help(node.id)
     }
 
