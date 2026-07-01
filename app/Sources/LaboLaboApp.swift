@@ -1,4 +1,5 @@
 import SwiftUI
+import UserNotifications
 
 /// 実行エントリ。`--hook <socket>` 付きで起動された場合は GUI を立ち上げず、
 /// Claude hook の stdin を当該ソケットへ転送して即終了するフォワーダとして動く
@@ -15,10 +16,20 @@ enum AppEntry {
     }
 }
 
-/// 起動完了時に Dock アイコンの外観追従を開始する（実行中のみ切替可能）。
-final class AppDelegate: NSObject, NSApplicationDelegate {
+/// 起動完了時に Dock アイコンの外観追従と、入力待ち通知の準備を行う。
+final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppIconController.shared.start()
+        AgentNotifier.configure(delegate: self)
+    }
+
+    /// アプリ前面時も通知を表示する（別セッションで作業中に入力待ちを知らせるため）。
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        completionHandler([.banner, .sound])
     }
 }
 
