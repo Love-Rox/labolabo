@@ -91,24 +91,29 @@ struct FileDetailPane: View {
 struct CommitGraphPane: View {
     let model: WorkPaneModel
 
-    /// レーン数（gutter 幅を全行で揃えてグラフ列の幅を決める）。
+    /// レーン数（gutter 幅を全行で揃えてグラフ列の幅を決める）。各行の node/edge が
+    /// 使う最大列 +1。
     private var laneCount: Int {
-        let maxLen = model.commits.map(\.graph.count).max() ?? 0
-        return max(1, (maxLen + 1) / 2)
+        let maxLane = model.commits.map { row in
+            max(row.nodeLane, row.edges.map(\.lane).max() ?? 0)
+        }.max() ?? 0
+        return maxLane + 1
     }
 
     /// グラフ（レーン）列の自然幅。
-    private var graphWidth: CGFloat { CGFloat(laneCount) * CommitGraphGutter.laneWidth }
+    private var graphWidth: CGFloat {
+        CommitGraphGutter.leftInset + CGFloat(laneCount) * CommitGraphGutter.laneWidth
+    }
 
     /// これを超えたらグラフ列だけを横スクロールにして、右のコミット情報を画面内に守る。
     private let graphMaxWidth: CGFloat = 132
 
-    private func isSelected(_ line: CommitGraphLine) -> Bool {
-        line.commit.map { model.selectedCommit == $0.hash } ?? false
+    private func isSelected(_ row: CommitGraphRow) -> Bool {
+        model.selectedCommit == row.commit.hash
     }
 
-    private func select(_ line: CommitGraphLine) {
-        if let hash = line.commit?.hash { model.selectCommit(hash) }
+    private func select(_ row: CommitGraphRow) {
+        model.selectCommit(row.commit.hash)
     }
 
     var body: some View {
@@ -142,22 +147,22 @@ struct CommitGraphPane: View {
 
     private var gutterStack: some View {
         LazyVStack(spacing: 0) {
-            ForEach(model.commits) { line in
-                CommitGraphGutter(graph: line.graph, laneCount: laneCount)
+            ForEach(model.commits) { row in
+                CommitGraphGutter(row: row, laneCount: laneCount)
                     .frame(height: CommitGraphGutter.rowHeight)
-                    .background(isSelected(line) ? Color.accentColor.opacity(0.18) : Color.clear)
+                    .background(isSelected(row) ? Color.accentColor.opacity(0.18) : Color.clear)
                     .contentShape(Rectangle())
-                    .onTapGesture { select(line) }
+                    .onTapGesture { select(row) }
             }
         }
     }
 
     private var infoColumn: some View {
         LazyVStack(spacing: 0) {
-            ForEach(model.commits) { line in
-                CommitInfoRow(line: line, isSelected: isSelected(line))
+            ForEach(model.commits) { row in
+                CommitInfoRow(commit: row.commit, isSelected: isSelected(row))
                     .contentShape(Rectangle())
-                    .onTapGesture { select(line) }
+                    .onTapGesture { select(row) }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -167,47 +172,43 @@ struct CommitGraphPane: View {
 /// コミット情報の 1 行（gutter を除いた右側）。gutter とは列を分けて配置し、
 /// グラフが広くても件名・作者・時刻が画面内に残るようにする。
 struct CommitInfoRow: View {
-    let line: CommitGraphLine
+    let commit: CommitGraphRow.Commit
     var isSelected: Bool = false
 
     var body: some View {
         HStack(spacing: 8) {
-            if let commit = line.commit {
-                Text(commit.hash)
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(Color.accentColor)
-                if !commit.refs.isEmpty {
-                    Text(commit.refs)
-                        .font(.system(size: 10))
-                        .lineLimit(1)
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 1)
-                        .background(Capsule().fill(Color.orange.opacity(0.18)))
-                        .foregroundStyle(.orange)
-                        .help(commit.refs)
-                }
-                Text(commit.subject)
-                    .font(.system(size: 11))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .help(commit.subject)
-                Spacer(minLength: 8)
-                Text(commit.author)
+            Text(commit.hash)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(Color.accentColor)
+            if !commit.refs.isEmpty {
+                Text(commit.refs)
                     .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
                     .lineLimit(1)
-                    .help(commit.author)
-                if let date = commit.date {
-                    Text(date, format: .relative(presentation: .numeric, unitsStyle: .narrow))
-                        .font(.system(size: 10))
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(1)
-                        .fixedSize()
-                        // narrow 相対表示は省略が強いので、ホバーでロケール対応のフル日時を出す。
-                        .help(date.formatted(date: .complete, time: .shortened))
-                }
-            } else {
-                Spacer(minLength: 0)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1)
+                    .background(Capsule().fill(Color.orange.opacity(0.18)))
+                    .foregroundStyle(.orange)
+                    .help(commit.refs)
+            }
+            Text(commit.subject)
+                .font(.system(size: 11))
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .help(commit.subject)
+            Spacer(minLength: 8)
+            Text(commit.author)
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .help(commit.author)
+            if let date = commit.date {
+                Text(date, format: .relative(presentation: .numeric, unitsStyle: .narrow))
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .fixedSize()
+                    // narrow 相対表示は省略が強いので、ホバーでロケール対応のフル日時を出す。
+                    .help(date.formatted(date: .complete, time: .shortened))
             }
         }
         .padding(.leading, 8)
@@ -218,61 +219,59 @@ struct CommitInfoRow: View {
     }
 }
 
-/// `git log --graph` の ASCII レーンを解析し、色分けした滑らかなベクター
-/// （縦線・丸みのある分岐/合流・ノード円）で描く。
+/// 固定レーン配置のグラフ 1 行を、色分けした滑らかなベクター（縦線・丸みのある
+/// 分岐/合流カーブ・ノード円）で描く。`through`=通過レーンの直線、`nodeIn`=上から
+/// ノードへ入る子の線（上半分）、`nodeOut`=ノードから下へ出る親の線（下半分）。
 struct CommitGraphGutter: View {
-    let graph: String
+    let row: CommitGraphRow
     let laneCount: Int
 
     static let laneWidth: CGFloat = 14
     static let rowHeight: CGFloat = 22
+    /// 左端レーンのノードが枠に触れて切れないようにする余白。
+    static let leftInset: CGFloat = 5
     private static let colors: [Color] = [
         .blue, .teal, .green, .orange, .pink, .purple, .red, .yellow, .indigo, .mint,
     ]
 
-    private func laneX(_ k: Int) -> CGFloat { CGFloat(k) * Self.laneWidth + Self.laneWidth / 2 }
+    private func laneX(_ k: Int) -> CGFloat { Self.leftInset + CGFloat(k) * Self.laneWidth + Self.laneWidth / 2 }
     private func color(_ k: Int) -> Color { Self.colors[((k % Self.colors.count) + Self.colors.count) % Self.colors.count] }
 
     var body: some View {
         Canvas { context, size in
             let h = size.height
             let mid = h / 2
-            for (i, ch) in Array(graph).enumerated() {
-                let k = i / 2
-                let x = laneX(k)
-                if i % 2 == 0 {
-                    switch ch {
-                    case "*":
-                        line(context, CGPoint(x: x, y: 0), CGPoint(x: x, y: h), color(k))
-                        let r: CGFloat = 3.5
-                        let rect = CGRect(x: x - r, y: mid - r, width: r * 2, height: r * 2)
-                        context.fill(Path(ellipseIn: rect), with: .color(color(k)))
-                    case "|":
-                        line(context, CGPoint(x: x, y: 0), CGPoint(x: x, y: h), color(k))
-                    case "_":
-                        line(context, CGPoint(x: x, y: mid), CGPoint(x: laneX(k + 1), y: mid), color(k))
-                    default:
-                        break
+            let nodeX = laneX(row.nodeLane)
+
+            // 先に線を描き、最後にノード円を重ねる。
+            for edge in row.edges {
+                let ex = laneX(edge.lane)
+                let c = color(edge.colorLane)
+                switch edge.shape {
+                case .through:
+                    line(context, CGPoint(x: ex, y: 0), CGPoint(x: ex, y: h), c)
+                case .nodeIn:
+                    // 上端(edge.lane) → ノード(mid)。同列なら直線、違えば曲線。
+                    if edge.lane == row.nodeLane {
+                        line(context, CGPoint(x: ex, y: 0), CGPoint(x: nodeX, y: mid), c)
+                    } else {
+                        curve(context, CGPoint(x: ex, y: 0), CGPoint(x: nodeX, y: mid), c)
                     }
-                } else {
-                    let xR = laneX(k + 1)
-                    switch ch {
-                    // 斜めコネクタは常に「外側レーン(k+1)」の枝を表す（`\`=分岐/第2親、
-                    // `/`=合流/フォールド）。両者とも k+1 の色にして、隣接する縦線の色と
-                    // つながって見えるようにする（`/` を k 側の色にすると合流で色が食い違う）。
-                    case "\\":
-                        curve(context, CGPoint(x: x, y: 0), CGPoint(x: xR, y: h), color(k + 1))
-                    case "/":
-                        curve(context, CGPoint(x: xR, y: 0), CGPoint(x: x, y: h), color(k + 1))
-                    case "|":
-                        line(context, CGPoint(x: x, y: 0), CGPoint(x: x, y: h), color(k))
-                    default:
-                        break
+                case .nodeOut:
+                    // ノード(mid) → 下端(edge.lane)。
+                    if edge.lane == row.nodeLane {
+                        line(context, CGPoint(x: nodeX, y: mid), CGPoint(x: ex, y: h), c)
+                    } else {
+                        curve(context, CGPoint(x: nodeX, y: mid), CGPoint(x: ex, y: h), c)
                     }
                 }
             }
+
+            let r: CGFloat = 3.5
+            let rect = CGRect(x: nodeX - r, y: mid - r, width: r * 2, height: r * 2)
+            context.fill(Path(ellipseIn: rect), with: .color(color(row.nodeLane)))
         }
-        .frame(width: CGFloat(laneCount) * Self.laneWidth, height: Self.rowHeight)
+        .frame(width: Self.leftInset + CGFloat(laneCount) * Self.laneWidth, height: Self.rowHeight)
     }
 
     private func line(_ ctx: GraphicsContext, _ from: CGPoint, _ to: CGPoint, _ c: Color) {

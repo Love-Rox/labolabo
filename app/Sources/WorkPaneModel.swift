@@ -49,7 +49,7 @@ final class WorkPaneModel {
     var listMode: FileListMode = .changedTree
     var diff: FileDiff?
     var wholeText: String?
-    var commits: [CommitGraphLine] = []
+    var commits: [CommitGraphRow] = []
     /// 選択中コミット（ハッシュ）。設定時は Diff ペインにそのコミットの差分を出す。
     var selectedCommit: String?
     var commitDiff: [FileDiff]?
