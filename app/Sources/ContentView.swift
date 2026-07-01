@@ -45,7 +45,7 @@ struct ContentView: View {
                         ForEach(store.groupedSessions) { group in
                             Section {
                                 ForEach(group.sessions) { session in
-                                    SessionRow(session: session)
+                                    SessionRow(session: session, onClose: { store.close(session.id) })
                                         .tag(session.id)
                                         .listRowBackground(rowBackground(colorID: store.colorID(forRepo: group.key)))
                                         .contextMenu {
@@ -120,7 +120,6 @@ struct ContentView: View {
                 SessionDetailView(
                     session: session,
                     store: store,
-                    onClose: { store.close(session.id) },
                     sidebarCollapsed: sidebarCollapsed,
                     onExpandSidebar: { columnVisibility = .all }
                 )
@@ -227,6 +226,9 @@ struct ContentView: View {
 
 struct SessionRow: View {
     let session: RepoSession
+    var onClose: () -> Void = {}
+
+    @State private var hovering = false
 
     var body: some View {
         HStack(spacing: 8) {
@@ -245,9 +247,20 @@ struct SessionRow: View {
             if let pr = session.pullRequest {
                 PRBadge(pr: pr)
             }
+            // ホバー時に閉じる×を表示（サイドバー内で直接閉じる）。
+            if hovering {
+                Button(action: onClose) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 10, weight: .semibold))
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(.secondary)
+                .help("セッションを閉じる")
+            }
         }
         .padding(.vertical, 2)
         .padding(.trailing, 8)
+        .onHover { hovering = $0 }
     }
 }
 
@@ -376,7 +389,6 @@ struct RepoGroupHeader: View {
 struct SessionDetailView: View {
     let session: RepoSession
     let store: SessionStore
-    let onClose: () -> Void
     var sidebarCollapsed: Bool = false
     var onExpandSidebar: () -> Void = {}
 
@@ -389,13 +401,11 @@ struct SessionDetailView: View {
     init(
         session: RepoSession,
         store: SessionStore,
-        onClose: @escaping () -> Void,
         sidebarCollapsed: Bool = false,
         onExpandSidebar: @escaping () -> Void = {}
     ) {
         self.session = session
         self.store = store
-        self.onClose = onClose
         self.sidebarCollapsed = sidebarCollapsed
         self.onExpandSidebar = onExpandSidebar
         _work = State(initialValue: WorkPaneModel(worktree: session.worktreePath))
@@ -557,14 +567,6 @@ struct SessionDetailView: View {
 
             IDEOpenMenu(worktree: session.worktreePath)
             SessionClock()
-
-            Button {
-                onClose()
-            } label: {
-                Image(systemName: "xmark")
-            }
-            .buttonStyle(CircleIconButtonStyle(tint: .red))
-            .help("セッションを閉じる")
         }
         // サイドバー折りたたみ時は詳細が信号機の下に来るので左インセットで避ける。
         // 展開ボタンが入る分、通常より少し詰める。
