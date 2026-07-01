@@ -150,11 +150,13 @@ struct SessionRow: View {
         HStack(spacing: 8) {
             VStack(alignment: .leading, spacing: 1) {
                 Text(session.name).lineLimit(1).truncationMode(.middle)
+                    .help(session.name)
                 Text(session.branch ?? "—")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
+                    .help(session.branch ?? "—")
             }
             Spacer(minLength: 4)
             if let pr = session.pullRequest {
@@ -317,9 +319,9 @@ struct SessionDetailView: View {
             Button {
                 tiling.launchInNewTerminal(title: "Claude", command: agent.launchCommand())
             } label: {
-                Image(systemName: "sparkles")
+                ClaudeMark().frame(width: 15, height: 15)
             }
-            .buttonStyle(CircleIconButtonStyle(tint: .purple))
+            .buttonStyle(CircleIconButtonStyle(tint: Color(red: 0.85, green: 0.47, blue: 0.34)))
             .help("Claude を起動（状態検出 hooks 付き）")
 
             Button {

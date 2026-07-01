@@ -14,20 +14,65 @@ struct ChangedFilesPane: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            BranchStatusBar(status: model.status)
-            Divider()
-            HStack {
-                Picker("", selection: listModeBinding) {
-                    ForEach(FileListMode.allCases) { Text($0.rawValue).tag($0) }
-                }
-                .pickerStyle(.segmented)
-                .fixedSize()
-                Spacer()
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 4)
+            filesBar
             Divider()
             ChangedFilesList(model: model)
+        }
+    }
+
+    /// ブランチ状態と表示切替を 1 本のバーにまとめる。表示切替は幅に余裕があれば
+    /// セグメント、狭ければプルダウン（ViewThatFits で自動切替）。
+    private var filesBar: some View {
+        HStack(spacing: 8) {
+            branchStatus
+                .layoutPriority(0)
+            Spacer(minLength: 6)
+            modeSelector
+                .layoutPriority(1)
+        }
+        .font(.caption)
+        .padding(.horizontal, 10)
+        .frame(minHeight: 30)
+    }
+
+    @ViewBuilder
+    private var branchStatus: some View {
+        if let status = model.status {
+            HStack(spacing: 6) {
+                Label(status.branch ?? "—", systemImage: "arrow.triangle.branch")
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .help(status.branch ?? "—")
+                if status.ahead > 0 {
+                    Label("\(status.ahead)", systemImage: "arrow.up").labelStyle(.titleAndIcon)
+                }
+                if status.behind > 0 {
+                    Label("\(status.behind)", systemImage: "arrow.down").labelStyle(.titleAndIcon)
+                }
+            }
+            .foregroundStyle(.secondary)
+        } else {
+            Text("読み込み中…").foregroundStyle(.tertiary)
+        }
+    }
+
+    private var modeSelector: some View {
+        ViewThatFits(in: .horizontal) {
+            Picker("", selection: listModeBinding) {
+                ForEach(FileListMode.allCases) { Text($0.rawValue).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .fixedSize()
+
+            Menu {
+                Picker("表示", selection: listModeBinding) {
+                    ForEach(FileListMode.allCases) { Text($0.rawValue).tag($0) }
+                }
+            } label: {
+                Label(model.listMode.rawValue, systemImage: "line.3.horizontal.decrease")
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
         }
     }
 }
@@ -46,66 +91,202 @@ struct FileDetailPane: View {
 struct CommitGraphPane: View {
     let model: WorkPaneModel
 
+    /// レーン数（gutter 幅を全行で揃えてグラフ列の幅を決める）。各行の node/edge が
+    /// 使う最大列 +1。
+    private var laneCount: Int {
+        let maxLane = model.commits.map { row in
+            max(row.nodeLane, row.edges.map(\.lane).max() ?? 0)
+        }.max() ?? 0
+        return maxLane + 1
+    }
+
+    /// グラフ（レーン）列の自然幅。
+    private var graphWidth: CGFloat {
+        CommitGraphGutter.leftInset + CGFloat(laneCount) * CommitGraphGutter.laneWidth
+    }
+
+    /// これを超えたらグラフ列だけを横スクロールにして、右のコミット情報を画面内に守る。
+    private let graphMaxWidth: CGFloat = 132
+
+    private func isSelected(_ row: CommitGraphRow) -> Bool {
+        model.selectedCommit == row.commit.hash
+    }
+
+    private func select(_ row: CommitGraphRow) {
+        model.selectCommit(row.commit.hash)
+    }
+
     var body: some View {
         if model.commits.isEmpty {
             ContentUnavailableView("コミットがありません", systemImage: "clock.arrow.circlepath")
         } else {
+            // グラフ列とコミット情報列を分離。グラフが広い（分岐が多い）ときは
+            // グラフ列だけを横スクロールにし、情報列は常に読める位置へ残す。
             ScrollView(.vertical) {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    ForEach(model.commits) { line in
-                        CommitGraphRow(line: line)
-                    }
+                HStack(alignment: .top, spacing: 0) {
+                    graphColumn
+                    infoColumn
                 }
                 .padding(.vertical, 4)
-                .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
     }
+
+    /// グラフ（レーン）列。幅が上限を超えるときだけ横スクロールにする。
+    @ViewBuilder
+    private var graphColumn: some View {
+        if graphWidth > graphMaxWidth {
+            ScrollView(.horizontal, showsIndicators: true) {
+                gutterStack
+            }
+            .frame(width: graphMaxWidth)
+        } else {
+            gutterStack
+        }
+    }
+
+    private var gutterStack: some View {
+        LazyVStack(spacing: 0) {
+            ForEach(model.commits) { row in
+                CommitGraphGutter(row: row, laneCount: laneCount)
+                    .frame(height: CommitGraphGutter.rowHeight)
+                    .background(isSelected(row) ? Color.accentColor.opacity(0.18) : Color.clear)
+                    .contentShape(Rectangle())
+                    .onTapGesture { select(row) }
+            }
+        }
+    }
+
+    private var infoColumn: some View {
+        LazyVStack(spacing: 0) {
+            ForEach(model.commits) { row in
+                CommitInfoRow(commit: row.commit, isSelected: isSelected(row))
+                    .contentShape(Rectangle())
+                    .onTapGesture { select(row) }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
 }
 
-struct CommitGraphRow: View {
-    let line: CommitGraphLine
+/// コミット情報の 1 行（gutter を除いた右側）。gutter とは列を分けて配置し、
+/// グラフが広くても件名・作者・時刻が画面内に残るようにする。
+struct CommitInfoRow: View {
+    let commit: CommitGraphRow.Commit
+    var isSelected: Bool = false
 
     var body: some View {
-        HStack(spacing: 6) {
-            Text(line.graph.isEmpty ? " " : line.graph)
+        HStack(spacing: 8) {
+            Text(commit.hash)
                 .font(.system(size: 11, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .fixedSize()
-            if let commit = line.commit {
-                Text(commit.hash)
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(Color.accentColor)
-                if !commit.refs.isEmpty {
-                    Text(commit.refs)
-                        .font(.system(size: 10))
-                        .lineLimit(1)
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 1)
-                        .background(Capsule().fill(Color.orange.opacity(0.18)))
-                        .foregroundStyle(.orange)
-                }
-                Text(commit.subject)
-                    .font(.system(size: 11))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                Spacer(minLength: 8)
-                Text(commit.author)
+                .foregroundStyle(Color.accentColor)
+            if !commit.refs.isEmpty {
+                Text(commit.refs)
                     .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
                     .lineLimit(1)
-                Text(commit.relativeDate)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1)
+                    .background(Capsule().fill(Color.orange.opacity(0.18)))
+                    .foregroundStyle(.orange)
+                    .help(commit.refs)
+            }
+            Text(commit.subject)
+                .font(.system(size: 11))
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .help(commit.subject)
+            Spacer(minLength: 8)
+            Text(commit.author)
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .help(commit.author)
+            if let date = commit.date {
+                Text(date, format: .relative(presentation: .numeric, unitsStyle: .narrow))
                     .font(.system(size: 10))
                     .foregroundStyle(.tertiary)
                     .lineLimit(1)
                     .fixedSize()
-            } else {
-                Spacer(minLength: 0)
+                    // narrow 相対表示は省略が強いので、ホバーでロケール対応のフル日時を出す。
+                    .help(date.formatted(date: .complete, time: .shortened))
             }
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 1)
+        .padding(.leading, 8)
+        .padding(.trailing, 8)
+        .frame(height: CommitGraphGutter.rowHeight)
         .frame(maxWidth: .infinity, alignment: .leading)
+        .background(isSelected ? Color.accentColor.opacity(0.18) : Color.clear)
+    }
+}
+
+/// 固定レーン配置のグラフ 1 行を、色分けした滑らかなベクター（縦線・丸みのある
+/// 分岐/合流カーブ・ノード円）で描く。`through`=通過レーンの直線、`nodeIn`=上から
+/// ノードへ入る子の線（上半分）、`nodeOut`=ノードから下へ出る親の線（下半分）。
+struct CommitGraphGutter: View {
+    let row: CommitGraphRow
+    let laneCount: Int
+
+    static let laneWidth: CGFloat = 14
+    static let rowHeight: CGFloat = 22
+    /// 左端レーンのノードが枠に触れて切れないようにする余白。
+    static let leftInset: CGFloat = 5
+    private static let colors: [Color] = [
+        .blue, .teal, .green, .orange, .pink, .purple, .red, .yellow, .indigo, .mint,
+    ]
+
+    private func laneX(_ k: Int) -> CGFloat { Self.leftInset + CGFloat(k) * Self.laneWidth + Self.laneWidth / 2 }
+    private func color(_ k: Int) -> Color { Self.colors[((k % Self.colors.count) + Self.colors.count) % Self.colors.count] }
+
+    var body: some View {
+        Canvas { context, size in
+            let h = size.height
+            let mid = h / 2
+            let nodeX = laneX(row.nodeLane)
+
+            // 先に線を描き、最後にノード円を重ねる。
+            for edge in row.edges {
+                let ex = laneX(edge.lane)
+                let c = color(edge.colorLane)
+                switch edge.shape {
+                case .through:
+                    line(context, CGPoint(x: ex, y: 0), CGPoint(x: ex, y: h), c)
+                case .nodeIn:
+                    // 上端(edge.lane) → ノード(mid)。同列なら直線、違えば曲線。
+                    if edge.lane == row.nodeLane {
+                        line(context, CGPoint(x: ex, y: 0), CGPoint(x: nodeX, y: mid), c)
+                    } else {
+                        curve(context, CGPoint(x: ex, y: 0), CGPoint(x: nodeX, y: mid), c)
+                    }
+                case .nodeOut:
+                    // ノード(mid) → 下端(edge.lane)。
+                    if edge.lane == row.nodeLane {
+                        line(context, CGPoint(x: nodeX, y: mid), CGPoint(x: ex, y: h), c)
+                    } else {
+                        curve(context, CGPoint(x: nodeX, y: mid), CGPoint(x: ex, y: h), c)
+                    }
+                }
+            }
+
+            let r: CGFloat = 3.5
+            let rect = CGRect(x: nodeX - r, y: mid - r, width: r * 2, height: r * 2)
+            context.fill(Path(ellipseIn: rect), with: .color(color(row.nodeLane)))
+        }
+        .frame(width: Self.leftInset + CGFloat(laneCount) * Self.laneWidth, height: Self.rowHeight)
+    }
+
+    private func line(_ ctx: GraphicsContext, _ from: CGPoint, _ to: CGPoint, _ c: Color) {
+        var path = Path()
+        path.move(to: from)
+        path.addLine(to: to)
+        ctx.stroke(path, with: .color(c.opacity(0.9)), style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
+    }
+
+    private func curve(_ ctx: GraphicsContext, _ from: CGPoint, _ to: CGPoint, _ c: Color) {
+        let mid = (from.y + to.y) / 2
+        var path = Path()
+        path.move(to: from)
+        path.addCurve(to: to, control1: CGPoint(x: from.x, y: mid), control2: CGPoint(x: to.x, y: mid))
+        ctx.stroke(path, with: .color(c.opacity(0.9)), style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
     }
 }
 
@@ -218,40 +399,116 @@ struct FileDetailView: View {
         )
     }
 
+    private var hasSelection: Bool {
+        model.selectedCommit != nil || model.selectedPath != nil
+    }
+
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                if let path = model.selectedPath {
-                    Text(path)
-                        .font(.caption).foregroundStyle(.secondary)
-                        .lineLimit(1).truncationMode(.middle)
-                    Spacer()
-                    // 変更ファイルのみ Diff⇄全文 を切替（未変更ファイルは全文のみ）。
-                    if model.selectedItem != nil {
-                        Picker("", selection: viewModeBinding) {
-                            ForEach(FileViewMode.allCases) { Text($0.rawValue).tag($0) }
-                        }
-                        .pickerStyle(.segmented)
-                        .fixedSize()
-                    }
-                } else {
-                    Text("ファイルを選択").font(.caption).foregroundStyle(.secondary)
-                    Spacer()
-                }
+            // 未選択時は見出しと仕切り線を出さず、空状態だけをすっきり見せる。
+            if hasSelection {
+                header
+                Divider()
             }
-            .padding(.horizontal, 12)
-            .frame(minHeight: 28)
-            .padding(.vertical, 6)
-            Divider()
+            content
+        }
+    }
 
-            if model.selectedPath == nil {
-                ContentUnavailableView("ファイルを選択", systemImage: "doc.text.magnifyingglass")
-            } else if model.selectedItem != nil, model.viewMode == .diff {
-                DiffView(diff: model.diff)
+    @ViewBuilder
+    private var header: some View {
+        HStack {
+            if let hash = model.selectedCommit {
+                Image(systemName: "point.3.connected.trianglepath.dotted")
+                    .font(.caption2).foregroundStyle(.secondary)
+                Text("コミット \(hash)")
+                    .font(.caption.monospaced()).foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Spacer()
+            } else if let path = model.selectedPath {
+                Text(path)
+                    .font(.caption).foregroundStyle(.secondary)
+                    .lineLimit(1).truncationMode(.middle)
+                    .help(path)
+                Spacer()
+                // 変更ファイルのみ Diff⇄全文 を切替（未変更ファイルは全文のみ）。
+                if model.selectedItem != nil {
+                    Picker("", selection: viewModeBinding) {
+                        ForEach(FileViewMode.allCases) { Text($0.rawValue).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    .fixedSize()
+                }
             } else {
-                WholeFileView(text: model.wholeText)
+                Text("ファイル / コミットを選択").font(.caption).foregroundStyle(.secondary)
+                Spacer()
             }
         }
+        .padding(.horizontal, 12)
+        .frame(minHeight: 28)
+        .padding(.vertical, 6)
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if model.selectedCommit != nil {
+            CommitDiffView(diffs: model.commitDiff)
+        } else if model.selectedPath == nil {
+            ContentUnavailableView("ファイル / コミットを選択", systemImage: "doc.text.magnifyingglass")
+        } else if model.selectedItem != nil, model.viewMode == .diff {
+            DiffView(diff: model.diff)
+        } else {
+            WholeFileView(text: model.wholeText)
+        }
+    }
+}
+
+/// 1 コミットの差分（複数ファイル）をまとめて表示する。
+struct CommitDiffView: View {
+    let diffs: [FileDiff]?
+
+    var body: some View {
+        if let diffs, !diffs.isEmpty {
+            GeometryReader { geo in
+                ScrollView([.vertical, .horizontal]) {
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(Array(diffs.enumerated()), id: \.offset) { _, file in
+                            Text(fileName(file))
+                                .font(.caption.monospaced().weight(.semibold))
+                                .padding(.vertical, 3)
+                                .padding(.horizontal, 8)
+                                .frame(minWidth: geo.size.width, alignment: .leading)
+                                .background(Color.accentColor.opacity(0.12))
+                            if file.isBinary {
+                                Text("(バイナリ)")
+                                    .font(.caption).foregroundStyle(.secondary)
+                                    .padding(.vertical, 2).padding(.horizontal, 8)
+                                    .frame(minWidth: geo.size.width, alignment: .leading)
+                            } else {
+                                ForEach(Array(file.hunks.enumerated()), id: \.offset) { _, hunk in
+                                    Text(hunk.header)
+                                        .font(.caption.monospaced())
+                                        .foregroundStyle(.secondary)
+                                        .padding(.vertical, 2).padding(.horizontal, 8)
+                                        .frame(minWidth: geo.size.width, alignment: .leading)
+                                        .background(Color.gray.opacity(0.12))
+                                    ForEach(Array(hunk.lines.enumerated()), id: \.offset) { _, line in
+                                        DiffLineRow(line: line, minWidth: geo.size.width)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    .padding(.vertical, 4)
+                    .frame(minWidth: geo.size.width, minHeight: geo.size.height, alignment: .topLeading)
+                }
+            }
+        } else {
+            ContentUnavailableView("差分なし", systemImage: "equal")
+        }
+    }
+
+    private func fileName(_ file: FileDiff) -> String {
+        file.newPath ?? file.oldPath ?? "(unknown)"
     }
 }
 
