@@ -77,6 +77,41 @@ public actor GitEngine {
         return raw.split(separator: "\u{0}", omittingEmptySubsequences: true).map(String.init)
     }
 
+    /// worktree が属するリポジトリの識別（同一 repo の worktree はグルーピング用に同じ key を持つ）。
+    /// key = 共有 git ディレクトリの絶対パス。name = origin リモート（owner/repo）優先、無ければフォルダ名。
+    public func repoInfo(worktree: URL) async throws -> RepoInfo {
+        let common = try await GitRunner.run(
+            ["rev-parse", "--path-format=absolute", "--git-common-dir"], in: worktree
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let root: String = (common as NSString).lastPathComponent == ".git"
+            ? (common as NSString).deletingLastPathComponent
+            : common
+
+        var name = (root as NSString).lastPathComponent
+        if let remote = try? await GitRunner.run(["remote", "get-url", "origin"], in: worktree)
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+            !remote.isEmpty, let parsed = Self.repoName(fromRemote: remote) {
+            name = parsed
+        }
+        return RepoInfo(key: common, name: name, root: root)
+    }
+
+    /// `git@host:owner/repo(.git)` / `https://host/owner/repo(.git)` → `owner/repo`。
+    static func repoName(fromRemote remote: String) -> String? {
+        var value = remote
+        if value.hasSuffix(".git") { value = String(value.dropLast(4)) }
+        if value.hasPrefix("git@"), let colon = value.firstIndex(of: ":") {
+            let path = String(value[value.index(after: colon)...])
+            return path.isEmpty ? nil : path
+        }
+        if let url = URL(string: value), url.host != nil {
+            let path = url.path.hasPrefix("/") ? String(url.path.dropFirst()) : url.path
+            return path.isEmpty ? nil : path
+        }
+        return nil
+    }
+
     // MARK: - Mutate (serialized by the actor)
 
     /// `git worktree add -b <branch> <path> <baseRef>`
@@ -93,6 +128,21 @@ public actor GitEngine {
         if force { args.append("--force") }
         args.append(path.path)
         try await GitRunner.run(args, in: repo)
+    }
+}
+
+public struct RepoInfo: Equatable, Sendable {
+    /// グルーピング用の安定キー（共有 git ディレクトリの絶対パス）。
+    public let key: String
+    /// 表示名（owner/repo もしくはフォルダ名）。
+    public let name: String
+    /// リポジトリのルートパス。
+    public let root: String
+
+    public init(key: String, name: String, root: String) {
+        self.key = key
+        self.name = name
+        self.root = root
     }
 }
 
