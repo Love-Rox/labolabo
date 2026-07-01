@@ -12,6 +12,10 @@ final class RepoSession: Identifiable {
     let worktreePath: URL
     var name: String
     var branch: String?
+    /// 所属リポジトリの安定キー（共有 git ディレクトリ）。グルーピングに使う。
+    var repoKey: String?
+    /// 所属リポジトリの表示名（owner/repo もしくはフォルダ名）。
+    var repoName: String?
 
     init(id: UUID = UUID(), worktreePath: URL, name: String? = nil, branch: String? = nil) {
         self.id = id
@@ -19,6 +23,14 @@ final class RepoSession: Identifiable {
         self.name = name ?? worktreePath.lastPathComponent
         self.branch = branch
     }
+}
+
+/// サイドバーでリポジトリごとにまとめた 1 グループ。
+struct SessionGroup: Identifiable {
+    let key: String
+    let name: String
+    let sessions: [RepoSession]
+    var id: String { key }
 }
 
 /// Owns the open sessions and persists them (GRDB) so the previous set + selection
@@ -42,6 +54,29 @@ final class SessionStore {
         return sessions.first { $0.id == selection }
     }
 
+    /// リポジトリごとにまとめたグループ（名前昇順）。未解決の間は worktree の親フォルダで暫定グループ。
+    var groupedSessions: [SessionGroup] {
+        let grouped = Dictionary(grouping: sessions) { session in
+            session.repoKey ?? session.worktreePath.deletingLastPathComponent().path
+        }
+        return grouped.map { key, group in
+            let name = group.first?.repoName
+                ?? group.first?.worktreePath.deletingLastPathComponent().lastPathComponent
+                ?? "…"
+            return SessionGroup(key: key, name: name, sessions: group)
+        }
+        .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
+
+    private func resolveRepo(_ session: RepoSession) {
+        Task { [git] in
+            if let info = try? await git.repoInfo(worktree: session.worktreePath) {
+                session.repoKey = info.key
+                session.repoName = info.name
+            }
+        }
+    }
+
     func openRepository(at url: URL) {
         if let existing = sessions.first(where: { $0.worktreePath == url }) {
             select(existing.id)
@@ -52,6 +87,7 @@ final class SessionStore {
         persist(session)
         select(session.id)
         refreshBranch(session)
+        resolveRepo(session)
     }
 
     func close(_ id: RepoSession.ID) {
@@ -80,6 +116,7 @@ final class SessionStore {
             )
             sessions.append(session)
             refreshBranch(session)
+            resolveRepo(session)
         }
 
         let storedSelection = (try? db.selectedSessionID()) ?? nil

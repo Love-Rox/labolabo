@@ -32,20 +32,25 @@ struct ContentView: View {
                         Text("リポジトリを開いてください")
                             .foregroundStyle(.secondary)
                     } else {
-                        ForEach(store.sessions) { session in
-                            SessionRow(session: session)
-                                .tag(session.id)
-                                .contextMenu {
-                                    Button("セッションを閉じる", role: .destructive) {
-                                        store.close(session.id)
-                                    }
+                        ForEach(store.groupedSessions) { group in
+                            Section {
+                                ForEach(group.sessions) { session in
+                                    SessionRow(session: session)
+                                        .tag(session.id)
+                                        .contextMenu {
+                                            Button("セッションを閉じる", role: .destructive) {
+                                                store.close(session.id)
+                                            }
+                                        }
                                 }
+                            } header: {
+                                RepoGroupHeader(name: group.name, count: group.sessions.count)
+                            }
                         }
                     }
                 }
                 .listStyle(.sidebar)
             }
-            .padding(.trailing, 8) // サイドバー外側右の余白（ターミナルとの密着を解消）
             .ignoresSafeArea(.container, edges: .top)
             .navigationSplitViewColumnWidth(min: 224, ideal: 248)
             // NavigationSplitView が自動で出すサイドバー開閉ボタンを消す。自前ヘッダーの
@@ -107,7 +112,9 @@ struct ContentView: View {
             .buttonStyle(.borderless)
             .help("サイドバーを折りたたむ")
         }
-        .padding(.leading, LayoutMetrics.trafficLightInset)
+        // macOS 26 のカード型サイドバーでは信号機はカードの上にあるため、
+        // 左は通常のパディングでよい（信号機回避の大きな左インセットは不要）。
+        .padding(.leading, 14)
         .padding(.trailing, 12)
         .frame(height: LayoutMetrics.topBar)
         .background(.bar)
@@ -137,6 +144,29 @@ struct SessionRow: View {
         }
         .padding(.vertical, 2)
         .padding(.trailing, 8)
+    }
+}
+
+/// サイドバーのリポジトリ・グループ見出し（フォルダ名 + セッション数）。
+struct RepoGroupHeader: View {
+    let name: String
+    let count: Int
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "folder.fill")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text(name)
+                .font(.caption)
+                .fontWeight(.semibold)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer()
+            Text("\(count)")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        }
     }
 }
 
