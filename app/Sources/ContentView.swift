@@ -116,15 +116,7 @@ struct ContentView: View {
                 Text(message)
             }
         } detail: {
-            if let session = store.selected {
-                SessionDetailView(
-                    session: session,
-                    store: store,
-                    sidebarCollapsed: sidebarCollapsed,
-                    onExpandSidebar: { columnVisibility = .all }
-                )
-                .id(session.id)
-            } else {
+            if store.sessions.isEmpty {
                 ContentUnavailableView {
                     Label("セッションがありません", systemImage: "sidebar.left")
                 } description: {
@@ -132,6 +124,24 @@ struct ContentView: View {
                 } actions: {
                     Button("新規セッション…") { showNewSession = true }
                     Button("既存のフォルダを開く…") { showImporter = true }
+                }
+            } else {
+                // 全セッションの詳細を常駐させ、選択中だけを可視にする。切替時に端末(pty)や
+                // git データを作り直さないので、一瞬表示が崩れる（チラつく）のを避けられる。
+                ZStack {
+                    ForEach(store.sessions) { session in
+                        let isActive = session.id == store.selection
+                        SessionDetailView(
+                            session: session,
+                            store: store,
+                            sidebarCollapsed: sidebarCollapsed,
+                            onExpandSidebar: { columnVisibility = .all }
+                        )
+                        .opacity(isActive ? 1 : 0)
+                        .allowsHitTesting(isActive)
+                        .accessibilityHidden(!isActive)
+                        .zIndex(isActive ? 1 : 0)
+                    }
                 }
             }
         }
@@ -361,10 +371,15 @@ struct RepoGroupHeader: View {
                 .fontWeight(.semibold)
                 .lineLimit(1)
                 .truncationMode(.middle)
-            Spacer()
+            // 件数は名前の右隣に小さなピルで（far-right の薄いテキストは見づらいため）。
             Text("\(count)")
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
+                .font(.caption2.weight(.semibold).monospacedDigit())
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 1)
+                .background(Capsule().fill(.quaternary))
+                .help("セッション数: \(count)")
+            Spacer(minLength: 0)
         }
         .contextMenu {
             Menu("色を変更") {
