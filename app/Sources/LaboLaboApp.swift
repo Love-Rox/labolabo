@@ -15,7 +15,16 @@ enum AppEntry {
     }
 }
 
+/// 起動完了時に Dock アイコンの外観追従を開始する（実行中のみ切替可能）。
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        AppIconController.shared.start()
+    }
+}
+
 struct LaboLaboApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+
     var body: some Scene {
         WindowGroup {
             ContentView()
@@ -24,5 +33,10 @@ struct LaboLaboApp: App {
         // タイトルバーを隠し、上部の空きバーをなくして自前の 1 本バーに統合する。
         // サイドバー上部に "LaboLabo"＋開くボタン、詳細上部に自前の操作バーを置く。
         .windowStyle(.hiddenTitleBar)
+
+        // 設定画面（⌘,）。アプリアイコンの表示モードなど。
+        Settings {
+            SettingsView()
+        }
     }
 }
