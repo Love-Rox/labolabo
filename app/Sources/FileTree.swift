@@ -60,7 +60,24 @@ enum FileTreeBuilder {
                 return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
             }
         }
-        return convert(root, prefix: "")
+        return compact(convert(root, prefix: ""))
+    }
+
+    /// 子が 1 つのディレクトリだけのフォルダを連結（VSCode の compact folders 相当）。
+    private static func compact(_ nodes: [FileTreeNode]) -> [FileTreeNode] {
+        nodes.map { node in
+            guard node.isDirectory else { return node }
+            var name = node.name
+            var id = node.id
+            var children = node.children
+            while children.count == 1, children[0].isDirectory {
+                let only = children[0]
+                name += "/" + only.name
+                id = only.id
+                children = only.children
+            }
+            return FileTreeNode(id: id, name: name, isDirectory: true, children: compact(children), change: nil)
+        }
     }
 }
 
@@ -113,12 +130,16 @@ struct FileTreeRow: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            // VSCode 風のインデントガイド（各階層に淡い縦線）。
+            // VSCode 風のインデントガイド（親シェブロン位置に揃えた淡い縦線）。
             ForEach(0 ..< depth, id: \.self) { _ in
-                Rectangle()
-                    .fill(Color.secondary.opacity(0.15))
-                    .frame(width: 1)
-                    .frame(width: Self.indentWidth, alignment: .leading)
+                Color.clear
+                    .frame(width: Self.indentWidth)
+                    .overlay(alignment: .leading) {
+                        Rectangle()
+                            .fill(Color.secondary.opacity(0.18))
+                            .frame(width: 1)
+                            .padding(.leading, 5)
+                    }
             }
             // 開閉シェブロン（フォルダのみ、展開で回転）。ファイルは同じ幅の空きで名前を揃える。
             Group {

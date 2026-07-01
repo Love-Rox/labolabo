@@ -14,20 +14,64 @@ struct ChangedFilesPane: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            BranchStatusBar(status: model.status)
-            Divider()
-            HStack {
-                Picker("", selection: listModeBinding) {
-                    ForEach(FileListMode.allCases) { Text($0.rawValue).tag($0) }
-                }
-                .pickerStyle(.segmented)
-                .fixedSize()
-                Spacer()
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 4)
+            filesBar
             Divider()
             ChangedFilesList(model: model)
+        }
+    }
+
+    /// ブランチ状態と表示切替を 1 本のバーにまとめる。表示切替は幅に余裕があれば
+    /// セグメント、狭ければプルダウン（ViewThatFits で自動切替）。
+    private var filesBar: some View {
+        HStack(spacing: 8) {
+            branchStatus
+                .layoutPriority(0)
+            Spacer(minLength: 6)
+            modeSelector
+                .layoutPriority(1)
+        }
+        .font(.caption)
+        .padding(.horizontal, 10)
+        .frame(minHeight: 30)
+    }
+
+    @ViewBuilder
+    private var branchStatus: some View {
+        if let status = model.status {
+            HStack(spacing: 6) {
+                Label(status.branch ?? "—", systemImage: "arrow.triangle.branch")
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                if status.ahead > 0 {
+                    Label("\(status.ahead)", systemImage: "arrow.up").labelStyle(.titleAndIcon)
+                }
+                if status.behind > 0 {
+                    Label("\(status.behind)", systemImage: "arrow.down").labelStyle(.titleAndIcon)
+                }
+            }
+            .foregroundStyle(.secondary)
+        } else {
+            Text("読み込み中…").foregroundStyle(.tertiary)
+        }
+    }
+
+    private var modeSelector: some View {
+        ViewThatFits(in: .horizontal) {
+            Picker("", selection: listModeBinding) {
+                ForEach(FileListMode.allCases) { Text($0.rawValue).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .fixedSize()
+
+            Menu {
+                Picker("表示", selection: listModeBinding) {
+                    ForEach(FileListMode.allCases) { Text($0.rawValue).tag($0) }
+                }
+            } label: {
+                Label(model.listMode.rawValue, systemImage: "line.3.horizontal.decrease")
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
         }
     }
 }
