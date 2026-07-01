@@ -40,6 +40,9 @@ struct ContentView: View {
                 .listStyle(.sidebar)
             }
             .ignoresSafeArea(.container, edges: .top)
+            // NavigationSplitView が自動で出すサイドバー開閉ボタンを消す。自前ヘッダーの
+            // ⓘ/＋ と重なるため（幅はドラッグで調整できるのでトグルは不要）。
+            .toolbar(removing: .sidebarToggle)
             .fileImporter(isPresented: $showImporter, allowedContentTypes: [.folder]) { result in
                 if case let .success(url) = result {
                     store.openRepository(at: url)
