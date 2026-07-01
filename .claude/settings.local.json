@@ -10,29 +10,9 @@
           }
         ],
         "matcher" : ""
-      },
-      {
-        "hooks" : [
-          {
-            "command" : "'\/Users\/sasapiyo\/Library\/Developer\/Xcode\/DerivedData\/LaboLabo-ggwlkpzqalpdtqfshupoprztpldi\/Build\/Products\/Debug\/LaboLabo.app\/Contents\/MacOS\/LaboLabo' --hook '\/tmp\/labolabo\/51fbe69511.sock'",
-            "timeout" : 5,
-            "type" : "command"
-          }
-        ],
-        "matcher" : ""
       }
     ],
     "PostToolUse" : [
-      {
-        "hooks" : [
-          {
-            "command" : "'\/Users\/sasapiyo\/Library\/Developer\/Xcode\/DerivedData\/LaboLabo-ggwlkpzqalpdtqfshupoprztpldi\/Build\/Products\/Debug\/LaboLabo.app\/Contents\/MacOS\/LaboLabo' --hook '\/tmp\/labolabo\/51fbe69511.sock'",
-            "timeout" : 5,
-            "type" : "command"
-          }
-        ],
-        "matcher" : ""
-      },
       {
         "hooks" : [
           {
@@ -54,29 +34,9 @@
           }
         ],
         "matcher" : ""
-      },
-      {
-        "hooks" : [
-          {
-            "command" : "'\/Users\/sasapiyo\/Library\/Developer\/Xcode\/DerivedData\/LaboLabo-ggwlkpzqalpdtqfshupoprztpldi\/Build\/Products\/Debug\/LaboLabo.app\/Contents\/MacOS\/LaboLabo' --hook '\/tmp\/labolabo\/51fbe69511.sock'",
-            "timeout" : 5,
-            "type" : "command"
-          }
-        ],
-        "matcher" : ""
       }
     ],
     "SessionEnd" : [
-      {
-        "hooks" : [
-          {
-            "command" : "'\/Users\/sasapiyo\/Library\/Developer\/Xcode\/DerivedData\/LaboLabo-ggwlkpzqalpdtqfshupoprztpldi\/Build\/Products\/Debug\/LaboLabo.app\/Contents\/MacOS\/LaboLabo' --hook '\/tmp\/labolabo\/51fbe69511.sock'",
-            "timeout" : 5,
-            "type" : "command"
-          }
-        ],
-        "matcher" : ""
-      },
       {
         "hooks" : [
           {
@@ -98,16 +58,6 @@
           }
         ],
         "matcher" : ""
-      },
-      {
-        "hooks" : [
-          {
-            "command" : "'\/Users\/sasapiyo\/Library\/Developer\/Xcode\/DerivedData\/LaboLabo-ggwlkpzqalpdtqfshupoprztpldi\/Build\/Products\/Debug\/LaboLabo.app\/Contents\/MacOS\/LaboLabo' --hook '\/tmp\/labolabo\/51fbe69511.sock'",
-            "timeout" : 5,
-            "type" : "command"
-          }
-        ],
-        "matcher" : ""
       }
     ],
     "Stop" : [
@@ -120,29 +70,9 @@
           }
         ],
         "matcher" : ""
-      },
-      {
-        "hooks" : [
-          {
-            "command" : "'\/Users\/sasapiyo\/Library\/Developer\/Xcode\/DerivedData\/LaboLabo-ggwlkpzqalpdtqfshupoprztpldi\/Build\/Products\/Debug\/LaboLabo.app\/Contents\/MacOS\/LaboLabo' --hook '\/tmp\/labolabo\/51fbe69511.sock'",
-            "timeout" : 5,
-            "type" : "command"
-          }
-        ],
-        "matcher" : ""
       }
     ],
     "UserPromptSubmit" : [
-      {
-        "hooks" : [
-          {
-            "command" : "'\/Users\/sasapiyo\/Library\/Developer\/Xcode\/DerivedData\/LaboLabo-ggwlkpzqalpdtqfshupoprztpldi\/Build\/Products\/Debug\/LaboLabo.app\/Contents\/MacOS\/LaboLabo' --hook '\/tmp\/labolabo\/51fbe69511.sock'",
-            "timeout" : 5,
-            "type" : "command"
-          }
-        ],
-        "matcher" : ""
-      },
       {
         "hooks" : [
           {

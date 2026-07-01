@@ -90,47 +90,87 @@ struct FileDetailPane: View {
 struct CommitGraphPane: View {
     let model: WorkPaneModel
 
-    /// レーン数（gutter 幅を全行で揃えてコミット情報を左揃えにする）。
+    /// レーン数（gutter 幅を全行で揃えてグラフ列の幅を決める）。
     private var laneCount: Int {
         let maxLen = model.commits.map(\.graph.count).max() ?? 0
         return max(1, (maxLen + 1) / 2)
+    }
+
+    /// グラフ（レーン）列の自然幅。
+    private var graphWidth: CGFloat { CGFloat(laneCount) * CommitGraphGutter.laneWidth }
+
+    /// これを超えたらグラフ列だけを横スクロールにして、右のコミット情報を画面内に守る。
+    private let graphMaxWidth: CGFloat = 132
+
+    private func isSelected(_ line: CommitGraphLine) -> Bool {
+        line.commit.map { model.selectedCommit == $0.hash } ?? false
+    }
+
+    private func select(_ line: CommitGraphLine) {
+        if let hash = line.commit?.hash { model.selectCommit(hash) }
     }
 
     var body: some View {
         if model.commits.isEmpty {
             ContentUnavailableView("コミットがありません", systemImage: "clock.arrow.circlepath")
         } else {
+            // グラフ列とコミット情報列を分離。グラフが広い（分岐が多い）ときは
+            // グラフ列だけを横スクロールにし、情報列は常に読める位置へ残す。
             ScrollView(.vertical) {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    ForEach(model.commits) { line in
-                        CommitGraphRow(
-                            line: line,
-                            laneCount: laneCount,
-                            isSelected: line.commit.map { model.selectedCommit == $0.hash } ?? false
-                        )
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            if let hash = line.commit?.hash { model.selectCommit(hash) }
-                        }
-                    }
+                HStack(alignment: .top, spacing: 0) {
+                    graphColumn
+                    infoColumn
                 }
                 .padding(.vertical, 4)
-                .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
     }
+
+    /// グラフ（レーン）列。幅が上限を超えるときだけ横スクロールにする。
+    @ViewBuilder
+    private var graphColumn: some View {
+        if graphWidth > graphMaxWidth {
+            ScrollView(.horizontal, showsIndicators: true) {
+                gutterStack
+            }
+            .frame(width: graphMaxWidth)
+        } else {
+            gutterStack
+        }
+    }
+
+    private var gutterStack: some View {
+        LazyVStack(spacing: 0) {
+            ForEach(model.commits) { line in
+                CommitGraphGutter(graph: line.graph, laneCount: laneCount)
+                    .frame(height: CommitGraphGutter.rowHeight)
+                    .background(isSelected(line) ? Color.accentColor.opacity(0.18) : Color.clear)
+                    .contentShape(Rectangle())
+                    .onTapGesture { select(line) }
+            }
+        }
+    }
+
+    private var infoColumn: some View {
+        LazyVStack(spacing: 0) {
+            ForEach(model.commits) { line in
+                CommitInfoRow(line: line, isSelected: isSelected(line))
+                    .contentShape(Rectangle())
+                    .onTapGesture { select(line) }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
 }
 
-struct CommitGraphRow: View {
+/// コミット情報の 1 行（gutter を除いた右側）。gutter とは列を分けて配置し、
+/// グラフが広くても件名・作者・時刻が画面内に残るようにする。
+struct CommitInfoRow: View {
     let line: CommitGraphLine
-    let laneCount: Int
     var isSelected: Bool = false
-
-    static let rowHeight: CGFloat = 22
 
     var body: some View {
         HStack(spacing: 8) {
-            CommitGraphGutter(graph: line.graph, laneCount: laneCount)
             if let commit = line.commit {
                 Text(commit.hash)
                     .font(.system(size: 11, design: .monospaced))
@@ -164,8 +204,9 @@ struct CommitGraphRow: View {
                 Spacer(minLength: 0)
             }
         }
+        .padding(.leading, 8)
         .padding(.trailing, 8)
-        .frame(height: Self.rowHeight)
+        .frame(height: CommitGraphGutter.rowHeight)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(isSelected ? Color.accentColor.opacity(0.18) : Color.clear)
     }
@@ -178,6 +219,7 @@ struct CommitGraphGutter: View {
     let laneCount: Int
 
     static let laneWidth: CGFloat = 14
+    static let rowHeight: CGFloat = 22
     private static let colors: [Color] = [
         .blue, .teal, .green, .orange, .pink, .purple, .red, .yellow, .indigo, .mint,
     ]
@@ -221,7 +263,7 @@ struct CommitGraphGutter: View {
                 }
             }
         }
-        .frame(width: CGFloat(laneCount) * Self.laneWidth, height: CommitGraphRow.rowHeight)
+        .frame(width: CGFloat(laneCount) * Self.laneWidth, height: Self.rowHeight)
     }
 
     private func line(_ ctx: GraphicsContext, _ from: CGPoint, _ to: CGPoint, _ c: Color) {
