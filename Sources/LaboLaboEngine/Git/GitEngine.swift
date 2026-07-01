@@ -37,6 +37,12 @@ public actor GitEngine {
         return UnifiedDiffParser.parse(raw).first
     }
 
+    /// 1 コミットの差分（全ファイル）。`git show --format= <hash>` を unified diff としてパース。
+    public func commitDiff(worktree: URL, hash: String) async throws -> [FileDiff] {
+        let raw = try await GitRunner.run(["show", "--no-color", "--format=", hash], in: worktree)
+        return UnifiedDiffParser.parse(raw)
+    }
+
     /// Per-file added/deleted line counts via `git diff --numstat`.
     /// Binary files report `nil` counts (numstat prints `-`).
     public func numstat(worktree: URL, staged: Bool = false) async throws -> [NumstatEntry] {

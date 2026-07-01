@@ -53,7 +53,14 @@ struct CommitGraphPane: View {
             ScrollView(.vertical) {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(model.commits) { line in
-                        CommitGraphRow(line: line)
+                        CommitGraphRow(
+                            line: line,
+                            isSelected: line.commit.map { model.selectedCommit == $0.hash } ?? false
+                        )
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            if let hash = line.commit?.hash { model.selectCommit(hash) }
+                        }
                     }
                 }
                 .padding(.vertical, 4)
@@ -65,6 +72,7 @@ struct CommitGraphPane: View {
 
 struct CommitGraphRow: View {
     let line: CommitGraphLine
+    var isSelected: Bool = false
 
     var body: some View {
         HStack(spacing: 6) {
@@ -106,6 +114,7 @@ struct CommitGraphRow: View {
         .padding(.horizontal, 8)
         .padding(.vertical, 1)
         .frame(maxWidth: .infinity, alignment: .leading)
+        .background(isSelected ? Color.accentColor.opacity(0.18) : Color.clear)
     }
 }
 
@@ -220,38 +229,106 @@ struct FileDetailView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                if let path = model.selectedPath {
-                    Text(path)
-                        .font(.caption).foregroundStyle(.secondary)
-                        .lineLimit(1).truncationMode(.middle)
-                    Spacer()
-                    // 変更ファイルのみ Diff⇄全文 を切替（未変更ファイルは全文のみ）。
-                    if model.selectedItem != nil {
-                        Picker("", selection: viewModeBinding) {
-                            ForEach(FileViewMode.allCases) { Text($0.rawValue).tag($0) }
-                        }
-                        .pickerStyle(.segmented)
-                        .fixedSize()
-                    }
-                } else {
-                    Text("ファイルを選択").font(.caption).foregroundStyle(.secondary)
-                    Spacer()
-                }
-            }
-            .padding(.horizontal, 12)
-            .frame(minHeight: 28)
-            .padding(.vertical, 6)
+            header
             Divider()
+            content
+        }
+    }
 
-            if model.selectedPath == nil {
-                ContentUnavailableView("ファイルを選択", systemImage: "doc.text.magnifyingglass")
-            } else if model.selectedItem != nil, model.viewMode == .diff {
-                DiffView(diff: model.diff)
+    @ViewBuilder
+    private var header: some View {
+        HStack {
+            if let hash = model.selectedCommit {
+                Image(systemName: "point.3.connected.trianglepath.dotted")
+                    .font(.caption2).foregroundStyle(.secondary)
+                Text("コミット \(hash)")
+                    .font(.caption.monospaced()).foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Spacer()
+            } else if let path = model.selectedPath {
+                Text(path)
+                    .font(.caption).foregroundStyle(.secondary)
+                    .lineLimit(1).truncationMode(.middle)
+                Spacer()
+                // 変更ファイルのみ Diff⇄全文 を切替（未変更ファイルは全文のみ）。
+                if model.selectedItem != nil {
+                    Picker("", selection: viewModeBinding) {
+                        ForEach(FileViewMode.allCases) { Text($0.rawValue).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    .fixedSize()
+                }
             } else {
-                WholeFileView(text: model.wholeText)
+                Text("ファイル / コミットを選択").font(.caption).foregroundStyle(.secondary)
+                Spacer()
             }
         }
+        .padding(.horizontal, 12)
+        .frame(minHeight: 28)
+        .padding(.vertical, 6)
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if model.selectedCommit != nil {
+            CommitDiffView(diffs: model.commitDiff)
+        } else if model.selectedPath == nil {
+            ContentUnavailableView("ファイル / コミットを選択", systemImage: "doc.text.magnifyingglass")
+        } else if model.selectedItem != nil, model.viewMode == .diff {
+            DiffView(diff: model.diff)
+        } else {
+            WholeFileView(text: model.wholeText)
+        }
+    }
+}
+
+/// 1 コミットの差分（複数ファイル）をまとめて表示する。
+struct CommitDiffView: View {
+    let diffs: [FileDiff]?
+
+    var body: some View {
+        if let diffs, !diffs.isEmpty {
+            GeometryReader { geo in
+                ScrollView([.vertical, .horizontal]) {
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(Array(diffs.enumerated()), id: \.offset) { _, file in
+                            Text(fileName(file))
+                                .font(.caption.monospaced().weight(.semibold))
+                                .padding(.vertical, 3)
+                                .padding(.horizontal, 8)
+                                .frame(minWidth: geo.size.width, alignment: .leading)
+                                .background(Color.accentColor.opacity(0.12))
+                            if file.isBinary {
+                                Text("(バイナリ)")
+                                    .font(.caption).foregroundStyle(.secondary)
+                                    .padding(.vertical, 2).padding(.horizontal, 8)
+                                    .frame(minWidth: geo.size.width, alignment: .leading)
+                            } else {
+                                ForEach(Array(file.hunks.enumerated()), id: \.offset) { _, hunk in
+                                    Text(hunk.header)
+                                        .font(.caption.monospaced())
+                                        .foregroundStyle(.secondary)
+                                        .padding(.vertical, 2).padding(.horizontal, 8)
+                                        .frame(minWidth: geo.size.width, alignment: .leading)
+                                        .background(Color.gray.opacity(0.12))
+                                    ForEach(Array(hunk.lines.enumerated()), id: \.offset) { _, line in
+                                        DiffLineRow(line: line, minWidth: geo.size.width)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    .padding(.vertical, 4)
+                    .frame(minWidth: geo.size.width, minHeight: geo.size.height, alignment: .topLeading)
+                }
+            }
+        } else {
+            ContentUnavailableView("差分なし", systemImage: "equal")
+        }
+    }
+
+    private func fileName(_ file: FileDiff) -> String {
+        file.newPath ?? file.oldPath ?? "(unknown)"
     }
 }
 
