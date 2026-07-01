@@ -338,6 +338,9 @@ final class TilingCoordinator: NSObject {
 
     private var contentCache: [UUID: NSView] = [:]
     private var terminalDelegates: [UUID: TerminalLeafDelegate] = [:]
+    /// 最後に再構築した revision。構造が変わっていないのに毎回ツリーを作り直すと
+    /// 端末がチラつくため、revision が変わったときだけ reconcile する。
+    private var lastRevision: Int = -1
 
     init(model: PaneTilingModel, context: PaneContext) {
         self.model = model
@@ -346,6 +349,10 @@ final class TilingCoordinator: NSObject {
 
     func reconcile() {
         guard let container else { return }
+        // 構造未変更（revision 据え置き）なら再構築しない。SwiftUI の再評価（状態ドットの
+        // パルス・git 更新など）で updateNSView が走ってもツリーを壊さず、チラつきを防ぐ。
+        guard model.revision != lastRevision else { return }
+        lastRevision = model.revision
         let liveIDs = Set(model.panes.map(\.id))
 
         let tree = buildNode(model.root)

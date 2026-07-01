@@ -70,6 +70,10 @@ struct ContentView: View {
                     }
                 }
                 .listStyle(.sidebar)
+                // 先頭セクションの sticky 見出しが上部バー下へ潜って隠れるのを防ぐため、
+                // スクロール内容に上マージンを与える。併せて内容変化時も上を基準に保つ。
+                .contentMargins(.top, 8, for: .scrollContent)
+                .defaultScrollAnchor(.top)
             }
             .ignoresSafeArea(.container, edges: .top)
             .navigationSplitViewColumnWidth(min: 224, ideal: 248)
@@ -247,16 +251,17 @@ struct SessionRow: View {
     }
 }
 
-/// セッション行のエージェント状態ドット。入力待ちはオレンジ＋パルスで目立たせる。
+/// セッション行のエージェント状態ドット。進行中（起動中/実行中/入力待ち）は
+/// パルスで目立たせ、待機(idle)は点灯のみ、未起動/終了は非表示。
 struct AgentStatusIndicator: View {
     let status: AgentStatus
     @State private var animate = false
 
     var body: some View {
         ZStack {
-            if status == .waitingForInput {
+            if let tint, pulses {
                 Circle()
-                    .fill(Color.orange.opacity(0.35))
+                    .fill(tint.opacity(0.35))
                     .frame(width: 15, height: 15)
                     .scaleEffect(animate ? 1.0 : 0.4)
                     .opacity(animate ? 0 : 0.85)
@@ -273,9 +278,17 @@ struct AgentStatusIndicator: View {
 
     private func restartPulse() {
         animate = false
-        guard status == .waitingForInput else { return }
-        withAnimation(.easeOut(duration: 1.0).repeatForever(autoreverses: false)) {
+        guard pulses else { return }
+        withAnimation(.easeOut(duration: 1.1).repeatForever(autoreverses: false)) {
             animate = true
+        }
+    }
+
+    /// 進行中はパルスさせる。
+    private var pulses: Bool {
+        switch status {
+        case .starting, .running, .waitingForInput: return true
+        case .idle, .none, .ended: return false
         }
     }
 
