@@ -109,28 +109,38 @@ struct FileTreeRow: View {
     let depth: Int
     let expanded: Bool
 
+    private static let indentWidth: CGFloat = 14
+
     var body: some View {
         HStack(spacing: 4) {
-            Color.clear.frame(width: CGFloat(depth) * 12)
-            if node.isDirectory {
-                Image(systemName: expanded ? "chevron.down" : "chevron.right")
-                    .font(.system(size: 9))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 12)
-                Image(systemName: "folder")
-                    .foregroundStyle(.secondary)
-                    .font(.caption)
-            } else {
-                Color.clear.frame(width: 12)
-                Image(systemName: "doc")
-                    .foregroundStyle(iconColor)
-                    .font(.caption)
+            // VSCode 風のインデントガイド（各階層に淡い縦線）。
+            ForEach(0 ..< depth, id: \.self) { _ in
+                Rectangle()
+                    .fill(Color.secondary.opacity(0.15))
+                    .frame(width: 1)
+                    .frame(width: Self.indentWidth, alignment: .leading)
             }
+            // 開閉シェブロン（フォルダのみ、展開で回転）。ファイルは同じ幅の空きで名前を揃える。
+            Group {
+                if node.isDirectory {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .rotationEffect(.degrees(expanded ? 90 : 0))
+                } else {
+                    Color.clear
+                }
+            }
+            .frame(width: 10)
+            Image(systemName: icon)
+                .font(.system(size: 12))
+                .foregroundStyle(iconColor)
+                .frame(width: 16)
             Text(node.name)
                 .foregroundStyle(node.isDirectory || node.isChanged ? Color.primary : Color.secondary)
                 .lineLimit(1)
                 .truncationMode(.middle)
-            Spacer()
+            Spacer(minLength: 4)
             if let change = node.change {
                 if let adds = change.adds, adds > 0 {
                     Text("+\(adds)").foregroundStyle(.green).font(.caption2.monospaced())
@@ -143,12 +153,30 @@ struct FileTreeRow: View {
         .help(node.id)
     }
 
+    private var ext: String { (node.name as NSString).pathExtension.lowercased() }
+
+    private var icon: String {
+        if node.isDirectory { return expanded ? "folder" : "folder.fill" }
+        switch ext {
+        case "swift": return "swift"
+        case "js", "jsx", "mjs", "cjs", "ts", "tsx", "json": return "curlybraces"
+        case "py": return "chevron.left.forwardslash.chevron.right"
+        case "md", "markdown": return "doc.richtext"
+        case "png", "jpg", "jpeg", "gif", "svg", "webp": return "photo"
+        case "sh", "zsh", "bash": return "terminal"
+        case "yml", "yaml", "toml", "cfg", "conf", "ini": return "gearshape"
+        default: return "doc"
+        }
+    }
+
     private var iconColor: Color {
-        switch node.change?.section {
-        case .staged: return .green
-        case .unstaged: return .orange
-        case .untracked: return .secondary
-        case .none: return .secondary
+        if node.isDirectory { return Color.accentColor.opacity(0.85) }
+        switch ext {
+        case "swift": return .orange
+        case "js", "jsx", "mjs", "cjs", "json": return .yellow
+        case "ts", "tsx", "py": return .blue
+        case "png", "jpg", "jpeg", "gif", "svg", "webp": return .purple
+        default: return .secondary
         }
     }
 }

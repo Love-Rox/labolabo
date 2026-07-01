@@ -227,10 +227,17 @@ struct FileDetailView: View {
         )
     }
 
+    private var hasSelection: Bool {
+        model.selectedCommit != nil || model.selectedPath != nil
+    }
+
     var body: some View {
         VStack(spacing: 0) {
-            header
-            Divider()
+            // 未選択時は見出しと仕切り線を出さず、空状態だけをすっきり見せる。
+            if hasSelection {
+                header
+                Divider()
+            }
             content
         }
     }
