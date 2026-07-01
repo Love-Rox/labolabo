@@ -21,6 +21,8 @@ targets:
     platform: macOS
     sources:
       - path: Sources
+      - path: ../CHANGELOG.md
+        buildPhase: resources
     dependencies:
       - package: LaboLaboCore
         product: LaboLaboEngine
