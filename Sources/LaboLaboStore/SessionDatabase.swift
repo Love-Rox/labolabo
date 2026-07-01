@@ -38,6 +38,13 @@ public final class SessionDatabase {
                 t.column("value", .text)
             }
         }
+        // エージェント（Claude）セッションの resume 情報。
+        migrator.registerMigration("v2-agentSession") { db in
+            try db.alter(table: "session") { t in
+                t.add(column: "agentSessionId", .text)
+                t.add(column: "transcriptPath", .text)
+            }
+        }
         return migrator
     }
 

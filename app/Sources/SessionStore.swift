@@ -18,12 +18,25 @@ final class RepoSession: Identifiable {
     var repoName: String?
     /// このブランチに対応する PR（gh 取得。無ければ nil）。
     var pullRequest: PullRequestInfo?
+    /// 直近のエージェント（Claude）セッション ID。次回起動時の `--resume` に使う。
+    var agentSessionID: String?
+    /// 直近の transcript(JSONL) パス。
+    var transcriptPath: String?
 
-    init(id: UUID = UUID(), worktreePath: URL, name: String? = nil, branch: String? = nil) {
+    init(
+        id: UUID = UUID(),
+        worktreePath: URL,
+        name: String? = nil,
+        branch: String? = nil,
+        agentSessionID: String? = nil,
+        transcriptPath: String? = nil
+    ) {
         self.id = id
         self.worktreePath = worktreePath
         self.name = name ?? worktreePath.lastPathComponent
         self.branch = branch
+        self.agentSessionID = agentSessionID
+        self.transcriptPath = transcriptPath
     }
 }
 
@@ -200,7 +213,9 @@ final class SessionStore {
                 id: uuid,
                 worktreePath: URL(fileURLWithPath: record.worktreePath),
                 name: record.name,
-                branch: record.branch
+                branch: record.branch,
+                agentSessionID: record.agentSessionId,
+                transcriptPath: record.transcriptPath
             )
             sessions.append(session)
             refreshBranch(session)
@@ -238,8 +253,22 @@ final class SessionStore {
             name: session.name,
             branch: session.branch,
             addedAt: Date(),
-            sortOrder: order
+            sortOrder: order,
+            agentSessionId: session.agentSessionID,
+            transcriptPath: session.transcriptPath
         )
         try? db.upsert(record)
+    }
+
+    /// hooks から受け取ったエージェントセッション ID/transcript を保存（次回起動の `--resume` 用）。
+    func updateAgentSession(_ id: RepoSession.ID, agentSessionID: String, transcriptPath: String?) {
+        guard let session = sessions.first(where: { $0.id == id }) else { return }
+        // 変化がなければ書き込みしない（hook 連打での無駄な書き込みを避ける）。
+        if session.agentSessionID == agentSessionID && (transcriptPath == nil || session.transcriptPath == transcriptPath) {
+            return
+        }
+        session.agentSessionID = agentSessionID
+        if let transcriptPath { session.transcriptPath = transcriptPath }
+        persist(session)
     }
 }

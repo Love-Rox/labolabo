@@ -77,7 +77,10 @@ struct ContentView: View {
                     session: session,
                     onClose: { store.close(session.id) },
                     sidebarCollapsed: sidebarCollapsed,
-                    onExpandSidebar: { columnVisibility = .all }
+                    onExpandSidebar: { columnVisibility = .all },
+                    onAgentSession: { id, transcript in
+                        store.updateAgentSession(session.id, agentSessionID: id, transcriptPath: transcript)
+                    }
                 )
                 .id(session.id)
             } else {
@@ -262,7 +265,8 @@ struct SessionDetailView: View {
         session: RepoSession,
         onClose: @escaping () -> Void,
         sidebarCollapsed: Bool = false,
-        onExpandSidebar: @escaping () -> Void = {}
+        onExpandSidebar: @escaping () -> Void = {},
+        onAgentSession: @escaping (String, String?) -> Void = { _, _ in }
     ) {
         self.session = session
         self.onClose = onClose
@@ -270,7 +274,12 @@ struct SessionDetailView: View {
         self.onExpandSidebar = onExpandSidebar
         _work = State(initialValue: WorkPaneModel(worktree: session.worktreePath))
         _tiling = State(initialValue: PaneTilingModel.defaultLayout())
-        _agent = State(initialValue: AgentSessionModel(sessionID: session.id, worktree: session.worktreePath))
+        _agent = State(initialValue: AgentSessionModel(
+            sessionID: session.id,
+            worktree: session.worktreePath,
+            resumeID: session.agentSessionID,
+            onSessionID: onAgentSession
+        ))
         configSource = GhosttyConfig.userConfigSource()
     }
 
@@ -330,7 +339,9 @@ struct SessionDetailView: View {
                 ClaudeMark().frame(width: 15, height: 15)
             }
             .buttonStyle(CircleIconButtonStyle(tint: Color(red: 0.85, green: 0.47, blue: 0.34)))
-            .help("Claude を起動（状態検出 hooks 付き）")
+            .help(agent.canResume
+                ? "Claude を再開（前回のセッションを --resume）"
+                : "Claude を起動（状態検出 hooks 付き）")
 
             Button {
                 tiling.addPane(PaneItem(kind: .terminal, title: "端末"))

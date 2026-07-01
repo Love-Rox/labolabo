@@ -21,6 +21,14 @@ final class AgentSessionModel {
     private let worktree: URL
     private var createdSettings = false
 
+    /// 前回起動時に永続化されたエージェントセッション ID（あれば `--resume` する）。
+    private let initialResumeID: String?
+    /// 新しいセッション ID/transcript を受け取ったら永続化するためのコールバック。
+    private let onSessionID: ((String, String?) -> Void)?
+
+    /// resume に使う ID。今回受信済みなら最新、無ければ前回永続化分。
+    private var resumeID: String? { lastSessionID ?? initialResumeID }
+
     private var claudeDir: URL { worktree.appendingPathComponent(".claude", isDirectory: true) }
     private var localSettingsURL: URL { claudeDir.appendingPathComponent("settings.local.json") }
     private var backupURL: URL { claudeDir.appendingPathComponent("settings.local.json.labolabo-bak") }
@@ -32,8 +40,15 @@ final class AgentSessionModel {
         "PostToolUse", "Notification", "Stop", "SessionEnd",
     ]
 
-    init(sessionID: UUID, worktree: URL) {
+    init(
+        sessionID: UUID,
+        worktree: URL,
+        resumeID: String? = nil,
+        onSessionID: ((String, String?) -> Void)? = nil
+    ) {
         self.worktree = worktree
+        self.initialResumeID = resumeID
+        self.onSessionID = onSessionID
         let short = sessionID.uuidString.replacingOccurrences(of: "-", with: "").prefix(10).lowercased()
         let dir = "/tmp/labolabo"
         try? FileManager.default.createDirectory(
@@ -49,8 +64,11 @@ final class AgentSessionModel {
         bus.onEvent = { [weak self] event in
             guard let self else { return }
             status = event.status
-            if let id = event.sessionID { lastSessionID = id }
             if let path = event.transcriptPath { lastTranscriptPath = path }
+            if let id = event.sessionID {
+                lastSessionID = id
+                onSessionID?(id, event.transcriptPath) // 次回起動の --resume 用に永続化
+            }
         }
         bus.start()
         installLocalSettings()
@@ -62,8 +80,14 @@ final class AgentSessionModel {
     }
 
     /// ✨ ボタンが新規端末で実行するコマンド。hooks は settings.local.json 経由で効くため、
-    /// ここでは素の `claude` を実行するだけでよい。
-    func launchCommand() -> String { "claude" }
+    /// コマンド自体は素の `claude`。前回のセッション ID があれば `--resume <id>` で継続する。
+    func launchCommand() -> String {
+        guard let id = resumeID, !id.isEmpty else { return "claude" }
+        return "claude --resume \(Self.shellQuoted(id))"
+    }
+
+    /// resume 可能か（UI 側で「再開」表示の出し分けに使える）。
+    var canResume: Bool { resumeID?.isEmpty == false }
 
     // MARK: - settings.local.json への安全な hooks 注入
 

@@ -44,6 +44,24 @@ final class SessionDatabaseTests: XCTestCase {
         XCTAssertEqual(try db.allSessions().count, 0)
     }
 
+    func testAgentSessionRoundTrip() throws {
+        let db = try SessionDatabase(url: dbURL)
+        var rec = record("repo-1", order: 0, branch: "main")
+        rec.agentSessionId = "sess-abc-123"
+        rec.transcriptPath = "/tmp/transcript.jsonl"
+        try db.upsert(rec)
+
+        let fetched = try XCTUnwrap(try db.allSessions().first)
+        XCTAssertEqual(fetched.agentSessionId, "sess-abc-123")
+        XCTAssertEqual(fetched.transcriptPath, "/tmp/transcript.jsonl")
+
+        // 既定は nil（後方互換）。
+        try db.upsert(record("repo-2", order: 1))
+        let plain = try XCTUnwrap(try db.allSessions().first { $0.id == "repo-2" })
+        XCTAssertNil(plain.agentSessionId)
+        XCTAssertNil(plain.transcriptPath)
+    }
+
     func testOrdering() throws {
         let db = try SessionDatabase(url: dbURL)
         try db.upsert(record("b", order: 1))
