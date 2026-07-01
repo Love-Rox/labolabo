@@ -19,6 +19,15 @@ struct ContentView: View {
     @State private var showNewSession = false
     @State private var showChangelog = false
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
+    @State private var removalTarget: RemovalRequest?
+    @State private var removalError: String?
+
+    /// worktree 削除の確認対象（dirty なら文言を「強制削除」に変える）。
+    struct RemovalRequest: Identifiable {
+        let session: RepoSession
+        let dirty: Bool
+        var id: RepoSession.ID { session.id }
+    }
 
     private var sidebarCollapsed: Bool { columnVisibility == .detailOnly }
 
@@ -40,8 +49,12 @@ struct ContentView: View {
                                         .tag(session.id)
                                         .listRowBackground(rowBackground(colorID: store.colorID(forRepo: group.key)))
                                         .contextMenu {
-                                            Button("セッションを閉じる", role: .destructive) {
+                                            Button("セッションを閉じる") {
                                                 store.close(session.id)
+                                            }
+                                            Divider()
+                                            Button("worktree を削除…", role: .destructive) {
+                                                requestRemoval(session)
                                             }
                                         }
                                 }
@@ -71,6 +84,33 @@ struct ContentView: View {
             .sheet(isPresented: $showNewSession) {
                 NewSessionSheet(store: store)
             }
+            .confirmationDialog(
+                "worktree を削除",
+                isPresented: Binding(
+                    get: { removalTarget != nil },
+                    set: { if !$0 { removalTarget = nil } }
+                ),
+                presenting: removalTarget
+            ) { req in
+                Button(req.dirty ? "強制削除（変更を破棄）" : "削除", role: .destructive) {
+                    performRemoval(req)
+                }
+                Button("キャンセル", role: .cancel) {}
+            } message: { req in
+                Text(removalMessage(req))
+            }
+            .alert(
+                "worktree を削除できません",
+                isPresented: Binding(
+                    get: { removalError != nil },
+                    set: { if !$0 { removalError = nil } }
+                ),
+                presenting: removalError
+            ) { _ in
+                Button("OK", role: .cancel) {}
+            } message: { message in
+                Text(message)
+            }
         } detail: {
             if let session = store.selected {
                 SessionDetailView(
@@ -94,6 +134,35 @@ struct ContentView: View {
                 }
             }
         }
+    }
+
+    /// worktree 削除の確認を開始（dirty 判定を待ってからダイアログ表示）。
+    private func requestRemoval(_ session: RepoSession) {
+        Task {
+            let dirty = await store.isWorktreeDirty(session.id)
+            removalTarget = RemovalRequest(session: session, dirty: dirty)
+        }
+    }
+
+    /// 確認後の実削除。dirty なら force で削除。失敗は alert 表示。
+    private func performRemoval(_ req: RemovalRequest) {
+        Task {
+            do {
+                try await store.removeWorktree(req.session.id, force: req.dirty)
+            } catch {
+                removalError = (error as? GitCommandError)?
+                    .stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+                    ?? error.localizedDescription
+            }
+        }
+    }
+
+    private func removalMessage(_ req: RemovalRequest) -> String {
+        let path = req.session.worktreePath.path
+        if req.dirty {
+            return "「\(req.session.name)」には未コミット/未追跡の変更があります。強制削除すると変更は失われます。\n\n\(path)"
+        }
+        return "「\(req.session.name)」の worktree を削除します。\n\n\(path)"
     }
 
     /// セッション行の背景（リポジトリ色の淡いタイント）。色未設定は透明。
