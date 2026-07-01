@@ -90,6 +90,12 @@ struct FileDetailPane: View {
 struct CommitGraphPane: View {
     let model: WorkPaneModel
 
+    /// レーン数（gutter 幅を全行で揃えてコミット情報を左揃えにする）。
+    private var laneCount: Int {
+        let maxLen = model.commits.map(\.graph.count).max() ?? 0
+        return max(1, (maxLen + 1) / 2)
+    }
+
     var body: some View {
         if model.commits.isEmpty {
             ContentUnavailableView("コミットがありません", systemImage: "clock.arrow.circlepath")
@@ -99,6 +105,7 @@ struct CommitGraphPane: View {
                     ForEach(model.commits) { line in
                         CommitGraphRow(
                             line: line,
+                            laneCount: laneCount,
                             isSelected: line.commit.map { model.selectedCommit == $0.hash } ?? false
                         )
                         .contentShape(Rectangle())
@@ -116,14 +123,14 @@ struct CommitGraphPane: View {
 
 struct CommitGraphRow: View {
     let line: CommitGraphLine
+    let laneCount: Int
     var isSelected: Bool = false
 
+    static let rowHeight: CGFloat = 22
+
     var body: some View {
-        HStack(spacing: 6) {
-            Text(line.graph.isEmpty ? " " : line.graph)
-                .font(.system(size: 11, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .fixedSize()
+        HStack(spacing: 8) {
+            CommitGraphGutter(graph: line.graph, laneCount: laneCount)
             if let commit = line.commit {
                 Text(commit.hash)
                     .font(.system(size: 11, design: .monospaced))
@@ -146,19 +153,90 @@ struct CommitGraphRow: View {
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
-                Text(commit.relativeDate)
-                    .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
-                    .fixedSize()
+                if let date = commit.date {
+                    Text(date, format: .relative(presentation: .numeric, unitsStyle: .narrow))
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .fixedSize()
+                }
             } else {
                 Spacer(minLength: 0)
             }
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 1)
+        .padding(.trailing, 8)
+        .frame(height: Self.rowHeight)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(isSelected ? Color.accentColor.opacity(0.18) : Color.clear)
+    }
+}
+
+/// `git log --graph` の ASCII レーンを解析し、色分けした滑らかなベクター
+/// （縦線・丸みのある分岐/合流・ノード円）で描く。
+struct CommitGraphGutter: View {
+    let graph: String
+    let laneCount: Int
+
+    static let laneWidth: CGFloat = 14
+    private static let colors: [Color] = [
+        .blue, .teal, .green, .orange, .pink, .purple, .red, .yellow, .indigo, .mint,
+    ]
+
+    private func laneX(_ k: Int) -> CGFloat { CGFloat(k) * Self.laneWidth + Self.laneWidth / 2 }
+    private func color(_ k: Int) -> Color { Self.colors[((k % Self.colors.count) + Self.colors.count) % Self.colors.count] }
+
+    var body: some View {
+        Canvas { context, size in
+            let h = size.height
+            let mid = h / 2
+            for (i, ch) in Array(graph).enumerated() {
+                let k = i / 2
+                let x = laneX(k)
+                if i % 2 == 0 {
+                    switch ch {
+                    case "*":
+                        line(context, CGPoint(x: x, y: 0), CGPoint(x: x, y: h), color(k))
+                        let r: CGFloat = 3.5
+                        let rect = CGRect(x: x - r, y: mid - r, width: r * 2, height: r * 2)
+                        context.fill(Path(ellipseIn: rect), with: .color(color(k)))
+                    case "|":
+                        line(context, CGPoint(x: x, y: 0), CGPoint(x: x, y: h), color(k))
+                    case "_":
+                        line(context, CGPoint(x: x, y: mid), CGPoint(x: laneX(k + 1), y: mid), color(k))
+                    default:
+                        break
+                    }
+                } else {
+                    let xR = laneX(k + 1)
+                    switch ch {
+                    case "\\":
+                        curve(context, CGPoint(x: x, y: 0), CGPoint(x: xR, y: h), color(k + 1))
+                    case "/":
+                        curve(context, CGPoint(x: xR, y: 0), CGPoint(x: x, y: h), color(k))
+                    case "|":
+                        line(context, CGPoint(x: x, y: 0), CGPoint(x: x, y: h), color(k))
+                    default:
+                        break
+                    }
+                }
+            }
+        }
+        .frame(width: CGFloat(laneCount) * Self.laneWidth, height: CommitGraphRow.rowHeight)
+    }
+
+    private func line(_ ctx: GraphicsContext, _ from: CGPoint, _ to: CGPoint, _ c: Color) {
+        var path = Path()
+        path.move(to: from)
+        path.addLine(to: to)
+        ctx.stroke(path, with: .color(c.opacity(0.9)), style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
+    }
+
+    private func curve(_ ctx: GraphicsContext, _ from: CGPoint, _ to: CGPoint, _ c: Color) {
+        let mid = (from.y + to.y) / 2
+        var path = Path()
+        path.move(to: from)
+        path.addCurve(to: to, control1: CGPoint(x: from.x, y: mid), control2: CGPoint(x: to.x, y: mid))
+        ctx.stroke(path, with: .color(c.opacity(0.9)), style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
     }
 }
 

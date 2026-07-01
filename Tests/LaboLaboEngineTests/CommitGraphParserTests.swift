@@ -6,7 +6,7 @@ final class CommitGraphParserTests: XCTestCase {
     private let us = "\u{1f}"
 
     func testParsesCommitLineWithRefs() throws {
-        let raw = "*\(us)abc1234\(us)feat: hello\(us)Alice\(us)2 hours ago\(us) (HEAD -> main, origin/main)"
+        let raw = "*\(us)abc1234\(us)feat: hello\(us)Alice\(us)1700000000\(us) (HEAD -> main, origin/main)"
         let lines = CommitGraphParser.parse(raw)
         XCTAssertEqual(lines.count, 1)
         XCTAssertEqual(lines[0].graph, "*")
@@ -14,12 +14,12 @@ final class CommitGraphParserTests: XCTestCase {
         XCTAssertEqual(commit.hash, "abc1234")
         XCTAssertEqual(commit.subject, "feat: hello")
         XCTAssertEqual(commit.author, "Alice")
-        XCTAssertEqual(commit.relativeDate, "2 hours ago")
+        XCTAssertEqual(commit.date, Date(timeIntervalSince1970: 1_700_000_000))
         XCTAssertEqual(commit.refs, "HEAD -> main, origin/main")
     }
 
     func testParsesCommitLineWithoutRefs() {
-        let raw = "* \(us)deadbee\(us)fix: bug\(us)Bob\(us)3 days ago\(us)"
+        let raw = "* \(us)deadbee\(us)fix: bug\(us)Bob\(us)1699999999\(us)"
         let lines = CommitGraphParser.parse(raw)
         XCTAssertEqual(lines.count, 1)
         XCTAssertEqual(lines[0].graph, "* ")
@@ -29,9 +29,9 @@ final class CommitGraphParserTests: XCTestCase {
 
     func testConnectorLineHasNoCommit() {
         let raw = """
-        *\(us)aaa\(us)s\(us)A\(us)now\(us)
+        *\(us)aaa\(us)s\(us)A\(us)1700000000\(us)
         |\\
-        | *\(us)bbb\(us)s2\(us)B\(us)now\(us)
+        | *\(us)bbb\(us)s2\(us)B\(us)1700000000\(us)
         """
         let lines = CommitGraphParser.parse(raw)
         XCTAssertEqual(lines.count, 3)

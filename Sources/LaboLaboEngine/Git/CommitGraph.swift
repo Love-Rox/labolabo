@@ -12,15 +12,16 @@ public struct CommitGraphLine: Sendable, Equatable, Identifiable {
         public let hash: String
         public let subject: String
         public let author: String
-        public let relativeDate: String
+        /// 作者日時（%at の UNIX 秒から）。相対表示は UI 側で短縮整形する。
+        public let date: Date?
         /// Decorations like `HEAD -> main, origin/main` (parens stripped); empty if none.
         public let refs: String
 
-        public init(hash: String, subject: String, author: String, relativeDate: String, refs: String) {
+        public init(hash: String, subject: String, author: String, date: Date?, refs: String) {
             self.hash = hash
             self.subject = subject
             self.author = author
-            self.relativeDate = relativeDate
+            self.date = date
             self.refs = refs
         }
     }
@@ -37,7 +38,7 @@ extension GitEngine {
     /// delimited by US (0x1f) so subjects/authors with arbitrary text stay intact.
     public func commitGraph(worktree: URL, limit: Int = 300) async throws -> [CommitGraphLine] {
         let us = "\u{1f}"
-        let format = "\(us)%h\(us)%s\(us)%an\(us)%ar\(us)%d"
+        let format = "\(us)%h\(us)%s\(us)%an\(us)%at\(us)%d"
         // `--all` so branch/merge lanes actually show (a single linear branch would
         // otherwise render as one straight column). `--topo-order` keeps the lanes
         // visually coherent rather than strictly by date.
@@ -67,11 +68,12 @@ enum CommitGraphParser {
             let parts = rest.components(separatedBy: String(separator))
             func part(_ i: Int) -> String { i < parts.count ? parts[i] : "" }
             let refs = part(4).trimmingCharacters(in: CharacterSet(charactersIn: " ()"))
+            let date = TimeInterval(part(3)).map { Date(timeIntervalSince1970: $0) }
             let commit = CommitGraphLine.Commit(
                 hash: part(0),
                 subject: part(1),
                 author: part(2),
-                relativeDate: part(3),
+                date: date,
                 refs: refs
             )
             lines.append(CommitGraphLine(id: index, graph: graph, commit: commit))
