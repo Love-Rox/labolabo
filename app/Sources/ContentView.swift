@@ -14,6 +14,7 @@ enum LayoutMetrics {
 struct ContentView: View {
     @State private var store = SessionStore()
     @State private var showImporter = false
+    @State private var showChangelog = false
 
     var body: some View {
         NavigationSplitView {
@@ -67,6 +68,13 @@ struct ContentView: View {
                 .font(.headline)
             Spacer()
             Button {
+                showChangelog = true
+            } label: {
+                Image(systemName: "info.circle")
+            }
+            .buttonStyle(.borderless)
+            .help("変更履歴を表示")
+            Button {
                 showImporter = true
             } label: {
                 Image(systemName: "plus")
@@ -78,6 +86,9 @@ struct ContentView: View {
         .padding(.trailing, 12)
         .frame(height: LayoutMetrics.topBar)
         .background(.bar)
+        .sheet(isPresented: $showChangelog) {
+            ChangelogView()
+        }
     }
 }
 
