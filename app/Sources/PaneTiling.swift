@@ -16,6 +16,44 @@ enum PaneKind: String {
     case files
     case diff
     case commits
+
+    /// 復元時にタイトルが欠けていた場合の既定タイトル。
+    var defaultTitle: String {
+        switch self {
+        case .terminal: return "端末"
+        case .files: return "変更ファイル"
+        case .diff: return "Diff"
+        case .commits: return "履歴"
+        }
+    }
+}
+
+/// タイル配置の保存表現（Codable）。leaf は `paneKind`/`paneTitle`、split は
+/// `orientation`/`ratio`/`children`。セッション別配置と名前付きプリセットに使う。
+struct TileLayout: Codable, Equatable {
+    var paneKind: String?
+    var paneTitle: String?
+    var orientation: String?
+    var ratio: CGFloat?
+    var children: [TileLayout]?
+
+    init(
+        paneKind: String? = nil, paneTitle: String? = nil,
+        orientation: String? = nil, ratio: CGFloat? = nil, children: [TileLayout]? = nil
+    ) {
+        self.paneKind = paneKind
+        self.paneTitle = paneTitle
+        self.orientation = orientation
+        self.ratio = ratio
+        self.children = children
+    }
+}
+
+/// 名前付きレイアウトプリセット（全セッション共通）。
+struct LayoutPreset: Codable, Equatable, Identifiable {
+    var name: String
+    var layout: TileLayout
+    var id: String { name }
 }
 
 @MainActor
@@ -79,6 +117,9 @@ final class PaneTilingModel {
     private(set) var revision: Int = 0
     /// AppKit 側コーディネータ（端末への text 送信に使う）。
     weak var coordinator: TilingCoordinator?
+    /// 構造変更（追加/削除/分割/移動/入替）ごとに呼ばれる。配置の永続化に使う。
+    /// ratio（ドラッグ）は bump しないので、離脱時に別途 snapshot して保存する。
+    @ObservationIgnored var onLayoutChanged: (() -> Void)?
 
     init(root: TileNode) { self.root = root }
 
@@ -103,10 +144,61 @@ final class PaneTilingModel {
         return PaneTilingModel(root: root)
     }
 
-    private func bump() { revision &+= 1 }
+    private func bump() {
+        revision &+= 1
+        onLayoutChanged?()
+    }
 
     var panes: [PaneItem] { Self.leaves(root).compactMap(\.pane) }
     func hasPane(kind: PaneKind) -> Bool { panes.contains { $0.kind == kind } }
+
+    // MARK: - 配置のシリアライズ / 復元 / プリセット適用
+
+    /// 保存済みの配置からモデルを組み立てる（不正なら nil）。
+    static func model(from layout: TileLayout) -> PaneTilingModel? {
+        guard let node = decode(layout) else { return nil }
+        return PaneTilingModel(root: node)
+    }
+
+    /// 現在のタイル木を保存用スナップショットへ。
+    func snapshot() -> TileLayout { Self.encode(root) }
+
+    /// 保存済みの配置（プリセット/セッション別）を適用してツリーを差し替える。
+    func apply(_ layout: TileLayout) {
+        guard let node = Self.decode(layout) else { return }
+        root = node
+        bump()
+    }
+
+    /// 既定配置へ戻す。
+    func resetToDefault() {
+        root = Self.defaultLayout().root
+        bump()
+    }
+
+    private static func encode(_ node: TileNode) -> TileLayout {
+        if let pane = node.pane {
+            return TileLayout(paneKind: pane.kind.rawValue, paneTitle: pane.title)
+        }
+        return TileLayout(
+            orientation: node.orientation == .vertical ? "vertical" : "horizontal",
+            ratio: node.ratio,
+            children: node.children.map(encode)
+        )
+    }
+
+    private static func decode(_ layout: TileLayout) -> TileNode? {
+        if let kindRaw = layout.paneKind, let kind = PaneKind(rawValue: kindRaw) {
+            return TileNode(pane: PaneItem(kind: kind, title: layout.paneTitle ?? kind.defaultTitle))
+        }
+        guard let children = layout.children, children.count >= 2 else { return nil }
+        let nodes = children.compactMap(decode)
+        guard nodes.count == children.count else { return nil }
+        let orientation: NSUserInterfaceLayoutOrientation =
+            layout.orientation == "vertical" ? .vertical : .horizontal
+        let ratio = min(0.95, max(0.05, layout.ratio ?? 0.5))
+        return TileNode(orientation: orientation, ratio: ratio, children: nodes)
+    }
 
     // MARK: mutations
 
