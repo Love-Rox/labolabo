@@ -5,6 +5,12 @@ import GhosttyTerminal
 
 /// 上部バーの共有寸法。タイトルバーを隠して自前バー 1 本に統合する際に、
 /// サイドバー側ヘッダーと詳細側バーの高さを揃え、信号機（traffic lights）を避ける。
+/// `.sheet(item:)` に URL を渡すためのラッパー（URL は Identifiable でないため）。
+struct IdentifiableURL: Identifiable {
+    let url: URL
+    var id: String { url.path }
+}
+
 enum LayoutMetrics {
     static let topBar: CGFloat = 52
     /// 信号機を避けるためのサイドバー左インセット。
@@ -17,6 +23,8 @@ struct ContentView: View {
     @State private var store = SessionStore()
     @State private var showImporter = false
     @State private var showNewSession = false
+    @State private var showOrgImporter = false
+    @State private var orgFolder: IdentifiableURL?
     @State private var showChangelog = false
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var removalTarget: RemovalRequest?
@@ -87,6 +95,12 @@ struct ContentView: View {
             }
             .sheet(isPresented: $showNewSession) {
                 NewSessionSheet(store: store)
+            }
+            .fileImporter(isPresented: $showOrgImporter, allowedContentTypes: [.folder]) { result in
+                if case let .success(url) = result { orgFolder = IdentifiableURL(url: url) }
+            }
+            .sheet(item: $orgFolder) { folder in
+                OrgOpenSheet(store: store, folder: folder.url)
             }
             .confirmationDialog(
                 "worktree を削除",
@@ -207,6 +221,8 @@ struct ContentView: View {
             Menu {
                 Button("新規セッション（worktree を作成）…") { showNewSession = true }
                 Button("既存のフォルダを開く…") { showImporter = true }
+                Divider()
+                Button("org 内のリポジトリを個別に開く…") { showOrgImporter = true }
             } label: {
                 Image(systemName: "plus")
             }

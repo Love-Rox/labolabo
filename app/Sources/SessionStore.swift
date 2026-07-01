@@ -229,6 +229,32 @@ final class SessionStore {
         attachAgent(session)
     }
 
+    /// org ディレクトリ配下の git リポジトリを検出（Part A の候補列挙）。
+    func discoverRepos(under url: URL) async -> [URL] {
+        await git.discoverRepos(under: url)
+    }
+
+    /// 複数リポジトリをまとめてセッション化する（org を個別セッションで開く）。
+    /// 既に開いているパスはスキップ。最初に新規追加したものを選択する。
+    func openRepositories(_ urls: [URL]) {
+        var firstNew: RepoSession.ID?
+        for url in urls {
+            if let existing = sessions.first(where: { $0.worktreePath == url }) {
+                firstNew = firstNew ?? existing.id
+                continue
+            }
+            let session = RepoSession(worktreePath: url)
+            sessions.append(session)
+            persist(session)
+            refreshBranch(session)
+            resolveRepo(session)
+            fetchPR(session)
+            attachAgent(session)
+            firstNew = firstNew ?? session.id
+        }
+        if let firstNew { select(firstNew) }
+    }
+
     func close(_ id: RepoSession.ID) {
         if let session = sessions.first(where: { $0.id == id }) {
             session.agent?.stop()  // hooks 撤去 + ソケット停止
