@@ -212,7 +212,8 @@ struct SessionDetailView: View {
             )
         }
         // 詳細（ターミナル）側に左余白を入れ、カード型サイドバーとの密着を解消する。
-        .padding(.leading, 10)
+        // サイドバー非表示時は隙間不要なので密着させる。
+        .padding(.leading, sidebarCollapsed ? 0 : 10)
         .ignoresSafeArea(.container, edges: .top)
         .navigationTitle(session.name)
         .onAppear { work.start(); agent.start() }
