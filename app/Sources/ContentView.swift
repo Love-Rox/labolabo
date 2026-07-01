@@ -9,6 +9,8 @@ enum LayoutMetrics {
     static let topBar: CGFloat = 52
     /// 信号機を避けるためのサイドバー左インセット。
     static let trafficLightInset: CGFloat = 78
+    /// 折りたたみ時の詳細バー左インセット。展開ボタンが入る分、少し詰める。
+    static let trafficLightInsetCompact: CGFloat = 70
 }
 
 struct ContentView: View {
@@ -44,8 +46,9 @@ struct ContentView: View {
                 .listStyle(.sidebar)
             }
             .ignoresSafeArea(.container, edges: .top)
+            .navigationSplitViewColumnWidth(min: 220, ideal: 240)
             // NavigationSplitView が自動で出すサイドバー開閉ボタンを消す。自前ヘッダーの
-            // ⓘ/＋ と重なるため（幅はドラッグで調整できるのでトグルは不要）。
+            // ⓘ/＋ と重なるため（折りたたみは自前トグルで行う）。
             .toolbar(removing: .sidebarToggle)
             .fileImporter(isPresented: $showImporter, allowedContentTypes: [.folder]) { result in
                 if case let .success(url) = result {
@@ -75,10 +78,12 @@ struct ContentView: View {
 
     /// サイドバー上部のヘッダー（OS タイトルバーの代わり）。信号機を避ける左インセット付き。
     private var sidebarHeader: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 6) {
             Text("LaboLabo")
                 .font(.headline)
-            Spacer()
+                .lineLimit(1)
+                .fixedSize()
+            Spacer(minLength: 4)
             Button {
                 showChangelog = true
             } label: {
@@ -120,13 +125,17 @@ struct SessionRow: View {
                 .fill(Color.secondary)
                 .frame(width: 8, height: 8)
             VStack(alignment: .leading, spacing: 1) {
-                Text(session.name)
+                Text(session.name).lineLimit(1).truncationMode(.middle)
                 Text(session.branch ?? "—")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
             }
+            Spacer(minLength: 0)
         }
         .padding(.vertical, 2)
+        .padding(.trailing, 8)
     }
 }
 
@@ -259,7 +268,8 @@ struct SessionDetailView: View {
             .help("セッションを閉じる")
         }
         // サイドバー折りたたみ時は詳細が信号機の下に来るので左インセットで避ける。
-        .padding(.leading, sidebarCollapsed ? LayoutMetrics.trafficLightInset : 12)
+        // 展開ボタンが入る分、通常より少し詰める。
+        .padding(.leading, sidebarCollapsed ? LayoutMetrics.trafficLightInsetCompact : 12)
         .padding(.trailing, 12)
         .frame(height: LayoutMetrics.topBar)
         .background(.bar)
