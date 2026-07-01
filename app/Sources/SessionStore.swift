@@ -65,6 +65,7 @@ final class SessionStore {
     init() {
         db = try? SessionDatabase(url: SessionDatabase.defaultURL())
         loadRepoColors()
+        loadPresets()
         restore()
     }
 
@@ -281,6 +282,71 @@ final class SessionStore {
             transcriptPath: session.transcriptPath
         )
         try? db.upsert(record)
+    }
+
+    // MARK: - ペイン配置（セッション別 ＋ 名前付きプリセット）
+
+    private static let defaultLayoutKey = "paneLayout:default"
+
+    /// セッション固有の保存済み配置。無ければ nil。
+    func paneLayout(for id: RepoSession.ID) -> TileLayout? {
+        decodeLayout((try? db?.appState(forKey: "paneLayout:" + id.uuidString)) ?? nil)
+    }
+
+    /// 新規セッションが継承する既定配置（直近に保存された配置）。
+    func defaultPaneLayout() -> TileLayout? {
+        decodeLayout((try? db?.appState(forKey: Self.defaultLayoutKey)) ?? nil)
+    }
+
+    /// セッションの配置を保存し、同時に「新規セッションが継承する既定配置」も更新する。
+    func savePaneLayout(_ id: RepoSession.ID, _ layout: TileLayout) {
+        guard let json = encodeLayout(layout) else { return }
+        try? db?.setAppState(json, forKey: "paneLayout:" + id.uuidString)
+        try? db?.setAppState(json, forKey: Self.defaultLayoutKey)
+    }
+
+    /// 名前付きプリセット一覧（全セッション共通）。
+    private(set) var presets: [LayoutPreset] = []
+
+    private func loadPresets() {
+        guard let json = (try? db?.appState(forKey: "panePresets")) ?? nil,
+              let data = json.data(using: .utf8),
+              let list = try? JSONDecoder().decode([LayoutPreset].self, from: data) else {
+            presets = []
+            return
+        }
+        presets = list
+    }
+
+    /// 現在の配置を名前付きプリセットとして保存（同名は上書き）。
+    func savePreset(name: String, layout: TileLayout) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        var list = presets.filter { $0.name != trimmed }
+        list.append(LayoutPreset(name: trimmed, layout: layout))
+        list.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        persistPresets(list)
+    }
+
+    func deletePreset(name: String) {
+        persistPresets(presets.filter { $0.name != name })
+    }
+
+    private func persistPresets(_ list: [LayoutPreset]) {
+        presets = list
+        if let data = try? JSONEncoder().encode(list), let json = String(data: data, encoding: .utf8) {
+            try? db?.setAppState(json, forKey: "panePresets")
+        }
+    }
+
+    private func encodeLayout(_ layout: TileLayout) -> String? {
+        guard let data = try? JSONEncoder().encode(layout) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    private func decodeLayout(_ json: String?) -> TileLayout? {
+        guard let json, let data = json.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(TileLayout.self, from: data)
     }
 
     /// hooks から受け取ったエージェントセッション ID/transcript を保存（次回起動の `--resume` 用）。
