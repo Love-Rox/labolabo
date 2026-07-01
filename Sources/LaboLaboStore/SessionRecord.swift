@@ -11,6 +11,10 @@ public struct SessionRecord: Codable, FetchableRecord, PersistableRecord, Identi
     public var branch: String?
     public var addedAt: Date
     public var sortOrder: Int
+    /// 直近のエージェント（Claude）セッション ID。次回起動時の `--resume` に使う。
+    public var agentSessionId: String?
+    /// 直近の transcript(JSONL) パス。usage/cost の best-effort 取得などに使う。
+    public var transcriptPath: String?
 
     public init(
         id: String,
@@ -18,7 +22,9 @@ public struct SessionRecord: Codable, FetchableRecord, PersistableRecord, Identi
         name: String,
         branch: String? = nil,
         addedAt: Date,
-        sortOrder: Int
+        sortOrder: Int,
+        agentSessionId: String? = nil,
+        transcriptPath: String? = nil
     ) {
         self.id = id
         self.worktreePath = worktreePath
@@ -26,6 +32,8 @@ public struct SessionRecord: Codable, FetchableRecord, PersistableRecord, Identi
         self.branch = branch
         self.addedAt = addedAt
         self.sortOrder = sortOrder
+        self.agentSessionId = agentSessionId
+        self.transcriptPath = transcriptPath
     }
 
     public static let databaseTableName = "session"
