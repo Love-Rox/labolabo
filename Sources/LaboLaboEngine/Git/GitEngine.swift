@@ -127,6 +127,37 @@ public actor GitEngine {
         return nil
     }
 
+    /// `directory` 配下の git リポジトリ（.git を持つディレクトリ）を検出する。
+    /// `directory` 自身がリポジトリならそれ 1 つ。そうでなければ（org ディレクトリ等）
+    /// 子孫を `maxDepth` 段まで走査し、見つけたリポジトリには降りずに列挙する。
+    public func discoverRepos(under directory: URL, maxDepth: Int = 3) -> [URL] {
+        if Self.isGitRepo(directory) { return [directory] }
+        var results: [URL] = []
+        func scan(_ dir: URL, depth: Int) {
+            guard depth <= maxDepth,
+                  let entries = try? FileManager.default.contentsOfDirectory(
+                      at: dir, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]
+                  ) else { return }
+            for entry in entries {
+                guard (try? entry.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true else { continue }
+                if Self.isGitRepo(entry) {
+                    results.append(entry) // リポジトリの中へは降りない
+                } else {
+                    scan(entry, depth: depth + 1)
+                }
+            }
+        }
+        scan(directory, depth: 1)
+        return results.sorted {
+            $0.path.localizedStandardCompare($1.path) == .orderedAscending
+        }
+    }
+
+    /// `.git`（ディレクトリまたはファイル＝worktree/submodule）を持つか。
+    static func isGitRepo(_ url: URL) -> Bool {
+        FileManager.default.fileExists(atPath: url.appendingPathComponent(".git").path)
+    }
+
     // MARK: - Mutate (serialized by the actor)
 
     /// `git worktree add -b <branch> <path> <baseRef>`

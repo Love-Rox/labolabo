@@ -16,6 +16,13 @@ enum FileListMode: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+/// 作業ディレクトリ配下の 1 リポジトリ。org ディレクトリでは複数になる。
+struct RepoRef: Identifiable, Hashable {
+    let root: URL
+    let name: String
+    var id: String { root.path }
+}
+
 struct ChangedFileItem: Identifiable, Hashable {
     enum Section: String, CaseIterable {
         case staged = "Staged"
@@ -23,23 +30,40 @@ struct ChangedFileItem: Identifiable, Hashable {
         case untracked = "Untracked"
     }
 
+    /// 表示パス（複数リポ時は `repoName/相対パス`、単一リポ時は相対パス）。ツリーの
+    /// グルーピングにも使う（複数リポではリポジトリ名がトップ階層になる）。
     let path: String
     let section: Section
     let adds: Int?
     let dels: Int?
     /// 作業ツリー上のファイルの最終更新時刻（削除済みなどで取れない場合は nil）。
     let modifiedAt: Date?
+    /// このファイルが属するリポジトリのルート。
+    let repoRoot: URL
+    /// リポジトリ内の相対パス（git 操作に使う）。
+    let repoRelativePath: String
 
     var id: String { "\(section.rawValue):\(path)" }
     var isUntracked: Bool { section == .untracked }
     var fileName: String { (path as NSString).lastPathComponent }
 }
 
-/// Loads and live-refreshes the git state + selected-file diff for one worktree.
+/// 作業ディレクトリ（単一 worktree もしくは org ディレクトリ配下の複数リポジトリ）の
+/// git 状態＋選択ファイル差分をライブ更新する。
 @MainActor
 @Observable
 final class WorkPaneModel {
+    /// セッションの作業ディレクトリ（リポジトリ自体か、複数リポを含む org ディレクトリ）。
     let worktree: URL
+
+    /// 検出したリポジトリ（1 つなら通常表示、複数なら横断表示）。
+    var repos: [RepoRef] = []
+    var multiRepo: Bool { repos.count > 1 }
+    /// 履歴/ブランチ表示の対象リポジトリ（複数リポ時にセレクタで切替）。
+    var selectedRepoID: String?
+    var selectedRepo: RepoRef? {
+        repos.first { $0.id == selectedRepoID } ?? repos.first
+    }
 
     var status: GitStatus?
     var items: [ChangedFileItem] = []
@@ -79,7 +103,10 @@ final class WorkPaneModel {
     }
 
     func start() {
-        Task { await refresh() }
+        Task {
+            await discoverRepos()
+            await refresh()
+        }
         let watcher = FileWatcher(path: worktree) { [weak self] in
             Task { @MainActor in await self?.refresh() }
         }
@@ -90,6 +117,20 @@ final class WorkPaneModel {
     func stop() {
         watcher?.stop()
         watcher = nil
+    }
+
+    private func discoverRepos() async {
+        let roots = await git.discoverRepos(under: worktree)
+        repos = roots.map { RepoRef(root: $0, name: $0.lastPathComponent) }
+        if selectedRepoID == nil { selectedRepoID = repos.first?.id }
+    }
+
+    func selectRepo(_ id: String) {
+        selectedRepoID = id
+        Task {
+            await loadCommits()
+            if selectedCommit != nil { await loadCommitDiff() }
+        }
     }
 
     func select(_ item: ChangedFileItem) { select(path: item.path) }
@@ -114,8 +155,13 @@ final class WorkPaneModel {
     }
 
     private func loadCommitDiff() async {
-        guard let hash = selectedCommit else { commitDiff = nil; return }
-        commitDiff = (try? await git.commitDiff(worktree: worktree, hash: hash)) ?? []
+        guard let hash = selectedCommit, let repo = selectedRepo else { commitDiff = nil; return }
+        commitDiff = (try? await git.commitDiff(worktree: repo.root, hash: hash)) ?? []
+    }
+
+    private func loadCommits() async {
+        guard let repo = selectedRepo else { commits = []; return }
+        commits = (try? await git.commitGraph(worktree: repo.root, limit: 300)) ?? []
     }
 
     var selectedItem: ChangedFileItem? {
@@ -131,12 +177,12 @@ final class WorkPaneModel {
         )
     }
 
-    /// 変更ファイルだけのディレクトリツリー。
+    /// 変更ファイルだけのディレクトリツリー（複数リポ時はリポジトリ名がトップ階層）。
     var changedTree: [FileTreeNode] {
         FileTreeBuilder.build(paths: items.map(\.path), changeByPath: changeByPath)
     }
 
-    /// worktree 全体のツリー（変更をマーク）。
+    /// 作業ディレクトリ全体のツリー（変更をマーク）。
     var fullTree: [FileTreeNode] {
         var paths = Set(allFiles)
         for item in items { paths.insert(item.path) }
@@ -156,46 +202,66 @@ final class WorkPaneModel {
     }
 
     func refresh() async {
-        do {
-            let status = try await git.status(worktree: worktree)
-            self.status = status
+        if repos.isEmpty { await discoverRepos() }
+        guard !repos.isEmpty else {
+            // git リポジトリが 1 つも見つからない作業ディレクトリ。
+            items = []; allFiles = []; status = nil
+            loadError = nil
+            return
+        }
 
-            let unstaged = (try? await git.numstat(worktree: worktree, staged: false)) ?? []
-            let staged = (try? await git.numstat(worktree: worktree, staged: true)) ?? []
+        var aggregated: [ChangedFileItem] = []
+        var aggregatedFiles: [String] = []
+        let prefixWithRepo = repos.count > 1
+
+        for repo in repos {
+            guard let status = try? await git.status(worktree: repo.root) else { continue }
+
+            let unstaged = (try? await git.numstat(worktree: repo.root, staged: false)) ?? []
+            let staged = (try? await git.numstat(worktree: repo.root, staged: true)) ?? []
             let unstagedCounts = Dictionary(unstaged.map { ($0.path, $0) }, uniquingKeysWith: { a, _ in a })
             let stagedCounts = Dictionary(staged.map { ($0.path, $0) }, uniquingKeysWith: { a, _ in a })
 
-            var items: [ChangedFileItem] = []
+            func displayPath(_ rel: String) -> String { prefixWithRepo ? "\(repo.name)/\(rel)" : rel }
+
+            func makeItem(_ rel: String, _ section: ChangedFileItem.Section, _ n: NumstatEntry?) -> ChangedFileItem {
+                ChangedFileItem(
+                    path: displayPath(rel), section: section,
+                    adds: n?.additions, dels: n?.deletions,
+                    modifiedAt: modifiedDate(repo: repo.root, path: rel),
+                    repoRoot: repo.root, repoRelativePath: rel
+                )
+            }
+
             for entry in status.staged {
-                let n = stagedCounts[entry.path]
-                items.append(.init(path: entry.path, section: .staged, adds: n?.additions, dels: n?.deletions,
-                                   modifiedAt: modifiedDate(for: entry.path)))
+                aggregated.append(makeItem(entry.path, .staged, stagedCounts[entry.path]))
             }
             for entry in status.unstaged where entry.kind != .unmerged {
-                let n = unstagedCounts[entry.path]
-                items.append(.init(path: entry.path, section: .unstaged, adds: n?.additions, dels: n?.deletions,
-                                   modifiedAt: modifiedDate(for: entry.path)))
+                aggregated.append(makeItem(entry.path, .unstaged, unstagedCounts[entry.path]))
             }
             for entry in status.untracked {
-                items.append(.init(path: entry.path, section: .untracked, adds: nil, dels: nil,
-                                   modifiedAt: modifiedDate(for: entry.path)))
+                aggregated.append(makeItem(entry.path, .untracked, nil))
             }
-            // 我々が注入する hooks 設定は一覧に出さない（ノイズ回避）。
-            self.items = items.filter { $0.path != AgentSessionModel.localSettingsRelativePath }
-            allFiles = ((try? await git.listFiles(worktree: worktree)) ?? [])
-                .filter { $0 != AgentSessionModel.localSettingsRelativePath }
 
-            if let selectedPath,
-               !self.items.contains(where: { $0.path == selectedPath }),
-               !allFiles.contains(selectedPath) {
-                self.selectedPath = nil
-            }
-            commits = (try? await git.commitGraph(worktree: worktree, limit: 300)) ?? []
-            loadError = nil
-            await loadSelection()
-        } catch {
-            loadError = String(describing: error)
+            let files = ((try? await git.listFiles(worktree: repo.root)) ?? [])
+                .filter { $0 != AgentSessionModel.localSettingsRelativePath }
+            aggregatedFiles.append(contentsOf: prefixWithRepo ? files.map { "\(repo.name)/\($0)" } : files)
         }
+
+        // 我々が注入する hooks 設定は一覧に出さない（ノイズ回避）。
+        items = aggregated.filter { !$0.repoRelativePath.hasSuffix(AgentSessionModel.localSettingsRelativePath) }
+        allFiles = aggregatedFiles
+        // ブランチバーは対象リポジトリの状態を表示。
+        status = try? await git.status(worktree: (selectedRepo ?? repos[0]).root)
+
+        if let selectedPath,
+           !items.contains(where: { $0.path == selectedPath }),
+           !allFiles.contains(selectedPath) {
+            self.selectedPath = nil
+        }
+        await loadCommits()
+        loadError = nil
+        await loadSelection()
     }
 
     func loadSelection() async {
@@ -205,16 +271,31 @@ final class WorkPaneModel {
             return
         }
         if let item = items.first(where: { $0.path == path }) {
-            diff = try? await git.diff(worktree: worktree, path: path, staged: item.section == .staged)
+            diff = try? await git.diff(worktree: item.repoRoot, path: item.repoRelativePath, staged: item.section == .staged)
+            wholeText = try? git.fileContents(worktree: item.repoRoot, path: item.repoRelativePath)
         } else {
-            diff = nil // 全体ツリーの未変更ファイルは diff なし（全文のみ）
+            // 全体ツリーの未変更ファイル: 表示パスからリポジトリを解決して全文表示。
+            diff = nil
+            wholeText = resolveWholeText(displayPath: path)
         }
-        wholeText = try? git.fileContents(worktree: worktree, path: path)
+    }
+
+    /// 全体ツリーの表示パス（複数リポ時は `repoName/相対`）を実ファイルへ解決して読む。
+    private func resolveWholeText(displayPath: String) -> String? {
+        if repos.count > 1 {
+            for repo in repos where displayPath.hasPrefix("\(repo.name)/") {
+                let rel = String(displayPath.dropFirst(repo.name.count + 1))
+                if let text = try? git.fileContents(worktree: repo.root, path: rel) { return text }
+            }
+            return nil
+        }
+        guard let repo = repos.first else { return nil }
+        return try? git.fileContents(worktree: repo.root, path: displayPath)
     }
 
     /// 作業ツリー上のファイルの最終更新時刻。削除済み等で取得できなければ nil。
-    private func modifiedDate(for path: String) -> Date? {
-        let url = worktree.appendingPathComponent(path)
+    private func modifiedDate(repo: URL, path: String) -> Date? {
+        let url = repo.appendingPathComponent(path)
         let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
         return attrs?[.modificationDate] as? Date
     }
