@@ -196,6 +196,29 @@ final class SessionStore {
         if selection == id { select(sessions.first?.id) }
     }
 
+    // MARK: - worktree の撤去（破壊的・確認付き）
+
+    /// worktree に未コミット/未追跡の変更があるか（削除ダイアログの文言に使う）。
+    func isWorktreeDirty(_ id: RepoSession.ID) async -> Bool {
+        guard let session = sessions.first(where: { $0.id == id }) else { return false }
+        return (try? await git.status(worktree: session.worktreePath))?.isDirty ?? false
+    }
+
+    /// `git worktree remove` で worktree を撤去し、成功したらセッションも閉じる。
+    /// dirty は `force: true` のときのみ削除（呼び出し側で確認する）。`rm -rf` はしない。
+    /// 失敗時（main worktree・git エラー等）は throw して呼び出し側で表示する。
+    func removeWorktree(_ id: RepoSession.ID, force: Bool) async throws {
+        guard let session = sessions.first(where: { $0.id == id }) else { return }
+        let root: URL
+        if let info = try? await git.repoInfo(worktree: session.worktreePath) {
+            root = URL(fileURLWithPath: info.root, isDirectory: true)
+        } else {
+            root = session.worktreePath.deletingLastPathComponent()
+        }
+        try await git.removeWorktree(repo: root, path: session.worktreePath, force: force)
+        close(id)
+    }
+
     func select(_ id: RepoSession.ID?) {
         selection = id
         try? db?.setSelectedSessionID(id?.uuidString)
