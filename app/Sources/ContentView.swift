@@ -45,8 +45,9 @@ struct ContentView: View {
                 }
                 .listStyle(.sidebar)
             }
+            .padding(.trailing, 8) // サイドバー外側右の余白（ターミナルとの密着を解消）
             .ignoresSafeArea(.container, edges: .top)
-            .navigationSplitViewColumnWidth(min: 220, ideal: 240)
+            .navigationSplitViewColumnWidth(min: 224, ideal: 248)
             // NavigationSplitView が自動で出すサイドバー開閉ボタンを消す。自前ヘッダーの
             // ⓘ/＋ と重なるため（折りたたみは自前トグルで行う）。
             .toolbar(removing: .sidebarToggle)
