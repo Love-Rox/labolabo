@@ -12,6 +12,12 @@ final class RepoSession: Identifiable {
     let worktreePath: URL
     var name: String
     var branch: String?
+    /// 所属リポジトリの安定キー（共有 git ディレクトリ）。グルーピングに使う。
+    var repoKey: String?
+    /// 所属リポジトリの表示名（owner/repo もしくはフォルダ名）。
+    var repoName: String?
+    /// このブランチに対応する PR（gh 取得。無ければ nil）。
+    var pullRequest: PullRequestInfo?
 
     init(id: UUID = UUID(), worktreePath: URL, name: String? = nil, branch: String? = nil) {
         self.id = id
@@ -21,6 +27,14 @@ final class RepoSession: Identifiable {
     }
 }
 
+/// サイドバーでリポジトリごとにまとめた 1 グループ。
+struct SessionGroup: Identifiable {
+    let key: String
+    let name: String
+    let sessions: [RepoSession]
+    var id: String { key }
+}
+
 /// Owns the open sessions and persists them (GRDB) so the previous set + selection
 /// is restored on launch.
 @MainActor
@@ -28,18 +42,75 @@ final class RepoSession: Identifiable {
 final class SessionStore {
     var sessions: [RepoSession] = []
     var selection: RepoSession.ID?
+    /// リポジトリキー → 色 id。
+    private(set) var repoColors: [String: String] = [:]
 
     private let git = GitEngine()
+    private let github = GitHubEngine()
     private let db: SessionDatabase?
 
     init() {
         db = try? SessionDatabase(url: SessionDatabase.defaultURL())
+        loadRepoColors()
         restore()
+    }
+
+    /// このブランチに対応する PR を gh から取得（失敗/未検出なら nil）。
+    private func fetchPR(_ session: RepoSession) {
+        Task { [github] in
+            let pr = (try? await github.pullRequest(worktree: session.worktreePath)) ?? nil
+            session.pullRequest = pr
+        }
+    }
+
+    // MARK: - リポジトリの色
+
+    func colorID(forRepo repoKey: String) -> String? { repoColors[repoKey] }
+
+    func setColorID(_ id: String?, forRepo repoKey: String) {
+        if let id {
+            repoColors[repoKey] = id
+        } else {
+            repoColors.removeValue(forKey: repoKey)
+        }
+        try? db?.setAppState(id, forKey: "repoColor:" + repoKey)
+    }
+
+    private func loadRepoColors() {
+        guard let db, let entries = try? db.appStateEntries(prefix: "repoColor:") else { return }
+        var colors: [String: String] = [:]
+        for (key, value) in entries {
+            colors[String(key.dropFirst("repoColor:".count))] = value
+        }
+        repoColors = colors
     }
 
     var selected: RepoSession? {
         guard let selection else { return nil }
         return sessions.first { $0.id == selection }
+    }
+
+    /// リポジトリごとにまとめたグループ（名前昇順）。未解決の間は worktree の親フォルダで暫定グループ。
+    var groupedSessions: [SessionGroup] {
+        let grouped = Dictionary(grouping: sessions) { session in
+            session.repoKey ?? session.worktreePath.deletingLastPathComponent().path
+        }
+        return grouped.map { key, group in
+            let name = group.first?.repoName
+                ?? group.first?.worktreePath.deletingLastPathComponent().lastPathComponent
+                ?? "…"
+            return SessionGroup(key: key, name: name, sessions: group)
+        }
+        .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
+
+    private func resolveRepo(_ session: RepoSession) {
+        Task { [git] in
+            if let info = try? await git.repoInfo(worktree: session.worktreePath) {
+                session.repoKey = info.key
+                session.repoName = info.name
+            }
+        }
     }
 
     func openRepository(at url: URL) {
@@ -52,6 +123,8 @@ final class SessionStore {
         persist(session)
         select(session.id)
         refreshBranch(session)
+        resolveRepo(session)
+        fetchPR(session)
     }
 
     func close(_ id: RepoSession.ID) {
@@ -63,6 +136,7 @@ final class SessionStore {
     func select(_ id: RepoSession.ID?) {
         selection = id
         try? db?.setSelectedSessionID(id?.uuidString)
+        if let session = sessions.first(where: { $0.id == id }) { fetchPR(session) }
     }
 
     // MARK: - Restore on launch
@@ -80,6 +154,8 @@ final class SessionStore {
             )
             sessions.append(session)
             refreshBranch(session)
+            resolveRepo(session)
+            fetchPR(session)
         }
 
         let storedSelection = (try? db.selectedSessionID()) ?? nil

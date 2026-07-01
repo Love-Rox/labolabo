@@ -82,4 +82,42 @@ public final class SessionDatabase {
             try String.fetchOne(db, sql: "SELECT value FROM appState WHERE key = 'selectedSession'")
         }
     }
+
+    // MARK: - Generic key-value app state
+
+    public func setAppState(_ value: String?, forKey key: String) throws {
+        try dbQueue.write { db in
+            try db.execute(
+                sql: """
+                INSERT INTO appState(key, value) VALUES(?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                arguments: [key, value]
+            )
+        }
+    }
+
+    public func appState(forKey key: String) throws -> String? {
+        try dbQueue.read { db in
+            try String.fetchOne(db, sql: "SELECT value FROM appState WHERE key = ?", arguments: [key])
+        }
+    }
+
+    /// `prefix` で始まるキーの全エントリ（キー→値）。
+    public func appStateEntries(prefix: String) throws -> [String: String] {
+        try dbQueue.read { db in
+            let rows = try Row.fetchAll(
+                db,
+                sql: "SELECT key, value FROM appState WHERE key LIKE ?",
+                arguments: [prefix + "%"]
+            )
+            var result: [String: String] = [:]
+            for row in rows {
+                if let key: String = row["key"], let value: String = row["value"] {
+                    result[key] = value
+                }
+            }
+            return result
+        }
+    }
 }

@@ -32,20 +32,31 @@ struct ContentView: View {
                         Text("リポジトリを開いてください")
                             .foregroundStyle(.secondary)
                     } else {
-                        ForEach(store.sessions) { session in
-                            SessionRow(session: session)
-                                .tag(session.id)
-                                .contextMenu {
-                                    Button("セッションを閉じる", role: .destructive) {
-                                        store.close(session.id)
-                                    }
+                        ForEach(store.groupedSessions) { group in
+                            Section {
+                                ForEach(group.sessions) { session in
+                                    SessionRow(session: session)
+                                        .tag(session.id)
+                                        .listRowBackground(rowBackground(colorID: store.colorID(forRepo: group.key)))
+                                        .contextMenu {
+                                            Button("セッションを閉じる", role: .destructive) {
+                                                store.close(session.id)
+                                            }
+                                        }
                                 }
+                            } header: {
+                                RepoGroupHeader(
+                                    name: group.name,
+                                    count: group.sessions.count,
+                                    colorID: store.colorID(forRepo: group.key),
+                                    onSelectColor: { store.setColorID($0, forRepo: group.key) }
+                                )
+                            }
                         }
                     }
                 }
                 .listStyle(.sidebar)
             }
-            .padding(.trailing, 8) // サイドバー外側右の余白（ターミナルとの密着を解消）
             .ignoresSafeArea(.container, edges: .top)
             .navigationSplitViewColumnWidth(min: 224, ideal: 248)
             // NavigationSplitView が自動で出すサイドバー開閉ボタンを消す。自前ヘッダーの
@@ -74,6 +85,19 @@ struct ContentView: View {
                     Button("リポジトリを開く") { showImporter = true }
                 }
             }
+        }
+    }
+
+    /// セッション行の背景（リポジトリ色の淡いタイント）。色未設定は透明。
+    @ViewBuilder
+    private func rowBackground(colorID: String?) -> some View {
+        if let colorID {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(RepoPalette.color(for: colorID).opacity(0.16))
+                .padding(.vertical, 1)
+                .padding(.horizontal, 6)
+        } else {
+            Color.clear
         }
     }
 
@@ -107,7 +131,9 @@ struct ContentView: View {
             .buttonStyle(.borderless)
             .help("サイドバーを折りたたむ")
         }
-        .padding(.leading, LayoutMetrics.trafficLightInset)
+        // macOS 26 のカード型サイドバーでは信号機はカードの上にあるため、
+        // 左は通常のパディングでよい（信号機回避の大きな左インセットは不要）。
+        .padding(.leading, 14)
         .padding(.trailing, 12)
         .frame(height: LayoutMetrics.topBar)
         .background(.bar)
@@ -122,9 +148,6 @@ struct SessionRow: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Circle()
-                .fill(Color.secondary)
-                .frame(width: 8, height: 8)
             VStack(alignment: .leading, spacing: 1) {
                 Text(session.name).lineLimit(1).truncationMode(.middle)
                 Text(session.branch ?? "—")
@@ -133,10 +156,84 @@ struct SessionRow: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
-            Spacer(minLength: 0)
+            Spacer(minLength: 4)
+            if let pr = session.pullRequest {
+                PRBadge(pr: pr)
+            }
         }
         .padding(.vertical, 2)
         .padding(.trailing, 8)
+    }
+}
+
+/// セッション行の PR バッジ（状態アイコン + 番号 + checks）。
+struct PRBadge: View {
+    let pr: PullRequestInfo
+
+    var body: some View {
+        HStack(spacing: 2) {
+            Image(systemName: pr.state.icon)
+                .foregroundStyle(pr.state.color)
+                .font(.caption2)
+            Text("#\(pr.number)")
+                .font(.caption2.monospaced())
+                .foregroundStyle(.secondary)
+            if let glyph = pr.checks.glyph {
+                Image(systemName: glyph)
+                    .foregroundStyle(pr.checks.color)
+                    .font(.system(size: 9))
+            }
+        }
+        .help(helpText)
+    }
+
+    private var helpText: String {
+        var text = "PR #\(pr.number)（\(pr.state.label)）\(pr.title)"
+        if let issue = pr.issue { text += "\nIssue #\(issue)" }
+        return text
+    }
+}
+
+/// サイドバーのリポジトリ・グループ見出し（色ドット + 名前 + セッション数）。
+/// 右クリックで色を変更できる。
+struct RepoGroupHeader: View {
+    let name: String
+    let count: Int
+    let colorID: String?
+    var onSelectColor: (String?) -> Void
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(RepoPalette.color(for: colorID))
+                .frame(width: 8, height: 8)
+            Text(name)
+                .font(.caption)
+                .fontWeight(.semibold)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer()
+            Text("\(count)")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        }
+        .contextMenu {
+            Menu("色を変更") {
+                ForEach(RepoPalette.entries, id: \.id) { entry in
+                    Button {
+                        onSelectColor(entry.id)
+                    } label: {
+                        if entry.id == colorID {
+                            Label(entry.name, systemImage: "checkmark")
+                        } else {
+                            Text(entry.name)
+                        }
+                    }
+                }
+                Divider()
+                Button("なし") { onSelectColor(nil) }
+            }
+        }
     }
 }
 
@@ -181,6 +278,9 @@ struct SessionDetailView: View {
                 revision: tiling.revision
             )
         }
+        // 詳細（ターミナル）側に左余白を入れ、カード型サイドバーとの密着を解消する。
+        // サイドバー非表示時は隙間不要なので密着させる。
+        .padding(.leading, sidebarCollapsed ? 0 : 10)
         .ignoresSafeArea(.container, edges: .top)
         .navigationTitle(session.name)
         .onAppear { work.start(); agent.start() }
