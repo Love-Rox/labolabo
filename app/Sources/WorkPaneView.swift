@@ -257,10 +257,13 @@ struct CommitGraphGutter: View {
                 } else {
                     let xR = laneX(k + 1)
                     switch ch {
+                    // 斜めコネクタは常に「外側レーン(k+1)」の枝を表す（`\`=分岐/第2親、
+                    // `/`=合流/フォールド）。両者とも k+1 の色にして、隣接する縦線の色と
+                    // つながって見えるようにする（`/` を k 側の色にすると合流で色が食い違う）。
                     case "\\":
                         curve(context, CGPoint(x: x, y: 0), CGPoint(x: xR, y: h), color(k + 1))
                     case "/":
-                        curve(context, CGPoint(x: xR, y: 0), CGPoint(x: x, y: h), color(k))
+                        curve(context, CGPoint(x: xR, y: 0), CGPoint(x: x, y: h), color(k + 1))
                     case "|":
                         line(context, CGPoint(x: x, y: 0), CGPoint(x: x, y: h), color(k))
                     default:
