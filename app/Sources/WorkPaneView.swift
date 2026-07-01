@@ -117,19 +117,45 @@ struct CommitGraphPane: View {
     }
 
     var body: some View {
-        if model.commits.isEmpty {
-            ContentUnavailableView("コミットがありません", systemImage: "clock.arrow.circlepath")
-        } else {
-            // グラフ列とコミット情報列を分離。グラフが広い（分岐が多い）ときは
-            // グラフ列だけを横スクロールにし、情報列は常に読める位置へ残す。
-            ScrollView(.vertical) {
-                HStack(alignment: .top, spacing: 0) {
-                    graphColumn
-                    infoColumn
+        VStack(spacing: 0) {
+            // 複数リポジトリのときは対象リポジトリを選ぶ（履歴/差分の基準）。
+            if model.multiRepo {
+                repoSelector
+                Divider()
+            }
+            if model.commits.isEmpty {
+                ContentUnavailableView("コミットがありません", systemImage: "clock.arrow.circlepath")
+            } else {
+                // グラフ列とコミット情報列を分離。グラフが広い（分岐が多い）ときは
+                // グラフ列だけを横スクロールにし、情報列は常に読める位置へ残す。
+                ScrollView(.vertical) {
+                    HStack(alignment: .top, spacing: 0) {
+                        graphColumn
+                        infoColumn
+                    }
+                    .padding(.vertical, 4)
                 }
-                .padding(.vertical, 4)
             }
         }
+    }
+
+    private var repoSelector: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "shippingbox").font(.caption2).foregroundStyle(.secondary)
+            Picker("リポジトリ", selection: Binding(
+                get: { model.selectedRepoID ?? model.repos.first?.id ?? "" },
+                set: { model.selectRepo($0) }
+            )) {
+                ForEach(model.repos) { repo in
+                    Text(repo.name).tag(repo.id)
+                }
+            }
+            .labelsHidden()
+            .fixedSize()
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
     }
 
     /// グラフ（レーン）列。幅が上限を超えるときだけ横スクロールにする。
