@@ -226,6 +226,7 @@ struct SessionRow: View {
 
     var body: some View {
         HStack(spacing: 8) {
+            AgentStatusIndicator(status: session.agent?.status ?? .none)
             VStack(alignment: .leading, spacing: 1) {
                 Text(session.name).lineLimit(1).truncationMode(.middle)
                     .help(session.name)
@@ -243,6 +244,48 @@ struct SessionRow: View {
         }
         .padding(.vertical, 2)
         .padding(.trailing, 8)
+    }
+}
+
+/// セッション行のエージェント状態ドット。入力待ちはオレンジ＋パルスで目立たせる。
+struct AgentStatusIndicator: View {
+    let status: AgentStatus
+    @State private var animate = false
+
+    var body: some View {
+        ZStack {
+            if status == .waitingForInput {
+                Circle()
+                    .fill(Color.orange.opacity(0.35))
+                    .frame(width: 15, height: 15)
+                    .scaleEffect(animate ? 1.0 : 0.4)
+                    .opacity(animate ? 0 : 0.85)
+            }
+            Circle()
+                .fill(tint ?? .clear)
+                .frame(width: 7, height: 7)
+        }
+        .frame(width: 12, height: 12)
+        .help(status == .none ? "" : status.label)
+        .onAppear { restartPulse() }
+        .onChange(of: status) { _, _ in restartPulse() }
+    }
+
+    private func restartPulse() {
+        animate = false
+        guard status == .waitingForInput else { return }
+        withAnimation(.easeOut(duration: 1.0).repeatForever(autoreverses: false)) {
+            animate = true
+        }
+    }
+
+    private var tint: Color? {
+        switch status {
+        case .waitingForInput: return .orange
+        case .running, .starting: return .blue
+        case .idle: return .green
+        case .none, .ended: return nil
+        }
     }
 }
 
@@ -326,7 +369,6 @@ struct SessionDetailView: View {
 
     @State private var work: WorkPaneModel
     @State private var tiling: PaneTilingModel
-    @State private var agent: AgentSessionModel
     @State private var showSavePreset = false
     @State private var presetName = ""
     private let configSource: TerminalController.ConfigSource
@@ -354,13 +396,6 @@ struct SessionDetailView: View {
             store.savePaneLayout(sid, model.snapshot())
         }
         _tiling = State(initialValue: model)
-
-        _agent = State(initialValue: AgentSessionModel(
-            sessionID: session.id,
-            worktree: session.worktreePath,
-            resumeID: session.agentSessionID,
-            onSessionID: { id, tp in store.updateAgentSession(sid, agentSessionID: id, transcriptPath: tp) }
-        ))
         configSource = GhosttyConfig.userConfigSource()
     }
 
@@ -383,9 +418,9 @@ struct SessionDetailView: View {
         .padding(.leading, sidebarCollapsed ? 0 : 10)
         .ignoresSafeArea(.container, edges: .top)
         .navigationTitle(session.name)
-        .onAppear { work.start(); agent.start() }
+        .onAppear { work.start() }
         .onDisappear {
-            work.stop(); agent.stop()
+            work.stop()
             // ratio ドラッグは bump しないので、離脱時に最終配置を保存する。
             store.savePaneLayout(session.id, tiling.snapshot())
         }
@@ -423,18 +458,18 @@ struct SessionDetailView: View {
                 status: work.status,
                 fallbackBranch: session.branch,
                 changedCount: work.items.count,
-                agentStatus: agent.status
+                agentStatus: session.agent?.status ?? .none
             )
 
             Spacer(minLength: 12)
 
             Button {
-                tiling.launchInNewTerminal(title: "Claude", command: agent.launchCommand())
+                tiling.launchInNewTerminal(title: "Claude", command: session.agent?.launchCommand() ?? "claude")
             } label: {
                 ClaudeMark().frame(width: 15, height: 15)
             }
             .buttonStyle(CircleIconButtonStyle(tint: Color(red: 0.85, green: 0.47, blue: 0.34)))
-            .help(agent.canResume
+            .help((session.agent?.canResume ?? false)
                 ? "Claude を再開（前回のセッションを --resume）"
                 : "Claude を起動（状態検出 hooks 付き）")
 
