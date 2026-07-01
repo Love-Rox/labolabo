@@ -35,11 +35,9 @@ struct ContentView: View {
                         ForEach(store.groupedSessions) { group in
                             Section {
                                 ForEach(group.sessions) { session in
-                                    SessionRow(
-                                        session: session,
-                                        accent: RepoPalette.color(for: store.colorID(forRepo: group.key))
-                                    )
+                                    SessionRow(session: session)
                                         .tag(session.id)
+                                        .listRowBackground(rowBackground(colorID: store.colorID(forRepo: group.key)))
                                         .contextMenu {
                                             Button("セッションを閉じる", role: .destructive) {
                                                 store.close(session.id)
@@ -90,6 +88,19 @@ struct ContentView: View {
         }
     }
 
+    /// セッション行の背景（リポジトリ色の淡いタイント）。色未設定は透明。
+    @ViewBuilder
+    private func rowBackground(colorID: String?) -> some View {
+        if let colorID {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(RepoPalette.color(for: colorID).opacity(0.16))
+                .padding(.vertical, 1)
+                .padding(.horizontal, 6)
+        } else {
+            Color.clear
+        }
+    }
+
     /// サイドバー上部のヘッダー（OS タイトルバーの代わり）。信号機を避ける左インセット付き。
     private var sidebarHeader: some View {
         HStack(spacing: 6) {
@@ -134,13 +145,9 @@ struct ContentView: View {
 
 struct SessionRow: View {
     let session: RepoSession
-    var accent: Color = .secondary
 
     var body: some View {
         HStack(spacing: 8) {
-            Circle()
-                .fill(accent)
-                .frame(width: 8, height: 8)
             VStack(alignment: .leading, spacing: 1) {
                 Text(session.name).lineLimit(1).truncationMode(.middle)
                 Text(session.branch ?? "—")
