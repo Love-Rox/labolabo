@@ -146,7 +146,9 @@ struct CommitGraphPane: View {
     }
 
     private var gutterStack: some View {
-        LazyVStack(spacing: 0) {
+        // LazyVStack は横方向に利用可能幅いっぱいへ広がるため、実際のレーン幅
+        // (graphWidth) に固定して余計な余白を作らない（狭い履歴で幅を取りすぎない）。
+        LazyVStack(alignment: .leading, spacing: 0) {
             ForEach(model.commits) { row in
                 CommitGraphGutter(row: row, laneCount: laneCount)
                     .frame(height: CommitGraphGutter.rowHeight)
@@ -155,6 +157,7 @@ struct CommitGraphPane: View {
                     .onTapGesture { select(row) }
             }
         }
+        .frame(width: graphWidth, alignment: .leading)
     }
 
     private var infoColumn: some View {
