@@ -115,12 +115,10 @@ struct ContentView: View {
             if let session = store.selected {
                 SessionDetailView(
                     session: session,
+                    store: store,
                     onClose: { store.close(session.id) },
                     sidebarCollapsed: sidebarCollapsed,
-                    onExpandSidebar: { columnVisibility = .all },
-                    onAgentSession: { id, transcript in
-                        store.updateAgentSession(session.id, agentSessionID: id, transcriptPath: transcript)
-                    }
+                    onExpandSidebar: { columnVisibility = .all }
                 )
                 .id(session.id)
             } else {
@@ -321,6 +319,7 @@ struct RepoGroupHeader: View {
 
 struct SessionDetailView: View {
     let session: RepoSession
+    let store: SessionStore
     let onClose: () -> Void
     var sidebarCollapsed: Bool = false
     var onExpandSidebar: () -> Void = {}
@@ -328,26 +327,39 @@ struct SessionDetailView: View {
     @State private var work: WorkPaneModel
     @State private var tiling: PaneTilingModel
     @State private var agent: AgentSessionModel
+    @State private var showSavePreset = false
+    @State private var presetName = ""
     private let configSource: TerminalController.ConfigSource
 
     init(
         session: RepoSession,
+        store: SessionStore,
         onClose: @escaping () -> Void,
         sidebarCollapsed: Bool = false,
-        onExpandSidebar: @escaping () -> Void = {},
-        onAgentSession: @escaping (String, String?) -> Void = { _, _ in }
+        onExpandSidebar: @escaping () -> Void = {}
     ) {
         self.session = session
+        self.store = store
         self.onClose = onClose
         self.sidebarCollapsed = sidebarCollapsed
         self.onExpandSidebar = onExpandSidebar
         _work = State(initialValue: WorkPaneModel(worktree: session.worktreePath))
-        _tiling = State(initialValue: PaneTilingModel.defaultLayout())
+
+        // 保存済み配置（セッション別 → 無ければ既定プリセット）から復元。
+        let sid = session.id
+        let saved = store.paneLayout(for: sid) ?? store.defaultPaneLayout()
+        let model = saved.flatMap { PaneTilingModel.model(from: $0) } ?? PaneTilingModel.defaultLayout()
+        model.onLayoutChanged = { [weak model] in
+            guard let model else { return }
+            store.savePaneLayout(sid, model.snapshot())
+        }
+        _tiling = State(initialValue: model)
+
         _agent = State(initialValue: AgentSessionModel(
             sessionID: session.id,
             worktree: session.worktreePath,
             resumeID: session.agentSessionID,
-            onSessionID: onAgentSession
+            onSessionID: { id, tp in store.updateAgentSession(sid, agentSessionID: id, transcriptPath: tp) }
         ))
         configSource = GhosttyConfig.userConfigSource()
     }
@@ -372,7 +384,21 @@ struct SessionDetailView: View {
         .ignoresSafeArea(.container, edges: .top)
         .navigationTitle(session.name)
         .onAppear { work.start(); agent.start() }
-        .onDisappear { work.stop(); agent.stop() }
+        .onDisappear {
+            work.stop(); agent.stop()
+            // ratio ドラッグは bump しないので、離脱時に最終配置を保存する。
+            store.savePaneLayout(session.id, tiling.snapshot())
+        }
+        .alert("プリセットとして保存", isPresented: $showSavePreset) {
+            TextField("プリセット名", text: $presetName)
+            Button("保存") {
+                store.savePreset(name: presetName, layout: tiling.snapshot())
+                presetName = ""
+            }
+            Button("キャンセル", role: .cancel) { presetName = "" }
+        } message: {
+            Text("現在のペイン配置に名前を付けて保存します。以後どのセッションにも適用できます。")
+        }
     }
 
     /// 操作系を集約した自前の 1 本バー。macOS のツールバーが要素をまとめて 1 枚の
@@ -446,6 +472,40 @@ struct SessionDetailView: View {
             .buttonStyle(CircleIconButtonStyle())
             .disabled(tiling.hasPane(kind: .commits))
             .help("コミット履歴グラフを追加")
+
+            Menu {
+                if !store.presets.isEmpty {
+                    Section("プリセットを適用") {
+                        ForEach(store.presets) { preset in
+                            Button(preset.name) { tiling.apply(preset.layout) }
+                        }
+                    }
+                }
+                Section {
+                    Button("現在の配置をプリセットとして保存…", systemImage: "plus") {
+                        showSavePreset = true
+                    }
+                    Button("既定の配置に戻す", systemImage: "arrow.uturn.backward") {
+                        tiling.resetToDefault()
+                    }
+                }
+                if !store.presets.isEmpty {
+                    Menu("プリセットを削除") {
+                        ForEach(store.presets) { preset in
+                            Button(preset.name, role: .destructive) {
+                                store.deletePreset(name: preset.name)
+                            }
+                        }
+                    }
+                }
+            } label: {
+                Image(systemName: "rectangle.3.group")
+            }
+            .menuStyle(.button)
+            .buttonStyle(CircleIconButtonStyle())
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("ペイン配置プリセット（保存・適用）")
 
             IDEOpenMenu(worktree: session.worktreePath)
             SessionClock()
