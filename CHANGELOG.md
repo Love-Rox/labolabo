@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.3.0](https://github.com/Love-Rox/labolabo/compare/v0.2.0...v0.3.0) (2026-07-02)
+
+
+### 新機能
+
+* PR 作成フロー（push→gh pr create）とツール診断 doctor ([#33](https://github.com/Love-Rox/labolabo/issues/33)) ([0b8b22d](https://github.com/Love-Rox/labolabo/commit/0b8b22d752242a0dcb37a3c0c0527119ae3cab82)), closes [#14](https://github.com/Love-Rox/labolabo/issues/14) [#15](https://github.com/Love-Rox/labolabo/issues/15)
+* エージェントアダプタ抽象（Claude/Codex/Gemini）と能力ベースの UI 出し分け ([#36](https://github.com/Love-Rox/labolabo/issues/36)) ([5a36ef0](https://github.com/Love-Rox/labolabo/commit/5a36ef03343c105127049f30615a7e4fa7f4850c)), closes [#17](https://github.com/Love-Rox/labolabo/issues/17)
+* セッション間の変更ファイル逆引きとコンフリクト警告 ([#37](https://github.com/Love-Rox/labolabo/issues/37)) ([0022454](https://github.com/Love-Rox/labolabo/commit/0022454a9372715c5f7a5da86dac0e7af95b42ca)), closes [#18](https://github.com/Love-Rox/labolabo/issues/18)
+* 使用量/コストの推定表示（transcript から集計） ([#38](https://github.com/Love-Rox/labolabo/issues/38)) ([2ccec0a](https://github.com/Love-Rox/labolabo/commit/2ccec0af82080760a7331873203304103d55483e)), closes [#19](https://github.com/Love-Rox/labolabo/issues/19)
+
+
+### バグ修正
+
+* ツール解決を ToolLocator に一元化し doctor 判定と実行を一致させる ([#34](https://github.com/Love-Rox/labolabo/issues/34)) ([dba0351](https://github.com/Love-Rox/labolabo/commit/dba035105ae16ebbbd4a599ae5592b4ed7413032))
+
+
+### リファクタリング
+
+* Swift 6 言語モードへ移行（エンジン/ストア/アプリ） ([#35](https://github.com/Love-Rox/labolabo/issues/35)) ([8c541e1](https://github.com/Love-Rox/labolabo/commit/8c541e1b44ce7e87363c7d804b5c2c6bf12fd1e8))
+
 ## [0.2.0](https://github.com/Love-Rox/labolabo/compare/v0.1.0...v0.2.0) (2026-07-01)
 
 
