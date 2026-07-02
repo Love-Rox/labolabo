@@ -522,11 +522,13 @@ final class RatioSplitView: NSSplitView, NSSplitViewDelegate {
         isApplyingRatio = false
     }
 
-    func splitView(_ splitView: NSSplitView, constrainMinCoordinate proposedMin: CGFloat, ofDividerAt _: Int) -> CGFloat {
+    // NSSplitViewDelegate の min/max 制約は `ofSubviewAt`（`ofDividerAt` ではない）。
+    // 誤ったラベルだとメソッドが呼ばれず、ペインを 90pt 未満に潰せてしまう。
+    func splitView(_ splitView: NSSplitView, constrainMinCoordinate proposedMin: CGFloat, ofSubviewAt _: Int) -> CGFloat {
         proposedMin + 90
     }
 
-    func splitView(_ splitView: NSSplitView, constrainMaxCoordinate proposedMax: CGFloat, ofDividerAt _: Int) -> CGFloat {
+    func splitView(_ splitView: NSSplitView, constrainMaxCoordinate proposedMax: CGFloat, ofSubviewAt _: Int) -> CGFloat {
         proposedMax - 90
     }
 
@@ -536,7 +538,7 @@ final class RatioSplitView: NSSplitView, NSSplitViewDelegate {
     /// `splitViewDidResizeSubviews`, because that fires for every transient layout
     /// pass during a rebuild and would clobber the stored ratio with a momentary
     /// equal-split value — the cause of panes resizing oddly after swap/move.
-    func splitView(_ splitView: NSSplitView, constrainSplitPosition proposedPosition: CGFloat, ofDividerAt _: Int) -> CGFloat {
+    func splitView(_ splitView: NSSplitView, constrainSplitPosition proposedPosition: CGFloat, ofSubviewAt _: Int) -> CGFloat {
         if !isApplyingRatio {
             let dim = isVertical ? bounds.width : bounds.height
             if dim > 0 {
