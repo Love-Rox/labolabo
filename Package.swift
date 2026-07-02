@@ -17,9 +17,9 @@ let package = Package(
         .target(
             name: "LaboLaboEngine",
             swiftSettings: [
-                // Spike-phase: keep Swift 5 language mode to avoid being blocked by
-                // strict-concurrency churn. Tighten to .v6 once the engine settles.
-                .swiftLanguageMode(.v5)
+                // Swift 6 language mode (strict concurrency). エンジン層は actor /
+                // Sendable で組んであり、プロセス実行の drain は DataBox 経由で安全化済み。
+                .swiftLanguageMode(.v6)
             ]
         ),
         .target(
@@ -28,21 +28,21 @@ let package = Package(
                 .product(name: "GRDB", package: "GRDB.swift")
             ],
             swiftSettings: [
-                .swiftLanguageMode(.v5)
+                .swiftLanguageMode(.v6)
             ]
         ),
         .testTarget(
             name: "LaboLaboEngineTests",
             dependencies: ["LaboLaboEngine"],
             swiftSettings: [
-                .swiftLanguageMode(.v5)
+                .swiftLanguageMode(.v6)
             ]
         ),
         .testTarget(
             name: "LaboLaboStoreTests",
             dependencies: ["LaboLaboStore"],
             swiftSettings: [
-                .swiftLanguageMode(.v5)
+                .swiftLanguageMode(.v6)
             ]
         ),
     ]
