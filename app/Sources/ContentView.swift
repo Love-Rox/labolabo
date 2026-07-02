@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import UniformTypeIdentifiers
 import LaboLaboEngine
 import GhosttyTerminal
@@ -427,7 +428,10 @@ struct SessionDetailView: View {
     @State private var tiling: PaneTilingModel
     @State private var showSavePreset = false
     @State private var presetName = ""
+    @State private var showCreatePR = false
     private let configSource: TerminalController.ConfigSource
+    /// 外部ツールの検査結果（不在の機能はボタンを無効化して理由を出す）。
+    private var doctor: ToolDoctor { .shared }
 
     init(
         session: RepoSession,
@@ -488,6 +492,9 @@ struct SessionDetailView: View {
         } message: {
             Text("現在のペイン配置に名前を付けて保存します。以後どのセッションにも適用できます。")
         }
+        .sheet(isPresented: $showCreatePR) {
+            PRCreateSheet(store: store, session: session)
+        }
     }
 
     /// 操作系を集約した自前の 1 本バー。macOS のツールバーが要素をまとめて 1 枚の
@@ -523,9 +530,12 @@ struct SessionDetailView: View {
                 ClaudeMark().frame(width: 15, height: 15)
             }
             .buttonStyle(CircleIconButtonStyle(tint: Color(red: 0.85, green: 0.47, blue: 0.34)))
-            .help((session.agent?.canResume ?? false)
-                ? "Claude を再開（前回のセッションを --resume）"
-                : "Claude を起動（状態検出 hooks 付き）")
+            .disabled(!doctor.claude.found)
+            .help(!doctor.claude.found
+                ? "claude CLI が見つかりません（設定 > 一般 > ツール診断を参照）"
+                : (session.agent?.canResume ?? false)
+                    ? "Claude を再開（前回のセッションを --resume）"
+                    : "Claude を起動（状態検出 hooks 付き）")
 
             Button {
                 tiling.addPane(PaneItem(kind: .terminal, title: "端末"))
@@ -595,6 +605,22 @@ struct SessionDetailView: View {
             .menuIndicator(.hidden)
             .fixedSize()
             .help("ペイン配置プリセット（保存・適用）")
+
+            Button {
+                if let pr = session.pullRequest, let url = URL(string: pr.url) {
+                    NSWorkspace.shared.open(url)
+                } else {
+                    showCreatePR = true
+                }
+            } label: {
+                Image(systemName: "arrow.triangle.pull")
+            }
+            .buttonStyle(CircleIconButtonStyle())
+            .disabled(session.branch == nil || !doctor.gh.found)
+            .help(!doctor.gh.found
+                ? "gh CLI が見つかりません（設定 > 一般 > ツール診断を参照）"
+                : session.pullRequest.map { "PR #\($0.number) をブラウザで開く" }
+                    ?? "このブランチから PR を作成…")
 
             IDEOpenMenu(worktree: session.worktreePath)
             SessionClock()

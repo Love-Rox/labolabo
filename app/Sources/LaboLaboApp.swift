@@ -21,6 +21,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppIconController.shared.start()
         AgentNotifier.configure(delegate: self)
+        ToolDoctor.shared.check() // git/gh/claude の存在検査（依存機能のゲートに使う）
     }
 
     /// アプリ前面時も通知を表示する（別セッションで作業中に入力待ちを知らせるため）。
