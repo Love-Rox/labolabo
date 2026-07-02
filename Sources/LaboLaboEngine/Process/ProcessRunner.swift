@@ -1,5 +1,29 @@
 import Foundation
 
+/// 並行 drain の結果をロック越しに受け渡す箱。
+///
+/// `DispatchQueue.global().async` の中でパイプを EOF まで読み、その `Data` を
+/// 呼び出し側へ返すための Sendable な入れ物。ロックで happens-before を保証するので、
+/// Swift 6 の「並行実行クロージャでの captured var 変異」警告を安全に回避できる。
+final class DataBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage = Data()
+
+    /// ハンドルを EOF まで読み、結果を格納する（バックグラウンドで 1 回だけ呼ぶ）。
+    func fill(from handle: FileHandle) {
+        let data = handle.readDataToEndOfFile()
+        lock.lock()
+        storage = data
+        lock.unlock()
+    }
+
+    var value: Data {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
+}
+
 /// コマンドを同期実行し `(status, stdout, stderr)` を返す小さなヘルパ。
 ///
 /// stdout / stderr を**並行して drain** するのでパイプバッファ（~64KB）が満杯でも
@@ -35,17 +59,17 @@ public enum ProcessRunner {
         do { try process.run() } catch { return nil }
 
         // 両パイプを並行 drain（片方だけ読むとバッファ満杯で相手が block しデッドロック）。
-        var outData = Data()
-        var errData = Data()
+        let outBox = DataBox()
+        let errBox = DataBox()
         let drain = DispatchGroup()
         drain.enter()
         DispatchQueue.global().async {
-            outData = outPipe.fileHandleForReading.readDataToEndOfFile()
+            outBox.fill(from: outPipe.fileHandleForReading)
             drain.leave()
         }
         drain.enter()
         DispatchQueue.global().async {
-            errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+            errBox.fill(from: errPipe.fileHandleForReading)
             drain.leave()
         }
 
@@ -68,8 +92,8 @@ public enum ProcessRunner {
         drain.wait()
         return Output(
             status: process.terminationStatus,
-            stdout: String(decoding: outData, as: UTF8.self),
-            stderr: String(decoding: errData, as: UTF8.self)
+            stdout: String(decoding: outBox.value, as: UTF8.self),
+            stderr: String(decoding: errBox.value, as: UTF8.self)
         )
     }
 }
