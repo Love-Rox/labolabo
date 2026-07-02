@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import LaboLaboEngine
 
 /// 外部ツール（git / gh / claude）の存在とバージョンを起動時に検査する。
 /// 見つからないツールに依存する機能は UI 側で無効化し、理由を明示する（doctor）。
@@ -45,46 +46,17 @@ final class ToolDoctor {
     // MARK: - probe（nonisolated: バックグラウンドで実行）
 
     private nonisolated static func probe(name: String) -> Tool {
-        guard let path = locate(name: name) else { return Tool() }
-        return Tool(found: true, version: runVersion(path: path), path: path)
-    }
-
-    private nonisolated static func locate(name: String) -> String? {
-        let fm = FileManager.default
-        let home = NSHomeDirectory()
-        let candidates = [
-            "/opt/homebrew/bin/\(name)",
-            "/usr/local/bin/\(name)",
-            "/usr/bin/\(name)",
-            "\(home)/.local/bin/\(name)",
-            "\(home)/.claude/local/\(name)",
-            "\(home)/.local/share/mise/shims/\(name)",
-        ]
-        for candidate in candidates where fm.isExecutableFile(atPath: candidate) {
-            return candidate
-        }
-        if let pathEnv = ProcessInfo.processInfo.environment["PATH"] {
-            for dir in pathEnv.split(separator: ":") {
-                let path = "\(dir)/\(name)"
-                if fm.isExecutableFile(atPath: path) { return path }
-            }
-        }
-        return nil
+        guard let url = ToolLocator.locate(name) else { return Tool() }
+        return Tool(found: true, version: runVersion(url: url), path: url.path)
     }
 
     /// `<tool> --version` の 1 行目（失敗時 nil。存在はしているので found は維持）。
-    private nonisolated static func runVersion(path: String) -> String? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: path)
-        process.arguments = ["--version"]
-        let out = Pipe()
-        process.standardOutput = out
-        process.standardError = Pipe()
-        do { try process.run() } catch { return nil }
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else { return nil }
-        return String(decoding: data, as: UTF8.self)
+    /// 両パイプ drain＋timeout の `ProcessRunner` を使い、ハングで `checking` が
+    /// 固まらないようにする。
+    private nonisolated static func runVersion(url: URL) -> String? {
+        guard let out = ProcessRunner.runSync(executable: url, arguments: ["--version"], timeout: 5),
+              out.status == 0 else { return nil }
+        return out.stdout
             .split(separator: "\n").first
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
     }
