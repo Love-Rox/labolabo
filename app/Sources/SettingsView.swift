@@ -15,6 +15,8 @@ struct SettingsView: View {
 struct GeneralSettingsView: View {
     @AppStorage(AppIconController.defaultsKey) private var iconModeRaw = AppIconMode.auto.rawValue
     @AppStorage(AgentNotifier.enabledKey) private var notifyWaiting = true
+    /// ツール診断（@Observable シングルトン。body でのアクセスが追跡される）。
+    private var doctor: ToolDoctor { .shared }
 
     private var iconMode: AppIconMode { AppIconMode(rawValue: iconModeRaw) ?? .auto }
 
@@ -52,8 +54,45 @@ struct GeneralSettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+
+            Section {
+                toolRow("git", doctor.git, note: "差分・worktree 操作に必須")
+                toolRow("gh", doctor.gh, note: "PR の表示・作成に必要")
+                toolRow("claude", doctor.claude, note: "エージェント起動に必要")
+                HStack {
+                    Button("再検査") { ToolDoctor.shared.check() }
+                        .disabled(doctor.checking)
+                    if doctor.checking { ProgressView().controlSize(.small) }
+                }
+            } header: {
+                Text("ツール診断")
+            } footer: {
+                Text("見つからないツールに依存する機能（PR 作成・Claude 起動など）は無効になります。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
         .formStyle(.grouped)
+    }
+
+    @ViewBuilder
+    private func toolRow(_ name: String, _ tool: ToolDoctor.Tool, note: String) -> some View {
+        LabeledContent {
+            HStack(spacing: 6) {
+                Image(systemName: tool.found ? "checkmark.circle.fill" : "xmark.circle.fill")
+                    .foregroundStyle(tool.found ? .green : .red)
+                Text(tool.found ? (tool.version ?? "検出済み") : "見つかりません")
+                    .foregroundStyle(tool.found ? .primary : .secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            .help(tool.path ?? "")
+        } label: {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(name).font(.body.monospaced())
+                Text(note).font(.caption2).foregroundStyle(.secondary)
+            }
+        }
     }
 
     @ViewBuilder
