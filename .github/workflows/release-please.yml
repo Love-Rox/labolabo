@@ -14,5 +14,19 @@ jobs:
     steps:
       - uses: googleapis/release-please-action@v4
         with:
+          # 既定の GITHUB_TOKEN で push/PR すると、GitHub Actions の再帰防止で
+          # release-please の PR に対して required checks（swift test / enforce-dev-only）が
+          # 発火せず mergeStateStatus=BLOCKED になる（毎回 close→reopen の手作業が必要）。
+          # RELEASE_PLEASE_TOKEN（下記 repo secret）を設定すると、ユーザー由来の push として
+          # 扱われ CI が自動発火する。未設定なら従来どおり GITHUB_TOKEN にフォールバック。
+          #
+          # secret の作り方（fine-grained PAT を推奨）:
+          #   1. GitHub > Settings > Developer settings > Fine-grained tokens で発行
+          #      - Resource owner: Love-Rox、Repository: Love-Rox/labolabo のみ
+          #      - Permissions: Contents=Read and write, Pull requests=Read and write
+          #      - Expiration は運用に合わせて（切れたらフォールバックで動作継続・BLOCKED に戻るだけ）
+          #   2. リポジトリ Settings > Secrets and variables > Actions に
+          #      RELEASE_PLEASE_TOKEN として登録
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
