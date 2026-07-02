@@ -14,6 +14,10 @@ packages:
   LibghosttySPM:
     url: https://github.com/Lakr233/libghostty-spm.git
     from: "1.2.8"
+  # The Composable Architecture（UI 層を段階的に TCA 化するための PoC 依存）。
+  ComposableArchitecture:
+    url: https://github.com/pointfreeco/swift-composable-architecture.git
+    from: "1.15.0"
 
 targets:
   LaboLabo:
@@ -30,6 +34,8 @@ targets:
         product: LaboLaboStore
       - package: LibghosttySPM
         product: GhosttyTerminal
+      - package: ComposableArchitecture
+        product: ComposableArchitecture
     configFiles:
       Debug: ../Config/Version.xcconfig
       Release: ../Config/Version.xcconfig

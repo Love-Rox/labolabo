@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import ComposableArchitecture
 import UniformTypeIdentifiers
 import LaboLaboEngine
 import GhosttyTerminal
@@ -540,7 +541,27 @@ struct SessionDetailView: View {
             Text("現在のペイン配置に名前を付けて保存します。以後どのセッションにも適用できます。")
         }
         .sheet(isPresented: $showCreatePR) {
-            PRCreateSheet(store: store, session: session)
+            PRCreateSheet(
+                store: Store(
+                    initialState: PRCreateFeature.State(
+                        worktree: session.worktreePath, branch: session.branch
+                    )
+                ) {
+                    PRCreateFeature()
+                } withDependencies: {
+                    $0.prCreateClient = PRCreateClient(
+                        inspect: { await store.inspectRepo(at: $0) },
+                        create: { base, title, prBody, draft in
+                            try await store.createPullRequest(
+                                session.id, base: base, title: title, body: prBody, draft: draft
+                            )
+                        },
+                        open: { urlString in
+                            if let url = URL(string: urlString) { NSWorkspace.shared.open(url) }
+                        }
+                    )
+                }
+            )
         }
     }
 

@@ -1,26 +1,12 @@
 import SwiftUI
-import AppKit
+import ComposableArchitecture
 import LaboLaboEngine
 
-/// 現在ブランチから Pull Request を作成するシート。
-/// push（`git push -u origin HEAD`）→ `gh pr create` の順で実行する。
+/// 現在ブランチから Pull Request を作成するシート（TCA 版）。
+/// 状態・副作用は `PRCreateFeature` に集約し、View は Store の描画に徹する。
 struct PRCreateSheet: View {
-    let store: SessionStore
-    let session: RepoSession
+    @Bindable var store: StoreOf<PRCreateFeature>
     @Environment(\.dismiss) private var dismiss
-
-    @State private var loading = true
-    @State private var branches: [String] = []
-    @State private var base = ""
-    @State private var title = ""
-    @State private var body_ = ""
-    @State private var draft = true
-    @State private var creating = false
-    @State private var errorText: String?
-
-    private var canCreate: Bool {
-        !creating && !base.isEmpty && !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -28,7 +14,7 @@ struct PRCreateSheet: View {
                 .font(.headline)
             HStack(spacing: 4) {
                 Image(systemName: "arrow.triangle.branch").font(.caption2)
-                Text(session.branch ?? "—")
+                Text(store.branch ?? "—")
                     .font(.caption.monospaced())
                 Text("→ push してから PR を作成します")
                     .font(.caption)
@@ -37,19 +23,18 @@ struct PRCreateSheet: View {
             .padding(.bottom, 10)
 
             Form {
-                if loading {
+                if store.loading {
                     HStack { ProgressView().controlSize(.small); Text("リポジトリ情報を取得中…").foregroundStyle(.secondary) }
                 } else {
-                    Picker("ベースブランチ", selection: $base) {
-                        ForEach(branches, id: \.self) { Text($0).tag($0) }
+                    Picker("ベースブランチ", selection: $store.base) {
+                        ForEach(store.branches, id: \.self) { Text($0).tag($0) }
                     }
-                    TextField("タイトル", text: $title)
-                    // 本文は任意（Closes #N を書けば Issue と紐づく）。
+                    TextField("タイトル", text: $store.title)
                     VStack(alignment: .leading, spacing: 4) {
                         Text("本文（任意・Closes #N で Issue に紐づけ）")
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                        TextEditor(text: $body_)
+                        TextEditor(text: $store.prBody)
                             .font(.body)
                             .frame(height: 110)
                             .overlay(
@@ -57,10 +42,10 @@ struct PRCreateSheet: View {
                                     .strokeBorder(.quaternary, lineWidth: 1)
                             )
                     }
-                    Toggle("Draft として作成", isOn: $draft)
+                    Toggle("Draft として作成", isOn: $store.draft)
                 }
 
-                if let errorText {
+                if let errorText = store.errorText {
                     Label(errorText, systemImage: "exclamationmark.triangle")
                         .foregroundStyle(.red)
                         .font(.caption)
@@ -71,54 +56,19 @@ struct PRCreateSheet: View {
 
             HStack {
                 Spacer()
-                Button("キャンセル", role: .cancel) { dismiss() }
+                Button("キャンセル", role: .cancel) { store.send(.cancelTapped) }
                     .keyboardShortcut(.cancelAction)
-                Button(creating ? "作成中…" : "push して作成") { create() }
+                Button(store.creating ? "作成中…" : "push して作成") { store.send(.createTapped) }
                     .keyboardShortcut(.defaultAction)
-                    .disabled(!canCreate)
+                    .disabled(!store.canCreate)
             }
             .padding(.top, 12)
         }
         .padding(20)
         .frame(width: 560)
-        .task { await load() }
-    }
-
-    private func load() async {
-        let inspect = await store.inspectRepo(at: session.worktreePath)
-        let current = inspect?.current ?? session.branch
-        branches = (inspect?.branches ?? []).filter { $0 != current }
-        // 運用に合わせて dev を優先、無ければ main、どちらも無ければ先頭。
-        base = ["dev", "main"].first(where: { branches.contains($0) }) ?? branches.first ?? ""
-        if title.isEmpty { title = inspect?.lastSubject ?? current ?? "" }
-        loading = false
-    }
-
-    private func create() {
-        creating = true
-        errorText = nil
-        Task {
-            do {
-                let url = try await store.createPullRequest(
-                    session.id, base: base, title: title, body: body_, draft: draft
-                )
-                if let link = URL(string: url) { NSWorkspace.shared.open(link) }
-                dismiss()
-            } catch {
-                creating = false
-                errorText = Self.message(for: error)
-            }
+        .task { store.send(.task) }
+        .onChange(of: store.finished) { _, finished in
+            if finished { dismiss() }
         }
-    }
-
-    /// エラーを UI 用の文言に変換する。`GitCommandError` の stderr が空なら
-    /// `localizedDescription` に落とす（空 stderr で空ラベルにならないように）。
-    private static func message(for error: Error) -> String {
-        if let git = error as? GitCommandError {
-            let stderr = git.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !stderr.isEmpty { return stderr }
-        }
-        let description = error.localizedDescription
-        return description.isEmpty ? "不明なエラーが発生しました。" : description
     }
 }

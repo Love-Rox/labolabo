@@ -22,11 +22,14 @@ swift test
 brew install xcodegen
 xcodegen generate --spec app/project.yml      # ★ ファイルを追加/削除したら必ず再生成
 xcodebuild -project app/LaboLabo.xcodeproj -scheme LaboLabo \
-  -destination 'platform=macOS,arch=arm64' \
+  -destination 'platform=macOS,arch=arm64' -skipMacroValidation \
   CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build
 open ~/Library/Developer/Xcode/DerivedData/LaboLabo-*/Build/Products/Debug/LaboLabo.app
 # 開発時は: open app/LaboLabo.xcodeproj → ⌘R
 ```
+
+> **`-skipMacroValidation` が必須**: TCA（The Composable Architecture）等の Swift マクロを
+> 使うため。CLI ビルドではこのフラグ、Xcode GUI では初回に「Trust & Enable」を求められる。
 
 ## ブランチ / PR 運用
 
