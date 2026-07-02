@@ -41,7 +41,7 @@ targets:
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.developer-tools
         INFOPLIST_KEY_NSHumanReadableCopyright: ""
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        SWIFT_VERSION: "5.0"
+        SWIFT_VERSION: "6.0"
         ENABLE_HARDENED_RUNTIME: YES
         COMBINE_HIDPI_IMAGES: YES
     scheme:

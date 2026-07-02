@@ -46,7 +46,7 @@ open ~/Library/Developer/Xcode/DerivedData/LaboLabo-*/Build/Products/Debug/LaboL
 
 - **macOS 専用**。任意 CLI 起動・任意リポジトリアクセスのため **App Sandbox は無効**（Developer ID 署名 + notarization で MAS 外配布の想定）。
 - 端末は **本物の libghostty**（プレビルト `libghostty-spm`。将来 source ビルド=ghostty v1.3.1/Zig 0.15.2 に移行予定）。
-- 現状は spike として **Swift 5 言語モード**（strict-concurrency churn 回避）。落ち着いたら `.v6` へ。
+- **Swift 6 言語モード**（strict concurrency）。エンジン/ストア（Package）とアプリ（`SWIFT_VERSION: 6.0`）ともに移行済み。UI 層の TCA 化は継続課題（#16）。
 - エンジン層は UI フレームワーク非依存の `actor`/プレーン型に保ち、UI（SwiftUI/将来 TCA）から切り離す。
 
 ## 設計の背景
