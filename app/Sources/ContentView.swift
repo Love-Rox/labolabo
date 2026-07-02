@@ -449,6 +449,35 @@ struct SessionDetailView: View {
             : "\(name) を起動（状態検出なし・起動/終了のみ）"
     }
 
+    /// 同一リポジトリの別セッションと同じファイルを編集中のとき警告する帯。
+    @ViewBuilder
+    private var conflictBanner: some View {
+        let conflicts = store.conflicts(for: session.id)
+        if !conflicts.isEmpty {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("\(conflicts.count) 個のファイルを同じリポジトリの別セッションも編集中です")
+                        .font(.caption.weight(.medium))
+                    Text(conflicts.map(\.path).joined(separator: ", "))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .truncationMode(.middle)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.orange.opacity(0.12))
+            .help(conflicts.map { "\($0.path) — 他: \($0.others.joined(separator: ", "))" }
+                .joined(separator: "\n"))
+            Divider()
+        }
+    }
+
     init(
         session: RepoSession,
         store: SessionStore,
@@ -477,6 +506,7 @@ struct SessionDetailView: View {
         VStack(spacing: 0) {
             sessionBar
             Divider()
+            conflictBanner
             PaneTilingView(
                 model: tiling,
                 context: PaneContext(
