@@ -65,6 +65,9 @@ final class SessionStore {
     var selection: RepoSession.ID?
     /// リポジトリキー → 色 id。
     private(set) var repoColors: [String: String] = [:]
+    /// セッション毎の「変更中ファイル」（worktree ルート相対パス）の逆引き。
+    /// 同一 repo に複数セッションがあり同じパスを触っていればコンフリクト警告に使う。
+    private(set) var changedFiles: [RepoSession.ID: Set<String>] = [:]
 
     private let git = GitEngine()
     private let github = GitHubEngine()
@@ -75,6 +78,7 @@ final class SessionStore {
         loadRepoColors()
         loadPresets()
         restore()
+        startConflictWatch()
     }
 
     /// このブランチに対応する PR を gh から取得（失敗/未検出なら nil）。
@@ -135,6 +139,72 @@ final class SessionStore {
         }
     }
 
+    // MARK: - セッション間の変更ファイル逆引き＋コンフリクト警告
+
+    /// 1 つのファイルについて、他セッションでも編集中であることを表す。
+    struct FileConflict: Identifiable, Equatable {
+        /// worktree ルート相対パス。
+        let path: String
+        /// 同じパスを触っている他セッションの表示名（ブランチ優先）。
+        let others: [String]
+        var id: String { path }
+    }
+
+    /// 変更ファイルの逆引きを更新する。コンフリクトは同一 repo に複数セッションが
+    /// あるときだけ起きるので、その対象セッションについてのみ `git status` を回す。
+    func refreshChangedFiles() {
+        let byRepo = Dictionary(grouping: sessions.filter { $0.repoKey != nil }) { $0.repoKey! }
+        let targetIDs = Set(byRepo.filter { $0.value.count >= 2 }.flatMap { $0.value.map(\.id) })
+
+        // 対象から外れたセッションの記録は消す（1 つに戻れば警告も消える）。
+        for id in Array(changedFiles.keys) where !targetIDs.contains(id) {
+            changedFiles.removeValue(forKey: id)
+        }
+
+        for session in sessions where targetIDs.contains(session.id) {
+            let sid = session.id
+            let worktree = session.worktreePath
+            Task { [weak self] in
+                guard let self else { return }
+                let status = try? await self.git.status(worktree: worktree)
+                let paths = Set((status?.entries ?? [])
+                    .filter { $0.kind != .ignored }
+                    .flatMap { entry in [entry.path, entry.originalPath].compactMap { $0 } })
+                self.changedFiles[sid] = paths
+            }
+        }
+    }
+
+    /// このセッションが変更中で、かつ同一 repo の別セッションも変更中のファイル一覧。
+    /// 検出ロジックはエンジンの純粋関数に委譲し、他セッション id を表示名へ変換する。
+    func conflicts(for id: RepoSession.ID) -> [FileConflict] {
+        let inputs = sessions.map {
+            CrossSessionConflicts.Session(
+                id: $0.id.uuidString, repoKey: $0.repoKey, changed: changedFiles[$0.id] ?? []
+            )
+        }
+        let raw = CrossSessionConflicts.conflicts(for: id.uuidString, among: inputs)
+        guard !raw.isEmpty else { return [] }
+        return raw.map { conflict in
+            let labels = conflict.others.compactMap { oid in
+                sessions.first { $0.id.uuidString == oid }.map { $0.branch ?? $0.name }
+            }
+            return FileConflict(path: conflict.path, others: labels)
+        }
+    }
+
+    /// 背景セッション（エージェントが編集中など）でも検知できるよう、変更ファイルの
+    /// 逆引きを定期リフレッシュする。多重 repo が無ければ処理はほぼ空で軽い。
+    private func startConflictWatch() {
+        Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 5_000_000_000) // 5s
+                guard let self else { return }
+                self.refreshChangedFiles()
+            }
+        }
+    }
+
     // MARK: - リポジトリの色
 
     func colorID(forRepo repoKey: String) -> String? { repoColors[repoKey] }
@@ -177,10 +247,12 @@ final class SessionStore {
     }
 
     private func resolveRepo(_ session: RepoSession) {
-        Task { [git] in
+        Task { [weak self, git] in
             if let info = try? await git.repoInfo(worktree: session.worktreePath) {
                 session.repoKey = info.key
                 session.repoName = info.name
+                // repo が判明したら逆引きを更新（同一 repo の同居が分かる）。
+                self?.refreshChangedFiles()
             }
         }
     }
@@ -287,8 +359,10 @@ final class SessionStore {
             session.agent?.stop()  // hooks 撤去 + ソケット停止
         }
         sessions.removeAll { $0.id == id }
+        changedFiles.removeValue(forKey: id)
         try? db?.deleteSession(id: id.uuidString)
         if selection == id { select(sessions.first?.id) }
+        refreshChangedFiles() // 同居セッションが 1 つに戻れば警告が消える
     }
 
     // MARK: - worktree の撤去（破壊的・確認付き）
