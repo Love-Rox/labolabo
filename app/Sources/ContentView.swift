@@ -429,6 +429,7 @@ struct SessionDetailView: View {
     @State private var showSavePreset = false
     @State private var presetName = ""
     @State private var showCreatePR = false
+    @State private var showUsage = false
     private let configSource: TerminalController.ConfigSource
     /// 外部ツールの検査結果（不在の機能はボタンを無効化して理由を出す）。
     private var doctor: ToolDoctor { .shared }
@@ -671,6 +672,19 @@ struct SessionDetailView: View {
                 ? "gh CLI が見つかりません（設定 > 一般 > ツール診断を参照）"
                 : session.pullRequest.map { "PR #\($0.number) をブラウザで開く" }
                     ?? "このブランチから PR を作成…")
+
+            if let usage = session.agent?.usage, !usage.isEmpty {
+                Button {
+                    showUsage.toggle()
+                } label: {
+                    Image(systemName: "chart.bar")
+                }
+                .buttonStyle(CircleIconButtonStyle())
+                .help("使用量（推定）を表示")
+                .popover(isPresented: $showUsage, arrowEdge: .bottom) {
+                    UsagePopover(usage: usage)
+                }
+            }
 
             IDEOpenMenu(worktree: session.worktreePath)
             SessionClock()
