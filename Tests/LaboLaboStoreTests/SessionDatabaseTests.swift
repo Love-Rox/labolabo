@@ -62,6 +62,19 @@ final class SessionDatabaseTests: XCTestCase {
         XCTAssertNil(plain.transcriptPath)
     }
 
+    func testAdapterIdRoundTrip() throws {
+        let db = try SessionDatabase(url: dbURL)
+        var rec = record("repo-1", order: 0, branch: "main")
+        rec.adapterId = "codex"
+        try db.upsert(rec)
+        XCTAssertEqual(try XCTUnwrap(try db.allSessions().first).adapterId, "codex")
+
+        // 既定は nil（v2 以前のレコードは移行後 nil＝アプリ側で claude 扱い）。
+        try db.upsert(record("repo-2", order: 1))
+        let plain = try XCTUnwrap(try db.allSessions().first { $0.id == "repo-2" })
+        XCTAssertNil(plain.adapterId)
+    }
+
     func testOrdering() throws {
         let db = try SessionDatabase(url: dbURL)
         try db.upsert(record("b", order: 1))

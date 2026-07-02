@@ -23,6 +23,8 @@ final class RepoSession: Identifiable {
     var agentSessionID: String?
     /// 直近の transcript(JSONL) パス。
     var transcriptPath: String?
+    /// このセッションのエージェント種別（"claude" / "codex" / "gemini"）。
+    var adapterID: String
     /// このセッションのエージェント状態モデル（開いている間 store が保持・監視）。
     /// 背景セッションでも hooks を受信するため、選択の有無に関係なく生かす。
     var agent: AgentSessionModel?
@@ -33,7 +35,8 @@ final class RepoSession: Identifiable {
         name: String? = nil,
         branch: String? = nil,
         agentSessionID: String? = nil,
-        transcriptPath: String? = nil
+        transcriptPath: String? = nil,
+        adapterID: String = AgentAdapters.default.id
     ) {
         self.id = id
         self.worktreePath = worktreePath
@@ -41,6 +44,7 @@ final class RepoSession: Identifiable {
         self.branch = branch
         self.agentSessionID = agentSessionID
         self.transcriptPath = transcriptPath
+        self.adapterID = adapterID
     }
 }
 
@@ -108,6 +112,7 @@ final class SessionStore {
         let agent = AgentSessionModel(
             sessionID: sid,
             worktree: session.worktreePath,
+            adapter: AgentAdapters.find(id: session.adapterID),
             resumeID: session.agentSessionID,
             onSessionID: { [weak self] id, tp in
                 self?.updateAgentSession(sid, agentSessionID: id, transcriptPath: tp)
@@ -238,10 +243,11 @@ final class SessionStore {
 
     /// 新規ブランチ＋worktree を作成してセッション化する。失敗時は throw（呼び出し側で表示）。
     func createWorktreeSession(
-        repoRoot: URL, baseRef: String, newBranch: String, name: String, worktreePath: URL
+        repoRoot: URL, baseRef: String, newBranch: String, name: String, worktreePath: URL,
+        adapterID: String = AgentAdapters.default.id
     ) async throws {
         try await git.addWorktree(repo: repoRoot, path: worktreePath, branch: newBranch, baseRef: baseRef)
-        let session = RepoSession(worktreePath: worktreePath, name: name, branch: newBranch)
+        let session = RepoSession(worktreePath: worktreePath, name: name, branch: newBranch, adapterID: adapterID)
         sessions.append(session)
         persist(session)
         select(session.id)
@@ -327,7 +333,8 @@ final class SessionStore {
                 name: record.name,
                 branch: record.branch,
                 agentSessionID: record.agentSessionId,
-                transcriptPath: record.transcriptPath
+                transcriptPath: record.transcriptPath,
+                adapterID: record.adapterId ?? AgentAdapters.default.id
             )
             sessions.append(session)
             refreshBranch(session)
@@ -368,7 +375,8 @@ final class SessionStore {
             addedAt: Date(),
             sortOrder: order,
             agentSessionId: session.agentSessionID,
-            transcriptPath: session.transcriptPath
+            transcriptPath: session.transcriptPath,
+            adapterId: session.adapterID
         )
         try? db.upsert(record)
     }

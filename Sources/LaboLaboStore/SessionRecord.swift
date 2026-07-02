@@ -15,6 +15,8 @@ public struct SessionRecord: Codable, FetchableRecord, PersistableRecord, Identi
     public var agentSessionId: String?
     /// 直近の transcript(JSONL) パス。usage/cost の best-effort 取得などに使う。
     public var transcriptPath: String?
+    /// このセッションのエージェント種別（"claude" / "codex" / "gemini"）。nil は既定＝Claude。
+    public var adapterId: String?
 
     public init(
         id: String,
@@ -24,7 +26,8 @@ public struct SessionRecord: Codable, FetchableRecord, PersistableRecord, Identi
         addedAt: Date,
         sortOrder: Int,
         agentSessionId: String? = nil,
-        transcriptPath: String? = nil
+        transcriptPath: String? = nil,
+        adapterId: String? = nil
     ) {
         self.id = id
         self.worktreePath = worktreePath
@@ -34,6 +37,7 @@ public struct SessionRecord: Codable, FetchableRecord, PersistableRecord, Identi
         self.sortOrder = sortOrder
         self.agentSessionId = agentSessionId
         self.transcriptPath = transcriptPath
+        self.adapterId = adapterId
     }
 
     public static let databaseTableName = "session"
