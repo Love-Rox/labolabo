@@ -49,6 +49,23 @@ public actor GitHubEngine {
         return Self.parse(output)
     }
 
+    /// 現在ブランチから PR を作成し、PR の URL を返す（`gh pr create`）。
+    /// 事前に現在ブランチが push 済みであること（`GitEngine.push`）。
+    public func createPullRequest(
+        worktree: URL, base: String, title: String, body: String, draft: Bool
+    ) async throws -> String {
+        guard let gh = Self.locateGH() else {
+            throw NSError(domain: "GitHubEngine", code: 127, userInfo: [
+                NSLocalizedDescriptionKey: "gh CLI が見つかりません（brew install gh）",
+            ])
+        }
+        var args = ["pr", "create", "--base", base, "--title", title, "--body", body]
+        if draft { args.append("--draft") }
+        let output = try await Self.run(executable: gh, arguments: args, in: worktree)
+        // gh は成功時に PR の URL を stdout に出す。
+        return output.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     // MARK: - gh の場所
 
     static func locateGH() -> URL? {
@@ -99,7 +116,6 @@ public actor GitHubEngine {
         var anyFail = false, anyPending = false, anySuccess = false
         for item in items {
             let conclusion = (item["conclusion"] as? String ?? "").uppercased()
-            let status = (item["status"] as? String ?? "").uppercased()
             let stateField = (item["state"] as? String ?? "").uppercased()
 
             if ["FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE"].contains(conclusion)
@@ -150,6 +166,7 @@ public actor GitHubEngine {
                 }
 
                 var outData = Data()
+                var errData = Data()
                 let group = DispatchGroup()
                 group.enter()
                 DispatchQueue.global().async {
@@ -158,7 +175,7 @@ public actor GitHubEngine {
                 }
                 group.enter()
                 DispatchQueue.global().async {
-                    _ = errPipe.fileHandleForReading.readDataToEndOfFile()
+                    errData = errPipe.fileHandleForReading.readDataToEndOfFile()
                     group.leave()
                 }
 
@@ -168,8 +185,12 @@ public actor GitHubEngine {
                 if process.terminationStatus == 0 {
                     continuation.resume(returning: String(decoding: outData, as: UTF8.self))
                 } else {
+                    // stderr を載せて UI に理由を出せるようにする（未認証・重複 PR など）。
+                    let stderr = String(decoding: errData, as: UTF8.self)
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
                     continuation.resume(throwing: NSError(
-                        domain: "GitHubEngine", code: Int(process.terminationStatus)
+                        domain: "GitHubEngine", code: Int(process.terminationStatus),
+                        userInfo: stderr.isEmpty ? nil : [NSLocalizedDescriptionKey: stderr]
                     ))
                 }
             }

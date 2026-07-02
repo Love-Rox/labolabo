@@ -81,6 +81,19 @@ final class SessionStore {
         }
     }
 
+    /// 現在ブランチを push して PR を作成し、PR の URL を返す（失敗は throw）。
+    func createPullRequest(
+        _ id: RepoSession.ID, base: String, title: String, body: String, draft: Bool
+    ) async throws -> String {
+        guard let session = sessions.first(where: { $0.id == id }) else { return "" }
+        try await git.push(worktree: session.worktreePath)
+        let url = try await github.createPullRequest(
+            worktree: session.worktreePath, base: base, title: title, body: body, draft: draft
+        )
+        fetchPR(session)
+        return url
+    }
+
     // MARK: - エージェント状態（セッション寿命で監視）
 
     /// セッションのエージェント状態モデルを生成・起動して保持する。選択に関係なく
@@ -180,12 +193,14 @@ final class SessionStore {
 
     // MARK: - New Session（worktree 作成）
 
-    /// リポジトリ選択後に New Session シートへ渡す情報。
+    /// リポジトリ選択後に New Session / PR 作成シートへ渡す情報。
     struct RepoInspect: Sendable, Equatable {
         let root: URL
         let name: String
         let current: String?
         let branches: [String]
+        /// 直近コミットの件名（PR タイトルの初期値用）。
+        let lastSubject: String?
     }
 
     /// 選んだフォルダから所属リポジトリの root/名前/現在ブランチ/ブランチ一覧を解決する。
@@ -193,11 +208,13 @@ final class SessionStore {
         guard let info = try? await git.repoInfo(worktree: url) else { return nil }
         let current = (try? await git.status(worktree: url))?.branch
         let branches = (try? await git.localBranches(worktree: url)) ?? []
+        let lastSubject = try? await git.lastCommitSubject(worktree: url)
         return RepoInspect(
             root: URL(fileURLWithPath: info.root, isDirectory: true),
             name: info.name,
             current: current,
-            branches: branches
+            branches: branches,
+            lastSubject: (lastSubject?.isEmpty == false) ? lastSubject : nil
         )
     }
 
