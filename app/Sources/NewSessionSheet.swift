@@ -14,7 +14,10 @@ struct NewSessionSheet: View {
     @State private var baseRef = ""
     @State private var newBranch = ""
     @State private var sessionName = ""
+    @State private var adapterID = AgentAdapters.default.id
     @State private var showRepoPicker = false
+
+    private var adapter: AgentAdapter { AgentAdapters.find(id: adapterID) }
     @State private var creating = false
     @State private var errorText: String?
 
@@ -59,6 +62,18 @@ struct NewSessionSheet: View {
                         .onChange(of: newBranch) { autofillName() }
 
                     TextField("セッション名", text: $sessionName, prompt: Text(defaultName))
+
+                    Picker("エージェント", selection: $adapterID) {
+                        ForEach(AgentAdapters.all) { Text($0.displayName).tag($0.id) }
+                    }
+                    if !adapter.capabilities.statusReporting.providesLiveStatus {
+                        Label(
+                            "このエージェントはライブ状態検出に非対応です（\(adapter.capabilities.statusReporting.label)）。起動/終了のみ表示します。",
+                            systemImage: "info.circle"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    }
 
                     if let worktreePath {
                         LabeledContent("配置先") {
@@ -145,7 +160,8 @@ struct NewSessionSheet: View {
             do {
                 try await store.createWorktreeSession(
                     repoRoot: inspect.root, baseRef: baseRef,
-                    newBranch: branch, name: name, worktreePath: worktreePath
+                    newBranch: branch, name: name, worktreePath: worktreePath,
+                    adapterID: adapterID
                 )
                 dismiss()
             } catch {

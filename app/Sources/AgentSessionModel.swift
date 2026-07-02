@@ -17,9 +17,14 @@ final class AgentSessionModel {
     private(set) var lastTranscriptPath: String?
 
     let socketPath: String
+    /// このセッションのエージェント種別（Claude / Codex / Gemini …）。
+    let adapter: AgentAdapter
     private let bus: AgentStatusBus
     private let worktree: URL
     private var createdSettings = false
+
+    /// hooks 方式のときだけ settings.local.json を注入して状態を受信する。
+    private var usesHooks: Bool { adapter.capabilities.statusReporting == .hooks }
 
     /// 前回起動時に永続化されたエージェントセッション ID（あれば `--resume` する）。
     private let initialResumeID: String?
@@ -45,11 +50,13 @@ final class AgentSessionModel {
     init(
         sessionID: UUID,
         worktree: URL,
+        adapter: AgentAdapter = AgentAdapters.default,
         resumeID: String? = nil,
         onSessionID: ((String, String?) -> Void)? = nil,
         onStatusChange: ((AgentStatus) -> Void)? = nil
     ) {
         self.worktree = worktree
+        self.adapter = adapter
         self.initialResumeID = resumeID
         self.onSessionID = onSessionID
         self.onStatusChange = onStatusChange
@@ -77,23 +84,23 @@ final class AgentSessionModel {
             if status != previous { onStatusChange?(status) }
         }
         bus.start()
-        installLocalSettings()
+        if usesHooks { installLocalSettings() }
     }
 
     func stop() {
-        removeLocalSettings()
+        if usesHooks { removeLocalSettings() }
         bus.stop()
     }
 
     /// ✨ ボタンが新規端末で実行するコマンド。hooks は settings.local.json 経由で効くため、
-    /// コマンド自体は素の `claude`。前回のセッション ID があれば `--resume <id>` で継続する。
+    /// コマンド自体は素の実行名。再開対応かつ前回 ID があれば継続起動する。
     func launchCommand() -> String {
-        guard let id = resumeID, !id.isEmpty else { return "claude" }
-        return "claude --resume \(Self.shellQuoted(id))"
+        adapter.launchCommand(resumeID: resumeID)
     }
 
-    /// resume 可能か（UI 側で「再開」表示の出し分けに使える）。
-    var canResume: Bool { resumeID?.isEmpty == false }
+    /// resume 可能か（UI 側で「再開」表示の出し分けに使う）。アダプタが再開対応で、
+    /// かつ再開に使える ID を持っているとき true。
+    var canResume: Bool { adapter.capabilities.resume && resumeID?.isEmpty == false }
 
     // MARK: - settings.local.json への安全な hooks 注入
 
