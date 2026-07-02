@@ -106,10 +106,19 @@ struct PRCreateSheet: View {
                 dismiss()
             } catch {
                 creating = false
-                errorText = (error as? GitCommandError)?
-                    .stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-                    ?? error.localizedDescription
+                errorText = Self.message(for: error)
             }
         }
+    }
+
+    /// エラーを UI 用の文言に変換する。`GitCommandError` の stderr が空なら
+    /// `localizedDescription` に落とす（空 stderr で空ラベルにならないように）。
+    private static func message(for error: Error) -> String {
+        if let git = error as? GitCommandError {
+            let stderr = git.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !stderr.isEmpty { return stderr }
+        }
+        let description = error.localizedDescription
+        return description.isEmpty ? "不明なエラーが発生しました。" : description
     }
 }
