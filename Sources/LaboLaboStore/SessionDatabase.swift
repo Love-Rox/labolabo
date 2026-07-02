@@ -45,6 +45,12 @@ public final class SessionDatabase {
                 t.add(column: "transcriptPath", .text)
             }
         }
+        // セッションのエージェント種別（Claude / Codex / Gemini）。
+        migrator.registerMigration("v3-adapter") { db in
+            try db.alter(table: "session") { t in
+                t.add(column: "adapterId", .text)
+            }
+        }
         return migrator
     }
 
