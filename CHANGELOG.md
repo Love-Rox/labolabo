@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/Love-Rox/labolabo/compare/v0.3.0...v0.3.1) (2026-07-02)
+
+
+### バグ修正
+
+* 分割ペインの制約・比率保存が無効だった NSSplitViewDelegate セレクタ誤り＋New Session の空エラー ([#42](https://github.com/Love-Rox/labolabo/issues/42)) ([93281ed](https://github.com/Love-Rox/labolabo/commit/93281ed36e4f7f2bd272b02f5be51cce07e70bbc))
+
 ## [0.3.0](https://github.com/Love-Rox/labolabo/compare/v0.2.0...v0.3.0) (2026-07-02)
 
 
