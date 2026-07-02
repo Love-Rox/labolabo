@@ -85,7 +85,11 @@ final class SessionStore {
     func createPullRequest(
         _ id: RepoSession.ID, base: String, title: String, body: String, draft: Bool
     ) async throws -> String {
-        guard let session = sessions.first(where: { $0.id == id }) else { return "" }
+        guard let session = sessions.first(where: { $0.id == id }) else {
+            throw NSError(domain: "SessionStore", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "セッションが見つかりません（閉じられた可能性があります）。",
+            ])
+        }
         try await git.push(worktree: session.worktreePath)
         let url = try await github.createPullRequest(
             worktree: session.worktreePath, base: base, title: title, body: body, draft: draft

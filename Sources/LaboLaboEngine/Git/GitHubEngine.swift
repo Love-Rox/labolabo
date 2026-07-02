@@ -62,30 +62,24 @@ public actor GitHubEngine {
         var args = ["pr", "create", "--base", base, "--title", title, "--body", body]
         if draft { args.append("--draft") }
         let output = try await Self.run(executable: gh, arguments: args, in: worktree)
-        // gh は成功時に PR の URL を stdout に出す。
-        return output.trimmingCharacters(in: .whitespacesAndNewlines)
+        return Self.parsePRURL(from: output)
+    }
+
+    /// `gh pr create` の stdout から PR の URL を取り出す。gh は URL を出すが、前後に
+    /// 助言行が混ざることがあるので http(s):// 始まりの行を優先し、無ければ全体を trim。
+    static func parsePRURL(from output: String) -> String {
+        let urlLine = output
+            .split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .last(where: { $0.hasPrefix("https://") || $0.hasPrefix("http://") })
+        return urlLine ?? output.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     // MARK: - gh の場所
 
+    /// gh の絶対パス。`ToolLocator` に集約し、doctor の判定と実際の起動可否を一致させる。
     static func locateGH() -> URL? {
-        let fm = FileManager.default
-        let candidates = [
-            "/opt/homebrew/bin/gh",
-            "/usr/local/bin/gh",
-            "/usr/bin/gh",
-            "/run/current-system/sw/bin/gh",
-        ]
-        for path in candidates where fm.isExecutableFile(atPath: path) {
-            return URL(fileURLWithPath: path)
-        }
-        if let pathEnv = ProcessInfo.processInfo.environment["PATH"] {
-            for dir in pathEnv.split(separator: ":") {
-                let path = String(dir) + "/gh"
-                if fm.isExecutableFile(atPath: path) { return URL(fileURLWithPath: path) }
-            }
-        }
-        return nil
+        ToolLocator.locate("gh")
     }
 
     // MARK: - パース

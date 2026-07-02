@@ -530,9 +530,10 @@ struct SessionDetailView: View {
                 ClaudeMark().frame(width: 15, height: 15)
             }
             .buttonStyle(CircleIconButtonStyle(tint: Color(red: 0.85, green: 0.47, blue: 0.34)))
-            .disabled(!doctor.claude.found)
+            // 起動は端末（ログインシェル）で `claude` を実行するため、doctor の検出で
+            // 無効化はしない（シェルの PATH が真の解決先）。未検出時は help で注意喚起。
             .help(!doctor.claude.found
-                ? "claude CLI が見つかりません（設定 > 一般 > ツール診断を参照）"
+                ? "Claude を起動（claude を検出できませんでした。端末の PATH で解決を試みます／設定 > 一般 > ツール診断）"
                 : (session.agent?.canResume ?? false)
                     ? "Claude を再開（前回のセッションを --resume）"
                     : "Claude を起動（状態検出 hooks 付き）")
