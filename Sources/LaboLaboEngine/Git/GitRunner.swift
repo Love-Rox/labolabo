@@ -39,17 +39,17 @@ public enum GitRunner {
                     return
                 }
 
-                var outData = Data()
-                var errData = Data()
+                let outBox = DataBox()
+                let errBox = DataBox()
                 let group = DispatchGroup()
                 group.enter()
                 DispatchQueue.global().async {
-                    outData = outPipe.fileHandleForReading.readDataToEndOfFile()
+                    outBox.fill(from: outPipe.fileHandleForReading)
                     group.leave()
                 }
                 group.enter()
                 DispatchQueue.global().async {
-                    errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+                    errBox.fill(from: errPipe.fileHandleForReading)
                     group.leave()
                 }
 
@@ -57,12 +57,12 @@ public enum GitRunner {
                 group.wait()  // ensures both reads are visible before we use the buffers
 
                 if process.terminationStatus == 0 {
-                    continuation.resume(returning: String(decoding: outData, as: UTF8.self))
+                    continuation.resume(returning: String(decoding: outBox.value, as: UTF8.self))
                 } else {
                     continuation.resume(throwing: GitCommandError(
                         arguments: arguments,
                         exitCode: process.terminationStatus,
-                        stderr: String(decoding: errData, as: UTF8.self)
+                        stderr: String(decoding: errBox.value, as: UTF8.self)
                     ))
                 }
             }

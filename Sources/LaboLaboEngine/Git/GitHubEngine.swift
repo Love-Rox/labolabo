@@ -159,17 +159,17 @@ public actor GitHubEngine {
                     return
                 }
 
-                var outData = Data()
-                var errData = Data()
+                let outBox = DataBox()
+                let errBox = DataBox()
                 let group = DispatchGroup()
                 group.enter()
                 DispatchQueue.global().async {
-                    outData = outPipe.fileHandleForReading.readDataToEndOfFile()
+                    outBox.fill(from: outPipe.fileHandleForReading)
                     group.leave()
                 }
                 group.enter()
                 DispatchQueue.global().async {
-                    errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+                    errBox.fill(from: errPipe.fileHandleForReading)
                     group.leave()
                 }
 
@@ -177,10 +177,10 @@ public actor GitHubEngine {
                 group.wait()
 
                 if process.terminationStatus == 0 {
-                    continuation.resume(returning: String(decoding: outData, as: UTF8.self))
+                    continuation.resume(returning: String(decoding: outBox.value, as: UTF8.self))
                 } else {
                     // stderr を載せて UI に理由を出せるようにする（未認証・重複 PR など）。
-                    let stderr = String(decoding: errData, as: UTF8.self)
+                    let stderr = String(decoding: errBox.value, as: UTF8.self)
                         .trimmingCharacters(in: .whitespacesAndNewlines)
                     continuation.resume(throwing: NSError(
                         domain: "GitHubEngine", code: Int(process.terminationStatus),
