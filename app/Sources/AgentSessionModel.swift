@@ -15,6 +15,8 @@ final class AgentSessionModel {
     private(set) var status: AgentStatus = .none
     private(set) var lastSessionID: String?
     private(set) var lastTranscriptPath: String?
+    /// transcript から集計した使用量（best-effort・推定）。hooks 方式のときだけ得られる。
+    private(set) var usage: AgentUsage?
 
     let socketPath: String
     /// このセッションのエージェント種別（Claude / Codex / Gemini …）。
@@ -82,9 +84,21 @@ final class AgentSessionModel {
                 onSessionID?(id, event.transcriptPath) // 次回起動の --resume 用に永続化
             }
             if status != previous { onStatusChange?(status) }
+            // 応答完了/終了時に transcript から使用量を集計（推定）。
+            if status == .idle || status == .ended, let path = lastTranscriptPath {
+                refreshUsage(path: path)
+            }
         }
         bus.start()
         if usesHooks { installLocalSettings() }
+    }
+
+    /// transcript を読み usage を更新する。ファイル読み取り＋パースはバックグラウンドで。
+    private func refreshUsage(path: String) {
+        Task.detached(priority: .utility) { [weak self] in
+            guard let parsed = TranscriptUsage.read(path: path) else { return }
+            await MainActor.run { self?.usage = parsed }
+        }
     }
 
     func stop() {
