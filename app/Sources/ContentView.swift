@@ -432,6 +432,22 @@ struct SessionDetailView: View {
     private let configSource: TerminalController.ConfigSource
     /// 外部ツールの検査結果（不在の機能はボタンを無効化して理由を出す）。
     private var doctor: ToolDoctor { .shared }
+    /// このセッションのエージェント種別（起動ボタンの表示・コマンドに使う）。
+    private var agentAdapter: AgentAdapter { AgentAdapters.find(id: session.adapterID) }
+
+    /// 起動ボタンのツールチップ。アダプタ名・再開可否・状態検出方式を反映する。
+    private var agentLaunchHelp: String {
+        let name = agentAdapter.displayName
+        if agentAdapter.id == AgentAdapters.claude.id, !doctor.claude.found {
+            return "\(name) を起動（claude を検出できませんでした。端末の PATH で解決を試みます／設定 > 一般 > ツール診断）"
+        }
+        if session.agent?.canResume ?? false {
+            return "\(name) を再開（前回のセッションを --resume）"
+        }
+        return agentAdapter.capabilities.statusReporting.providesLiveStatus
+            ? "\(name) を起動（状態検出 hooks 付き）"
+            : "\(name) を起動（状態検出なし・起動/終了のみ）"
+    }
 
     init(
         session: RepoSession,
@@ -525,18 +541,21 @@ struct SessionDetailView: View {
             Spacer(minLength: 12)
 
             Button {
-                tiling.launchInNewTerminal(title: "Claude", command: session.agent?.launchCommand() ?? "claude")
+                tiling.launchInNewTerminal(
+                    title: agentAdapter.displayName,
+                    command: session.agent?.launchCommand() ?? agentAdapter.executable
+                )
             } label: {
-                ClaudeMark().frame(width: 15, height: 15)
+                if agentAdapter.id == AgentAdapters.claude.id {
+                    ClaudeMark().frame(width: 15, height: 15)
+                } else {
+                    Image(systemName: "sparkles")
+                }
             }
             .buttonStyle(CircleIconButtonStyle(tint: Color(red: 0.85, green: 0.47, blue: 0.34)))
-            // 起動は端末（ログインシェル）で `claude` を実行するため、doctor の検出で
+            // 起動は端末（ログインシェル）で実行名を解決するため、doctor の検出で
             // 無効化はしない（シェルの PATH が真の解決先）。未検出時は help で注意喚起。
-            .help(!doctor.claude.found
-                ? "Claude を起動（claude を検出できませんでした。端末の PATH で解決を試みます／設定 > 一般 > ツール診断）"
-                : (session.agent?.canResume ?? false)
-                    ? "Claude を再開（前回のセッションを --resume）"
-                    : "Claude を起動（状態検出 hooks 付き）")
+            .help(agentLaunchHelp)
 
             Button {
                 tiling.addPane(PaneItem(kind: .terminal, title: "端末"))
