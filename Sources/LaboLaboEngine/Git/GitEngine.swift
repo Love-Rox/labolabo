@@ -20,6 +20,12 @@ public actor GitEngine {
         return PorcelainStatusParser.parse(raw)
     }
 
+    /// 直近コミットの件名（PR タイトルの初期値などに使う）。
+    public func lastCommitSubject(worktree: URL) async throws -> String {
+        try await GitRunner.run(["log", "-1", "--format=%s"], in: worktree)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     /// ローカルブランチ名の一覧（最近のコミット順）。New Session のベースブランチ選択に使う。
     public func localBranches(worktree: URL) async throws -> [String] {
         let raw = try await GitRunner.run(
@@ -166,6 +172,11 @@ public actor GitEngine {
             ["worktree", "add", "-b", branch, path.path, baseRef],
             in: repo
         )
+    }
+
+    /// `git push -u origin HEAD`（現在ブランチを同名でリモートへ。PR 作成の前段）。
+    public func push(worktree: URL) async throws {
+        try await GitRunner.run(["push", "-u", "origin", "HEAD"], in: worktree)
     }
 
     /// `git worktree remove [--force] <path>`. Refuses dirty worktrees unless `force`.
