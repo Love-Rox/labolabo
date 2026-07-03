@@ -176,9 +176,7 @@ struct ContentView: View {
             do {
                 try await store.removeWorktree(req.session.id, force: req.dirty)
             } catch {
-                removalError = (error as? GitCommandError)?
-                    .stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-                    ?? error.localizedDescription
+                removalError = error.sessionUIMessage
             }
         }
     }
