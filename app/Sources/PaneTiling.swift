@@ -514,7 +514,12 @@ final class RatioSplitView: NSSplitView, NSSplitViewDelegate {
         guard arrangedSubviews.count == 2 else { return }
         let dim = isVertical ? bounds.width : bounds.height
         guard dim > 0, let ratio = node?.ratio else { return }
-        let target = (ratio * dim).rounded()
+        // AppKit が min/max 制約でクランプするのと同じ範囲に丸める。そうしないと
+        // target が範囲外のとき current(クランプ後) と一致せず、毎レイアウトで
+        // setPosition を再発行し続ける。
+        let lo = paneMinSize
+        let hi = max(lo, dim - dividerThickness - paneMinSize)
+        let target = min(max((ratio * dim).rounded(), lo), hi)
         let current = isVertical ? arrangedSubviews[0].frame.width : arrangedSubviews[0].frame.height
         guard abs(current - target) > 1 else { return }
         isApplyingRatio = true
@@ -522,14 +527,24 @@ final class RatioSplitView: NSSplitView, NSSplitViewDelegate {
         isApplyingRatio = false
     }
 
+    /// 各ペインに確保する最小サイズ。通常は 90pt だが、両側に 90pt×2 を取れないほど
+    /// 狭いときは利用可能幅の半分まで縮める。これをしないと min 制約(+90)が max 制約(-90)を
+    /// 追い越し（min>max）、AppKit のディバイダ配置が未定義動作になってレイアウトが崩れる
+    /// （小さいウィンドウ・ネストした分割で発生）。
+    private var paneMinSize: CGFloat {
+        let dim = isVertical ? bounds.width : bounds.height
+        let usable = dim - dividerThickness
+        return max(0, min(90, usable / 2))
+    }
+
     // NSSplitViewDelegate の min/max 制約は `ofSubviewAt`（`ofDividerAt` ではない）。
-    // 誤ったラベルだとメソッドが呼ばれず、ペインを 90pt 未満に潰せてしまう。
+    // 誤ったラベルだとメソッドが呼ばれず、ペインを最小サイズ未満に潰せてしまう。
     func splitView(_ splitView: NSSplitView, constrainMinCoordinate proposedMin: CGFloat, ofSubviewAt _: Int) -> CGFloat {
-        proposedMin + 90
+        proposedMin + paneMinSize
     }
 
     func splitView(_ splitView: NSSplitView, constrainMaxCoordinate proposedMax: CGFloat, ofSubviewAt _: Int) -> CGFloat {
-        proposedMax - 90
+        proposedMax - paneMinSize
     }
 
     /// Persist the ratio only when the *user* drags a divider. `constrainSplitPosition`
