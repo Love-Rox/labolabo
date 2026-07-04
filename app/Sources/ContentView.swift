@@ -46,7 +46,7 @@ struct ContentView: View {
                 sidebarHeader
                 Divider()
                 Color.clear.frame(height: 6) // 上部バーとセッション一覧の間に余白
-                List {
+                List(selection: Binding(get: { store.selection }, set: { store.select($0) })) {
                     if store.sessions.isEmpty {
                         Text("リポジトリを開いてください")
                             .foregroundStyle(.secondary)
@@ -56,12 +56,7 @@ struct ContentView: View {
                                 ForEach(group.sessions) { session in
                                     SessionRow(session: session, onClose: { store.close(session.id) })
                                         .tag(session.id)
-                                        .listRowBackground(rowBackground(
-                                            colorID: store.colorID(forRepo: group.key),
-                                            selected: store.selection == session.id
-                                        ))
-                                        .contentShape(Rectangle())
-                                        .onTapGesture { store.select(session.id) }
+                                        .listRowBackground(rowBackground(colorID: store.colorID(forRepo: group.key)))
                                         .contextMenu {
                                             Button("セッションを閉じる") {
                                                 store.close(session.id)
@@ -84,6 +79,9 @@ struct ContentView: View {
                     }
                 }
                 .listStyle(.sidebar)
+                // 選択ハイライトを既定の青ではなく選択中リポジトリの色へ寄せる。
+                // 未割り当てのときは nil（既定アクセント）。
+                .tint(selectedRepoTint)
                 // 先頭セクションの sticky 見出しが上部バー下へ潜って隠れるのを防ぐため、
                 // スクロール内容に上マージンを与える。併せて内容変化時も上を基準に保つ。
                 .contentMargins(.top, 8, for: .scrollContent)
@@ -194,22 +192,12 @@ struct ContentView: View {
         return "「\(req.session.name)」の worktree を削除します。\n\n\(path)"
     }
 
-    /// セッション行の背景。選択中はリポジトリ色で強調（macOS 既定の青ではなく指定色）、
-    /// 非選択は淡いタイント（色未設定は透明）。選択の視覚化を自前で行うため、List の
-    /// システム選択ハイライトは使わず onTapGesture で選択する。
+    /// セッション行の背景（リポジトリ色の淡いタイント）。色未設定は透明。
+    /// 選択ハイライト自体は List のシステム選択を使い、色は `.tint` で指定色に寄せる
+    /// （キーボード行移動を維持するため）。
     @ViewBuilder
-    private func rowBackground(colorID: String?, selected: Bool) -> some View {
-        if selected {
-            let color = RepoPalette.color(for: colorID)
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(color.opacity(0.40))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .strokeBorder(color.opacity(0.9), lineWidth: 1.5)
-                )
-                .padding(.vertical, 1)
-                .padding(.horizontal, 6)
-        } else if let colorID {
+    private func rowBackground(colorID: String?) -> some View {
+        if let colorID {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .fill(RepoPalette.color(for: colorID).opacity(0.16))
                 .padding(.vertical, 1)
@@ -217,6 +205,16 @@ struct ContentView: View {
         } else {
             Color.clear
         }
+    }
+
+    /// 選択中セッションが属するリポジトリの色（未割り当ては nil＝既定アクセント）。
+    /// サイドバーの選択ハイライトを指定色に寄せるための tint に使う。
+    private var selectedRepoTint: Color? {
+        guard let selection = store.selection,
+              let session = store.sessions.first(where: { $0.id == selection }),
+              let key = session.repoKey,
+              let colorID = store.colorID(forRepo: key) else { return nil }
+        return RepoPalette.color(for: colorID)
     }
 
     /// サイドバー上部のヘッダー（OS タイトルバーの代わり）。信号機を避ける左インセット付き。
@@ -451,6 +449,11 @@ struct SessionDetailView: View {
     /// このセッションのエージェント種別（起動ボタンの表示・コマンドに使う）。
     private var agentAdapter: AgentAdapter { AgentAdapters.find(id: session.adapterID) }
 
+    /// リポジトリに割り当てられた色（未割り当ては secondary）。ヘッダーの色タグに使う。
+    private var repoTagColor: Color {
+        RepoPalette.color(for: session.repoKey.flatMap { store.colorID(forRepo: $0) })
+    }
+
     /// 起動ボタンのツールチップ。アダプタ名・再開可否・状態検出方式を反映する。
     private var agentLaunchHelp: String {
         let name = agentAdapter.displayName
@@ -572,17 +575,23 @@ struct SessionDetailView: View {
                 .help("サイドバーを表示")
             }
 
-            // リポジトリ（org/repo）＋サイドバーと同じ色ドット。未解決時は session 名にフォールバック。
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(RepoPalette.color(for: session.repoKey.flatMap { store.colorID(forRepo: $0) }))
-                    .frame(width: 9, height: 9)
-                Text(session.repoName ?? session.name)
-                    .font(.headline)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-            .help(session.repoName.map { "\($0) — \(session.name)" } ?? session.worktreePath.path)
+            // リポジトリ（org/repo）を、サイドバーと同じ色の塗り＋枠線タグで表示。
+            // 未解決時は session 名にフォールバック。
+            Text(session.repoName ?? session.name)
+                .font(.headline)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 3)
+                .background(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .fill(repoTagColor.opacity(0.18))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .strokeBorder(repoTagColor.opacity(0.6), lineWidth: 1)
+                )
+                .help(session.repoName.map { "\($0) — \(session.name)" } ?? session.worktreePath.path)
 
             // worktree セッション等、session 名が repo フォルダ名と異なるときだけ併記。
             if let repoName = session.repoName,

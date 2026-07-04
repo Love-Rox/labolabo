@@ -46,6 +46,8 @@ struct LaboLaboApp: App {
         WindowGroup {
             ContentView()
                 .frame(minWidth: 1000, minHeight: 640)
+                // ウィンドウのサイズ・位置・スクリーンを記憶（複数モニタでも復元）。
+                .background(WindowAccessor(autosaveName: "LaboLaboMainWindow"))
         }
         // タイトルバーを隠し、上部の空きバーをなくして自前の 1 本バーに統合する。
         // サイドバー上部に "LaboLabo"＋開くボタン、詳細上部に自前の操作バーを置く。
