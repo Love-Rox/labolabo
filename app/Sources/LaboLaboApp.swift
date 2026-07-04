@@ -39,7 +39,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         quitMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             let mods = event.modifierFlags.intersection([.command, .shift, .option, .control])
             if mods == .command, event.charactersIgnoringModifiers?.lowercased() == "q" {
-                NSApp.terminate(nil)
+                // ローカルモニタはメインスレッドで呼ばれる。
+                MainActor.assumeIsolated { NSApp.terminate(nil) }
                 return nil // 端末へ渡さず消費する
             }
             return event
@@ -64,7 +65,7 @@ struct LaboLaboApp: App {
             ContentView()
                 .frame(minWidth: 1000, minHeight: 640)
                 // ウィンドウのサイズ・位置・スクリーンを記憶（複数モニタでも復元）。
-                .background(WindowAccessor(autosaveName: "LaboLaboMainWindow"))
+                .background(WindowAccessor(defaultsKey: "mainWindowFrame"))
         }
         // タイトルバーを隠し、上部の空きバーをなくして自前の 1 本バーに統合する。
         // サイドバー上部に "LaboLabo"＋開くボタン、詳細上部に自前の操作バーを置く。
