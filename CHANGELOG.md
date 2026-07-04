@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.2](https://github.com/Love-Rox/labolabo/compare/v0.3.1...v0.3.2) (2026-07-04)
+
+
+### バグ修正
+
+* エラー整形を共有ヘルパに集約し worktree 削除の空エラーを解消＋release-please コメント訂正 ([#46](https://github.com/Love-Rox/labolabo/issues/46)) ([df45188](https://github.com/Love-Rox/labolabo/commit/df451887684f6aeb9909d22cd915256d6facfbe4))
+* 小さいウィンドウ/ネスト分割でペインが崩れる（min&gt;max）を解消 ([#47](https://github.com/Love-Rox/labolabo/issues/47)) ([c165b5e](https://github.com/Love-Rox/labolabo/commit/c165b5e39f29334140b7d3e7dfd0266facf20604))
+
 ## [0.3.1](https://github.com/Love-Rox/labolabo/compare/v0.3.0...v0.3.1) (2026-07-02)
 
 
