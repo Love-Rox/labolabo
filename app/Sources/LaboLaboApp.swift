@@ -12,6 +12,8 @@ enum AppEntry {
             HookForwarder.forward(socketPath: args[index + 1])
             return
         }
+        // UI 構築前に、メニューを開くと落ちる macOS 26 の NSSplitView 再帰バグを塞ぐ。
+        SplitViewRecursionFix.install()
         LaboLaboApp.main()
     }
 }
