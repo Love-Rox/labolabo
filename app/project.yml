@@ -48,5 +48,22 @@ targets:
         COMBINE_HIDPI_IMAGES: YES
         # String Catalog へ Text("…") / String(localized:) を自動抽出（欠落検出用）。
         SWIFT_EMIT_LOC_STRINGS: YES
+    postBuildScripts:
+      # CFBundleVersion（ビルド番号）を単調増加する git コミット数へ上書きする。
+      # xcconfig の CURRENT_PROJECT_VERSION は固定フォールバック（1）なので、GENERATE_INFOPLIST_FILE
+      # が生成した最終 Info.plist を PlistBuddy で書き換えて Debug/Release/archive すべてに反映する。
+      # About パネル・設定「現在のバージョン」・Changelog が実ビルド番号を表示できるようになる。
+      - name: Inject build number (git commit count)
+        basedOnDependencyAnalysis: false
+        script: |
+          build=$(git -C "$SRCROOT" rev-list --count HEAD 2>/dev/null || echo 0)
+          plist="${TARGET_BUILD_DIR}/${INFOPLIST_PATH}"
+          if [ "$build" -gt 0 ] && [ -f "$plist" ]; then
+            /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $build" "$plist" \
+              || /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $build" "$plist"
+            echo "note: injected CFBundleVersion=$build"
+          else
+            echo "warning: build number not injected (build=$build, plist=$plist)"
+          fi
     scheme:
       testTargets: []
