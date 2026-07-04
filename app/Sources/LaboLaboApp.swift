@@ -70,6 +70,13 @@ struct LaboLaboApp: App {
         // タイトルバーを隠し、上部の空きバーをなくして自前の 1 本バーに統合する。
         // サイドバー上部に "LaboLabo"＋開くボタン、詳細上部に自前の操作バーを置く。
         .windowStyle(.hiddenTitleBar)
+        .commands {
+            // 「サイドバーを表示/隠す」メニュー項目（toggleSidebar:）を撤去する。
+            // メニューを開くと AppKit がこの項目を検証する際、NavigationSplitView の
+            // サイドバー NSSplitView の respondsToSelector: が無限再帰してクラッシュする
+            // macOS の不具合があるため。サイドバーの開閉は自前ボタンで行っているので不要。
+            CommandGroup(replacing: .sidebar) {}
+        }
 
         // 設定画面（⌘,）。アプリアイコンの表示モードなど。
         Settings {
