@@ -5,6 +5,8 @@ options:
   deploymentTarget:
     macOS: "14.0"
   createIntermediateGroups: true
+  # UI 文字列は日本語をソースとし、String Catalog で英語を追加する。
+  developmentLanguage: ja
 
 packages:
   # Local Swift package at the repo root (LaboLaboEngine et al.).
@@ -44,5 +46,7 @@ targets:
         SWIFT_VERSION: "6.0"
         ENABLE_HARDENED_RUNTIME: YES
         COMBINE_HIDPI_IMAGES: YES
+        # String Catalog へ Text("…") / String(localized:) を自動抽出（欠落検出用）。
+        SWIFT_EMIT_LOC_STRINGS: YES
     scheme:
       testTargets: []
