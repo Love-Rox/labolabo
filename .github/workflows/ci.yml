@@ -19,3 +19,45 @@ jobs:
         run: swift --version
       - name: Run tests
         run: swift test
+
+  # アプリ層のビルドとテスト（エンジンの swift test では届かない SwiftUI/AppKit 層）。
+  # XcodeGen で .xcodeproj を生成 → 一度ビルド → アプリ単体テスト（ブロッキング）→
+  # 起動＋メニュー開閉の UI スモーク（当面は informational: ランナー権限差で不安定な
+  # 間はマージをブロックしない。CI で安定を確認できたら continue-on-error を外す）。
+  app-tests:
+    name: app build & test
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Show toolchain
+        run: |
+          swift --version
+          xcodebuild -version
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Generate Xcode project
+        run: xcodegen generate --spec app/project.yml
+      - name: Build for testing
+        run: |
+          xcodebuild build-for-testing \
+            -project app/LaboLabo.xcodeproj \
+            -scheme LaboLabo \
+            -destination 'platform=macOS,arch=arm64' \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO
+      - name: App unit tests
+        run: |
+          xcodebuild test-without-building \
+            -project app/LaboLabo.xcodeproj \
+            -scheme LaboLabo \
+            -only-testing:LaboLaboAppTests \
+            -destination 'platform=macOS,arch=arm64' \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO
+      - name: UI smoke (informational)
+        continue-on-error: true
+        run: |
+          xcodebuild test-without-building \
+            -project app/LaboLabo.xcodeproj \
+            -scheme LaboLabo \
+            -only-testing:LaboLaboUITests \
+            -destination 'platform=macOS,arch=arm64' \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO

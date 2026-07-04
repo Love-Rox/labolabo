@@ -49,4 +49,35 @@ targets:
         # String Catalog へ Text("…") / String(localized:) を自動抽出（欠落検出用）。
         SWIFT_EMIT_LOC_STRINGS: YES
     scheme:
-      testTargets: []
+      testTargets:
+        - LaboLaboAppTests
+        - LaboLaboUITests
+
+  # アプリ層の純ロジック単体テスト（@testable import LaboLabo）。ホストは LaboLabo。
+  LaboLaboAppTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Tests/AppUnitTests
+    dependencies:
+      - target: LaboLabo
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.love-rox.labolabo.AppUnitTests
+        GENERATE_INFOPLIST_FILE: YES
+        SWIFT_VERSION: "6.0"
+
+  # 起動＋メニュー開閉のUIスモーク（XCUITest）。過去の toggleSidebar 無限再帰の
+  # ような「メニューを開くと落ちる」退行を検出する。対象アプリは LaboLabo。
+  LaboLaboUITests:
+    type: bundle.ui-testing
+    platform: macOS
+    sources:
+      - path: Tests/UITests
+    dependencies:
+      - target: LaboLabo
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.love-rox.labolabo.UITests
+        GENERATE_INFOPLIST_FILE: YES
+        SWIFT_VERSION: "6.0"
