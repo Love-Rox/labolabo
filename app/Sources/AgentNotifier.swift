@@ -49,7 +49,15 @@ enum AgentNotifier {
     }
 
     /// 現在の通知許可状態（`.authorized` のときだけ投函したい場面で使う）。
+    ///
+    /// `notificationSettings()` の async 版は非 Sendable な `UNNotificationSettings` を
+    /// 返すため、@MainActor から await すると隔離境界をまたいで送れずコンパイルエラーに
+    /// なる（Xcode 16 SDK）。完了ハンドラ版で **Sendable な enum だけ**を継続へ渡す。
     static func authorizationStatus() async -> UNAuthorizationStatus {
-        await UNUserNotificationCenter.current().notificationSettings().authorizationStatus
+        await withCheckedContinuation { continuation in
+            UNUserNotificationCenter.current().getNotificationSettings { settings in
+                continuation.resume(returning: settings.authorizationStatus)
+            }
+        }
     }
 }
