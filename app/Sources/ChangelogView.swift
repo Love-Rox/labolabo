@@ -6,7 +6,7 @@ import SwiftUI
 struct ChangelogView: View {
     @Environment(\.dismiss) private var dismiss
 
-    private static let releasesURL = URL(string: "https://github.com/Love-Rox/labolabo/releases")!
+    private static let releasesURL = GitHubRepo.releasesPage
 
     private var version: String {
         (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "—"

@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 /// アプリ設定（⌘,）。今はアプリアイコンの表示モードのみ。将来 タブを増やす。
 struct SettingsView: View {
@@ -15,8 +16,11 @@ struct SettingsView: View {
 struct GeneralSettingsView: View {
     @AppStorage(AppIconController.defaultsKey) private var iconModeRaw = AppIconMode.auto.rawValue
     @AppStorage(AgentNotifier.enabledKey) private var notifyWaiting = true
+    @AppStorage(UpdateChecker.autoCheckKey) private var checkUpdatesOnLaunch = true
     /// ツール診断（@Observable シングルトン。body でのアクセスが追跡される）。
     private var doctor: ToolDoctor { .shared }
+    /// アップデートチェッカ（@Observable シングルトン）。
+    private var updates: UpdateChecker { .shared }
 
     private var iconMode: AppIconMode { AppIconMode(rawValue: iconModeRaw) ?? .auto }
 
@@ -71,8 +75,53 @@ struct GeneralSettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+
+            Section {
+                LabeledContent("現在のバージョン") {
+                    Text(versionText).foregroundStyle(.secondary)
+                }
+                Toggle("起動時にアップデートを確認する", isOn: $checkUpdatesOnLaunch)
+                HStack {
+                    Button("アップデートを確認") { updates.check() }
+                        .disabled(updates.state == .checking)
+                    if updates.state == .checking { ProgressView().controlSize(.small) }
+                    Spacer()
+                    updateStatus
+                }
+            } header: {
+                Text("アップデート")
+            } footer: {
+                Text("GitHub リリースを確認して新しいバージョンをお知らせします（自動ダウンロードは行いません／リリースページから取得）。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
         .formStyle(.grouped)
+    }
+
+    private var versionText: String {
+        let version = updates.currentVersion
+        guard !version.isEmpty else { return "不明" }
+        let build = updates.currentBuild
+        return build.isEmpty ? "v\(version)" : "v\(version) (\(build))"
+    }
+
+    @ViewBuilder
+    private var updateStatus: some View {
+        switch updates.state {
+        case .idle, .checking:
+            EmptyView()
+        case .upToDate:
+            Label("最新です", systemImage: "checkmark.circle.fill")
+                .font(.caption).foregroundStyle(.green)
+        case let .available(version, url):
+            HStack(spacing: 6) {
+                Text("v\(version) が利用可能").font(.caption).foregroundStyle(.orange)
+                Button("開く") { NSWorkspace.shared.open(url) }
+            }
+        case .failed:
+            Text("確認できませんでした").font(.caption).foregroundStyle(.secondary)
+        }
     }
 
     @ViewBuilder

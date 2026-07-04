@@ -22,6 +22,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         AppIconController.shared.start()
         AgentNotifier.configure(delegate: self)
         ToolDoctor.shared.check() // git/gh/claude の存在検査（依存機能のゲートに使う）
+        // 起動時アップデート確認（既定 ON・未設定時も ON）。新版発見なら通知。
+        // throttle: 起動連打で GitHub を叩きすぎないよう直近チェック済みならスキップ。
+        if (UserDefaults.standard.object(forKey: UpdateChecker.autoCheckKey) as? Bool) ?? true {
+            UpdateChecker.shared.check(notifyIfAvailable: true, throttle: true)
+        }
     }
 
     /// アプリ前面時も通知を表示する（別セッションで作業中に入力待ちを知らせるため）。

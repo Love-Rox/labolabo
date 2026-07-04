@@ -34,4 +34,22 @@ enum AgentNotifier {
         )
         UNUserNotificationCenter.current().add(request)
     }
+
+    /// 新しいバージョンが利用可能なことを通知する（識別子は version 由来）。通知の投函は
+    /// この enum に集約する（UpdateChecker からの直投函を避け、所有権を一本化）。
+    static func postUpdateAvailable(version: String) {
+        let content = UNMutableNotificationContent()
+        content.title = "LaboLabo の新しいバージョン"
+        content.body = "v\(version) が利用可能です（設定 > 一般 から確認）。"
+        content.sound = .default
+        let request = UNNotificationRequest(
+            identifier: "labolabo.update.\(version)", content: content, trigger: nil
+        )
+        UNUserNotificationCenter.current().add(request)
+    }
+
+    /// 現在の通知許可状態（`.authorized` のときだけ投函したい場面で使う）。
+    static func authorizationStatus() async -> UNAuthorizationStatus {
+        await UNUserNotificationCenter.current().notificationSettings().authorizationStatus
+    }
 }
