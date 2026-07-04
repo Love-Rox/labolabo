@@ -53,16 +53,16 @@ extension PullRequestInfo.Checks {
 /// リポジトリ・グループの色パレット。永続化は id 文字列で行う。
 enum RepoPalette {
     static let entries: [(id: String, name: String, color: Color)] = [
-        ("gray", "グレー", .gray),
-        ("blue", "ブルー", .blue),
-        ("green", "グリーン", .green),
-        ("orange", "オレンジ", .orange),
-        ("red", "レッド", .red),
-        ("purple", "パープル", .purple),
-        ("pink", "ピンク", .pink),
-        ("teal", "ティール", .teal),
-        ("yellow", "イエロー", .yellow),
-        ("indigo", "インディゴ", .indigo),
+        ("gray", String(localized: "グレー"), .gray),
+        ("blue", String(localized: "ブルー"), .blue),
+        ("green", String(localized: "グリーン"), .green),
+        ("orange", String(localized: "オレンジ"), .orange),
+        ("red", String(localized: "レッド"), .red),
+        ("purple", String(localized: "パープル"), .purple),
+        ("pink", String(localized: "ピンク"), .pink),
+        ("teal", String(localized: "ティール"), .teal),
+        ("yellow", String(localized: "イエロー"), .yellow),
+        ("indigo", String(localized: "インディゴ"), .indigo),
     ]
 
     static func color(for id: String?) -> Color {

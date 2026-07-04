@@ -39,8 +39,8 @@ struct GeneralSettingsView: View {
 
                 LabeledContent("プレビュー") {
                     HStack(spacing: 12) {
-                        iconPreview("AppIconDark", caption: "ダーク")
-                        iconPreview("AppIconLight", caption: "ライト")
+                        iconPreview("AppIconDark", caption: String(localized: "ダーク"))
+                        iconPreview("AppIconLight", caption: String(localized: "ライト"))
                     }
                 }
             } footer: {
@@ -60,9 +60,9 @@ struct GeneralSettingsView: View {
             }
 
             Section {
-                toolRow("git", doctor.git, note: "差分・worktree 操作に必須")
-                toolRow("gh", doctor.gh, note: "PR の表示・作成に必要")
-                toolRow("claude", doctor.claude, note: "エージェント起動に必要")
+                toolRow("git", doctor.git, note: String(localized: "差分・worktree 操作に必須"))
+                toolRow("gh", doctor.gh, note: String(localized: "PR の表示・作成に必要"))
+                toolRow("claude", doctor.claude, note: String(localized: "エージェント起動に必要"))
                 HStack {
                     Button("再検査") { ToolDoctor.shared.check() }
                         .disabled(doctor.checking)
@@ -101,7 +101,7 @@ struct GeneralSettingsView: View {
 
     private var versionText: String {
         let version = updates.currentVersion
-        guard !version.isEmpty else { return "不明" }
+        guard !version.isEmpty else { return String(localized: "不明") }
         let build = updates.currentBuild
         return build.isEmpty ? "v\(version)" : "v\(version) (\(build))"
     }
@@ -130,7 +130,7 @@ struct GeneralSettingsView: View {
             HStack(spacing: 6) {
                 Image(systemName: tool.found ? "checkmark.circle.fill" : "xmark.circle.fill")
                     .foregroundStyle(tool.found ? .green : .red)
-                Text(tool.found ? (tool.version ?? "検出済み") : "見つかりません")
+                Text(tool.found ? (tool.version ?? String(localized: "検出済み")) : String(localized: "見つかりません"))
                     .foregroundStyle(tool.found ? .primary : .secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)

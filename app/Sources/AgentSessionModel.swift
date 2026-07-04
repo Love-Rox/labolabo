@@ -181,11 +181,11 @@ extension AgentStatus {
     var label: String {
         switch self {
         case .none: return "—"
-        case .starting: return "起動中"
-        case .running: return "実行中"
-        case .waitingForInput: return "入力待ち"
-        case .idle: return "待機"
-        case .ended: return "終了"
+        case .starting: return String(localized: "起動中")
+        case .running: return String(localized: "実行中")
+        case .waitingForInput: return String(localized: "入力待ち")
+        case .idle: return String(localized: "待機")
+        case .ended: return String(localized: "終了")
         }
     }
 }
