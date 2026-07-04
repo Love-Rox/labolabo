@@ -79,6 +79,9 @@ struct ContentView: View {
                     }
                 }
                 .listStyle(.sidebar)
+                // 選択ハイライトを既定の青ではなく選択中リポジトリの色へ寄せる。
+                // 未割り当てのときは nil（既定アクセント）。
+                .tint(selectedRepoTint)
                 // 先頭セクションの sticky 見出しが上部バー下へ潜って隠れるのを防ぐため、
                 // スクロール内容に上マージンを与える。併せて内容変化時も上を基準に保つ。
                 .contentMargins(.top, 8, for: .scrollContent)
@@ -190,6 +193,8 @@ struct ContentView: View {
     }
 
     /// セッション行の背景（リポジトリ色の淡いタイント）。色未設定は透明。
+    /// 選択ハイライト自体は List のシステム選択を使い、色は `.tint` で指定色に寄せる
+    /// （キーボード行移動を維持するため）。
     @ViewBuilder
     private func rowBackground(colorID: String?) -> some View {
         if let colorID {
@@ -200,6 +205,16 @@ struct ContentView: View {
         } else {
             Color.clear
         }
+    }
+
+    /// 選択中セッションが属するリポジトリの色（未割り当ては nil＝既定アクセント）。
+    /// サイドバーの選択ハイライトを指定色に寄せるための tint に使う。
+    private var selectedRepoTint: Color? {
+        guard let selection = store.selection,
+              let session = store.sessions.first(where: { $0.id == selection }),
+              let key = session.repoKey,
+              let colorID = store.colorID(forRepo: key) else { return nil }
+        return RepoPalette.color(for: colorID)
     }
 
     /// サイドバー上部のヘッダー（OS タイトルバーの代わり）。信号機を避ける左インセット付き。
@@ -434,6 +449,11 @@ struct SessionDetailView: View {
     /// このセッションのエージェント種別（起動ボタンの表示・コマンドに使う）。
     private var agentAdapter: AgentAdapter { AgentAdapters.find(id: session.adapterID) }
 
+    /// リポジトリに割り当てられた色（未割り当ては secondary）。ヘッダーの色タグに使う。
+    private var repoTagColor: Color {
+        RepoPalette.color(for: session.repoKey.flatMap { store.colorID(forRepo: $0) })
+    }
+
     /// 起動ボタンのツールチップ。アダプタ名・再開可否・状態検出方式を反映する。
     private var agentLaunchHelp: String {
         let name = agentAdapter.displayName
@@ -555,10 +575,33 @@ struct SessionDetailView: View {
                 .help("サイドバーを表示")
             }
 
-            Text(session.name)
+            // リポジトリ（org/repo）を、サイドバーと同じ色の塗り＋枠線タグで表示。
+            // 未解決時は session 名にフォールバック。
+            Text(session.repoName ?? session.name)
                 .font(.headline)
                 .lineLimit(1)
-                .help(session.worktreePath.path)
+                .truncationMode(.middle)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 3)
+                .background(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .fill(repoTagColor.opacity(0.18))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .strokeBorder(repoTagColor.opacity(0.6), lineWidth: 1)
+                )
+                .help(session.repoName.map { "\($0) — \(session.name)" } ?? session.worktreePath.path)
+
+            // worktree セッション等、session 名が repo フォルダ名と異なるときだけ併記。
+            if let repoName = session.repoName,
+               (repoName as NSString).lastPathComponent != session.name {
+                Text(session.name)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
 
             SessionStatusPill(
                 status: work.status,
