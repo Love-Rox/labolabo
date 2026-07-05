@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/Love-Rox/labolabo/compare/v0.4.0...v0.4.1) (2026-07-05)
+
+
+### バグ修正
+
+* ライトモードのアイコンのライムロゴにうっすらシャドウ（真後ろ・広め）を追加 ([#65](https://github.com/Love-Rox/labolabo/issues/65)) ([08eeef6](https://github.com/Love-Rox/labolabo/commit/08eeef646fc4473f78f1c864a05e605b754197f6))
+
 ## [0.4.0](https://github.com/Love-Rox/labolabo/compare/v0.3.2...v0.4.0) (2026-07-05)
 
 
