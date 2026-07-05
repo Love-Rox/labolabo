@@ -13,14 +13,35 @@ jobs:
   test:
     name: swift test
     runs-on: macos-15
-    # 万一テストがハングしても 6 時間ではなく短時間で fail させる保険（従来は ~1 分で緑）。
-    timeout-minutes: 12
+    # 健全な実行は ~2-3 分だが、GitHub の macOS ランナーで稀に swift test（ビルド/テスト）が
+    # 無限ハングする。各試行を 7 分で打ち切り最大 3 回リトライ、全体上限 25 分の保険を掛ける。
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - name: Show toolchain
         run: swift --version
-      - name: Run tests
-        run: swift test
+      - name: Run tests (retry on flaky runner hang)
+        run: |
+          set +e
+          for attempt in 1 2 3; do
+            echo "::group::swift test (attempt ${attempt}/3)"
+            swift test &
+            pid=$!
+            # ウォッチドッグ: 7 分でこの試行を強制終了（ハング検知）。
+            ( sleep 420; kill -9 "$pid" 2>/dev/null; pkill -9 xctest 2>/dev/null; pkill -9 swift-package 2>/dev/null ) &
+            watchdog=$!
+            wait "$pid"; rc=$?
+            kill "$watchdog" 2>/dev/null
+            echo "::endgroup::"
+            if [ "$rc" -eq 0 ]; then
+              echo "swift test passed on attempt ${attempt}"
+              exit 0
+            fi
+            echo "::warning::swift test attempt ${attempt} failed/hung (rc=${rc}); retrying"
+            pkill -9 xctest 2>/dev/null; pkill -9 swift-package 2>/dev/null
+          done
+          echo "::error::swift test failed after 3 attempts"
+          exit 1
 
   # アプリ層のビルドとテスト（エンジンの swift test では届かない SwiftUI/AppKit 層）。
   # XcodeGen で .xcodeproj を生成 → 一度ビルド → アプリ単体テスト（ブロッキング）→
