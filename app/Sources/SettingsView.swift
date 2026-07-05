@@ -24,6 +24,8 @@ struct GeneralSettingsView: View {
 
     private var iconMode: AppIconMode { AppIconMode(rawValue: iconModeRaw) ?? .auto }
 
+    @State private var showBugReport = false
+
     var body: some View {
         Form {
             Section {
@@ -95,8 +97,21 @@ struct GeneralSettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+
+            Section {
+                Button("バグを報告…") { showBugReport = true }
+            } header: {
+                Text("フィードバック")
+            } footer: {
+                Text("バグや要望を GitHub の Issue として送信します。上記の環境情報が自動で添付されます。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
         .formStyle(.grouped)
+        .sheet(isPresented: $showBugReport) {
+            BugReportSheet()
+        }
     }
 
     private var versionText: String {
