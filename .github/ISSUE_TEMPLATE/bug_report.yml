@@ -1,0 +1,76 @@
+name: バグ報告
+description: 不具合・クラッシュ・フリーズなどを報告する
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ご報告ありがとうございます。
+        アプリ内の **「🐞 バグを報告」**（サイドバー右上／設定 > フィードバック）から起票すると、
+        バージョン・macOS・ツール診断などの環境情報が自動で添付されます。
+  - type: textarea
+    id: summary
+    attributes:
+      label: 概要
+      description: どんな問題ですか？
+      placeholder: 例）ヘルプメニューを開くとアプリが固まる
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 再現手順
+      placeholder: |
+        1. アプリを起動する
+        2. メニューバーの「ヘルプ」を開く
+        3. …
+    validations:
+      required: false
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期待する動作
+      placeholder: 例）メニューが普通に開く
+    validations:
+      required: false
+  - type: textarea
+    id: actual
+    attributes:
+      label: 実際の動作
+      placeholder: 例）レインボーカーソルになって固まる
+    validations:
+      required: false
+  - type: input
+    id: app-version
+    attributes:
+      label: LaboLabo のバージョン
+      description: 設定 >「現在のバージョン」、または「LaboLabo について」で確認できます。
+      placeholder: "例: v0.3.2 (49)"
+    validations:
+      required: true
+  - type: input
+    id: macos-version
+    attributes:
+      label: macOS のバージョン
+      placeholder: "例: macOS 26.5.1"
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: 環境情報（任意）
+      description: 「🐞 バグを報告」の環境情報や、設定 > ツール診断の内容を貼り付けてください。
+      render: text
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: クラッシュログ・スタック（任意）
+      description: |
+        クラッシュは `~/Library/Logs/DiagnosticReports/LaboLabo-*.ips`、
+        フリーズは Terminal で `sample LaboLabo 5` を実行して取得できます。
+      render: text
+    validations:
+      required: false

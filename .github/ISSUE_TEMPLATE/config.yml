@@ -1,0 +1,7 @@
+# 空の Issue も許可する（アプリ内「🐞 バグを報告」が body をプリフィルした
+# issues/new?body=... リンクを使うため。false にするとそのリンクが弾かれる）。
+blank_issues_enabled: true
+contact_links:
+  - name: リリース / Releases
+    url: https://github.com/Love-Rox/labolabo/releases
+    about: 最新版の入手・変更履歴はこちら / Latest builds and changelog
