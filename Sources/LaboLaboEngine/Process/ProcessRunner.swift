@@ -10,8 +10,16 @@ final class DataBox: @unchecked Sendable {
     private var storage = Data()
 
     /// ハンドルを EOF まで読み、結果を格納する（バックグラウンドで 1 回だけ呼ぶ）。
+    ///
+    /// `readDataToEndOfFile()` ではなく `read(upToCount:)` ループで読むのは、
+    /// **別スレッドからハンドルを閉じて読みを中断できる**ようにするため。孫プロセスが
+    /// パイプの write 端を握って EOF が来ないとき、呼び出し側が read ハンドルを close すると
+    /// この read が throw して try? で握りつぶされ、ループが安全に抜ける（ハング回避）。
     func fill(from handle: FileHandle) {
-        let data = handle.readDataToEndOfFile()
+        var data = Data()
+        while let chunk = try? handle.read(upToCount: 1 << 16), !chunk.isEmpty {
+            data.append(chunk)
+        }
         lock.lock()
         storage = data
         lock.unlock()
@@ -80,16 +88,27 @@ public enum ProcessRunner {
             process.waitUntilExit()
             exited.leave()
         }
-        if exited.wait(timeout: .now() + timeout) == .timedOut {
+        let timedOut = exited.wait(timeout: .now() + timeout) == .timedOut
+        if timedOut {
             process.terminate()
             if exited.wait(timeout: .now() + 1) == .timedOut {
                 kill(process.processIdentifier, SIGKILL)
                 exited.wait()
             }
-            drain.wait() // パイプが閉じるので drain も完了する
-            return nil
         }
-        drain.wait()
+
+        // 子プロセスが終了しても、孫プロセスがパイプの write 端を握っていると
+        // read が EOF を受け取れず drain が永久に止まる（例: ログインシェルが profile で
+        // バックグラウンド常駐を起動するケース。CI で `swift test` がハングする原因だった）。
+        // 子の終了後に少し待っても drain が終わらなければ、read ハンドルを閉じて強制的に解く
+        // （読めた分だけを採用する）。
+        if drain.wait(timeout: .now() + 2) == .timedOut {
+            try? outPipe.fileHandleForReading.close()
+            try? errPipe.fileHandleForReading.close()
+            drain.wait()
+        }
+
+        if timedOut { return nil }
         return Output(
             status: process.terminationStatus,
             stdout: String(decoding: outBox.value, as: UTF8.self),

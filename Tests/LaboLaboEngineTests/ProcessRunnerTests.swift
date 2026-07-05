@@ -122,4 +122,27 @@ final class ProcessRunnerTests: XCTestCase {
         let missing = URL(fileURLWithPath: "/nonexistent/definitely/not/here-\(UUID().uuidString)")
         XCTAssertNil(ProcessRunner.runSync(executable: missing, arguments: []))
     }
+
+    // MARK: - 孫プロセスがパイプを握ってもハングしない（CI ハングの回帰テスト）
+
+    /// 子（sh）は即終了するが、孫（`sleep &`）が stdout を継承したまま生き残ると、
+    /// 素朴な `readDataToEndOfFile()` は EOF を受け取れず**永久にハング**する。
+    /// これは CI（ログインシェルが profile で常駐を起動する環境）で `swift test` が
+    /// 止まっていた原因。drain を有限時間で打ち切ることで、読めた分を返しつつ有限で戻る。
+    func testDoesNotHangWhenGrandchildKeepsPipeOpen() throws {
+        let start = Date()
+        let out = try XCTUnwrap(
+            ProcessRunner.runSync(
+                executable: sh,
+                // echo で stdout に書いた後、sleep をバックグラウンド起動して stdout を握らせる。
+                arguments: ["-c", "echo hi; sleep 10 &"],
+                timeout: 20
+            )
+        )
+        let elapsed = Date().timeIntervalSince(start)
+        XCTAssertEqual(out.status, 0)
+        XCTAssertTrue(out.stdout.contains("hi"), "子の出力は取得できるべき")
+        // 孫の sleep(10) を待たずに、drain 強制解除（~2s）で有限に戻ること。
+        XCTAssertLessThan(elapsed, 6, "孫がパイプを握っていても有限時間で返るべき")
+    }
 }
