@@ -1,0 +1,74 @@
+name: Bug Report
+description: Report a bug, crash, or freeze
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report!
+        Filing from the app's **"🐞 Report a Bug"** (sidebar top-right / Settings > Feedback)
+        automatically attaches environment info (version, macOS, tool diagnostics).
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What went wrong?
+      placeholder: e.g. The app freezes when I open the Help menu
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Launch the app
+        2. Open the "Help" menu
+        3. …
+    validations:
+      required: false
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: false
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: false
+  - type: input
+    id: app-version
+    attributes:
+      label: LaboLabo version
+      description: See Settings > "Current version" or "About LaboLabo".
+      placeholder: "e.g. v0.3.2 (49)"
+    validations:
+      required: true
+  - type: input
+    id: macos-version
+    attributes:
+      label: macOS version
+      placeholder: "e.g. macOS 26.5.1"
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment (optional)
+      description: Paste the environment info from "🐞 Report a Bug" or Settings > Tool diagnostics.
+      render: text
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Crash log / stack (optional)
+      description: |
+        Crashes: ~/Library/Logs/DiagnosticReports/LaboLabo-*.ips
+        Freezes: run `sample LaboLabo 5` in Terminal.
+      render: text
+    validations:
+      required: false
