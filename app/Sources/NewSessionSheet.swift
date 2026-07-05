@@ -115,7 +115,7 @@ struct NewSessionSheet: View {
     private var repoLabel: String {
         if let inspect { return inspect.name }
         if let repoURL { return repoURL.lastPathComponent }
-        return "リポジトリを選択してください"
+        return String(localized: "リポジトリを選択してください")
     }
 
     /// ブランチ名の末尾から既定セッション名。
@@ -132,7 +132,7 @@ struct NewSessionSheet: View {
             let info = await store.inspectRepo(at: url)
             loading = false
             guard let info else {
-                errorText = "git リポジトリを解決できませんでした"
+                errorText = String(localized: "git リポジトリを解決できませんでした")
                 return
             }
             inspect = info

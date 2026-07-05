@@ -95,7 +95,7 @@ final class SessionStore {
     ) async throws -> String {
         guard let session = sessions.first(where: { $0.id == id }) else {
             throw NSError(domain: "SessionStore", code: 1, userInfo: [
-                NSLocalizedDescriptionKey: "セッションが見つかりません（閉じられた可能性があります）。",
+                NSLocalizedDescriptionKey: String(localized: "セッションが見つかりません（閉じられた可能性があります）。"),
             ])
         }
         try await git.push(worktree: session.worktreePath)

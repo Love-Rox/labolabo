@@ -59,17 +59,17 @@ struct ChangedFilesPane: View {
     private var modeSelector: some View {
         ViewThatFits(in: .horizontal) {
             Picker("", selection: listModeBinding) {
-                ForEach(FileListMode.allCases) { Text($0.rawValue).tag($0) }
+                ForEach(FileListMode.allCases) { Text($0.label).tag($0) }
             }
             .pickerStyle(.segmented)
             .fixedSize()
 
             Menu {
                 Picker("表示", selection: listModeBinding) {
-                    ForEach(FileListMode.allCases) { Text($0.rawValue).tag($0) }
+                    ForEach(FileListMode.allCases) { Text($0.label).tag($0) }
                 }
             } label: {
-                Label(model.listMode.rawValue, systemImage: "line.3.horizontal.decrease")
+                Label(model.listMode.label, systemImage: "line.3.horizontal.decrease")
             }
             .menuStyle(.borderlessButton)
             .fixedSize()
@@ -630,7 +630,7 @@ struct WholeFileView: View {
 
     private var lines: [String] {
         guard let text else { return [] }
-        if text.isEmpty { return ["(空ファイル)"] }
+        if text.isEmpty { return [String(localized: "(空ファイル)")] }
         return text.components(separatedBy: "\n")
     }
 

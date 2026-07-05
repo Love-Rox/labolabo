@@ -187,9 +187,9 @@ struct ContentView: View {
     private func removalMessage(_ req: RemovalRequest) -> String {
         let path = req.session.worktreePath.path
         if req.dirty {
-            return "「\(req.session.name)」には未コミット/未追跡の変更があります。強制削除すると変更は失われます。\n\n\(path)"
+            return String(localized: "「\(req.session.name)」には未コミット/未追跡の変更があります。強制削除すると変更は失われます。\n\n\(path)")
         }
-        return "「\(req.session.name)」の worktree を削除します。\n\n\(path)"
+        return String(localized: "「\(req.session.name)」の worktree を削除します。\n\n\(path)")
     }
 
     /// セッション行の背景（リポジトリ色の淡いタイント）。色未設定は透明。
@@ -377,7 +377,7 @@ struct PRBadge: View {
     }
 
     private var helpText: String {
-        var text = "PR #\(pr.number)（\(pr.state.label)）\(pr.title)"
+        var text = String(localized: "PR #\(pr.number)（\(pr.state.label)）\(pr.title)")
         if let issue = pr.issue { text += "\nIssue #\(issue)" }
         return text
     }
@@ -458,14 +458,14 @@ struct SessionDetailView: View {
     private var agentLaunchHelp: String {
         let name = agentAdapter.displayName
         if agentAdapter.id == AgentAdapters.claude.id, !doctor.claude.found {
-            return "\(name) を起動（claude を検出できませんでした。端末の PATH で解決を試みます／設定 > 一般 > ツール診断）"
+            return String(localized: "\(name) を起動（claude を検出できませんでした。端末の PATH で解決を試みます／設定 > 一般 > ツール診断）")
         }
         if session.agent?.canResume ?? false {
-            return "\(name) を再開（前回のセッションを --resume）"
+            return String(localized: "\(name) を再開（前回のセッションを --resume）")
         }
         return agentAdapter.capabilities.statusReporting.providesLiveStatus
-            ? "\(name) を起動（状態検出 hooks 付き）"
-            : "\(name) を起動（状態検出なし・起動/終了のみ）"
+            ? String(localized: "\(name) を起動（状態検出 hooks 付き）")
+            : String(localized: "\(name) を起動（状態検出なし・起動/終了のみ）")
     }
 
     /// 同一リポジトリの別セッションと同じファイルを編集中のとき警告する帯。
@@ -491,7 +491,7 @@ struct SessionDetailView: View {
             .padding(.vertical, 6)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(Color.orange.opacity(0.12))
-            .help(conflicts.map { "\($0.path) — 他: \($0.others.joined(separator: ", "))" }
+            .help(conflicts.map { String(localized: "\($0.path) — 他: \($0.others.joined(separator: ", "))") }
                 .joined(separator: "\n"))
             Divider()
         }
@@ -630,7 +630,7 @@ struct SessionDetailView: View {
             .help(agentLaunchHelp)
 
             Button {
-                tiling.addPane(PaneItem(kind: .terminal, title: "端末"))
+                tiling.addPane(PaneItem(kind: .terminal, title: String(localized: "端末")))
             } label: {
                 Image(systemName: "plus.rectangle")
             }
@@ -638,7 +638,7 @@ struct SessionDetailView: View {
             .help("端末を追加")
 
             Button {
-                tiling.addPaneIfAbsent(kind: .files, title: "変更ファイル")
+                tiling.addPaneIfAbsent(kind: .files, title: String(localized: "変更ファイル"))
             } label: {
                 Image(systemName: "list.bullet.rectangle")
             }
@@ -656,7 +656,7 @@ struct SessionDetailView: View {
             .help("Diff を追加")
 
             Button {
-                tiling.addPaneIfAbsent(kind: .commits, title: "履歴")
+                tiling.addPaneIfAbsent(kind: .commits, title: String(localized: "履歴"))
             } label: {
                 Image(systemName: "point.3.connected.trianglepath.dotted")
             }
@@ -710,9 +710,9 @@ struct SessionDetailView: View {
             .buttonStyle(CircleIconButtonStyle())
             .disabled(session.branch == nil || !doctor.gh.found)
             .help(!doctor.gh.found
-                ? "gh CLI が見つかりません（設定 > 一般 > ツール診断を参照）"
-                : session.pullRequest.map { "PR #\($0.number) をブラウザで開く" }
-                    ?? "このブランチから PR を作成…")
+                ? String(localized: "gh CLI が見つかりません（設定 > 一般 > ツール診断を参照）")
+                : session.pullRequest.map { String(localized: "PR #\($0.number) をブラウザで開く") }
+                    ?? String(localized: "このブランチから PR を作成…"))
 
             if let usage = session.agent?.usage, !usage.isEmpty {
                 Button {

@@ -25,9 +25,9 @@ enum AgentNotifier {
     static func notifyWaiting(sessionName: String, branch: String?) {
         guard isEnabled else { return }
         let content = UNMutableNotificationContent()
-        content.title = "\(sessionName) が入力待ち"
+        content.title = String(localized: "\(sessionName) が入力待ち")
         if let branch, !branch.isEmpty { content.subtitle = branch }
-        content.body = "エージェントが入力・許可を待っています。"
+        content.body = String(localized: "エージェントが入力・許可を待っています。")
         content.sound = .default
         let request = UNNotificationRequest(
             identifier: UUID().uuidString, content: content, trigger: nil
@@ -39,8 +39,8 @@ enum AgentNotifier {
     /// この enum に集約する（UpdateChecker からの直投函を避け、所有権を一本化）。
     static func postUpdateAvailable(version: String) {
         let content = UNMutableNotificationContent()
-        content.title = "LaboLabo の新しいバージョン"
-        content.body = "v\(version) が利用可能です（設定 > 一般 から確認）。"
+        content.title = String(localized: "LaboLabo の新しいバージョン")
+        content.body = String(localized: "v\(version) が利用可能です（設定 > 一般 から確認）。")
         content.sound = .default
         let request = UNNotificationRequest(
             identifier: "labolabo.update.\(version)", content: content, trigger: nil

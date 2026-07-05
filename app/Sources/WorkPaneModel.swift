@@ -14,6 +14,16 @@ enum FileListMode: String, CaseIterable, Identifiable {
     case fullTree = "全体"       // worktree 全体のツリー（変更をマーク）
     case recent = "更新順"       // 更新時刻の新しい順（フラット）
     var id: String { rawValue }
+
+    // rawValue は enum の生値（コンパイル時定数）でありローカライズできないため、
+    // 表示用のラベルは String Catalog 経由で解決する。
+    var label: String {
+        switch self {
+        case .changedTree: return String(localized: "変更")
+        case .fullTree: return String(localized: "全体")
+        case .recent: return String(localized: "更新順")
+        }
+    }
 }
 
 /// 作業ディレクトリ配下の 1 リポジトリ。org ディレクトリでは複数になる。
