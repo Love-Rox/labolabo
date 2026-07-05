@@ -1,0 +1,26 @@
+name: Feature Request
+description: Suggest a new feature or improvement
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / background
+      description: What are you trying to do, and what's the pain point?
+      placeholder: e.g. I want to review diffs across multiple repositories at once
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: How would you like it to work (UI ideas, behavior)?
+    validations:
+      required: false
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives / workarounds (optional)
+    validations:
+      required: false
