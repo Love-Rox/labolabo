@@ -97,8 +97,15 @@ final class AgentSessionModel {
     private func refreshUsage(path: String) {
         Task.detached(priority: .utility) { [weak self] in
             guard let parsed = TranscriptUsage.read(path: path) else { return }
-            await MainActor.run { self?.usage = parsed }
+            await self?.applyUsage(parsed)
         }
+    }
+
+    /// 集計した usage をメインで反映する。@MainActor 隔離のセッターにすることで、
+    /// detached タスクから `self` をクロージャへ送らずに済ませる（Xcode 16 SDK の
+    /// strict concurrency では `MainActor.run { self?... }` が「sending self」で拒否される）。
+    private func applyUsage(_ value: AgentUsage) {
+        usage = value
     }
 
     func stop() {

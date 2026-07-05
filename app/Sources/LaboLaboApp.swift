@@ -13,9 +13,28 @@ enum AppEntry {
             HookForwarder.forward(socketPath: args[index + 1])
             return
         }
-        // UI 構築前に、メニューを開くと落ちる macOS 26 の NSSplitView 再帰バグを塞ぐ。
+        // ホスト型ユニットテスト（LaboLaboAppTests）は本アプリを起動して
+        // その中にテストバンドルを注入する。実 UI（libghostty/Metal 端末サーフェス）は
+        // ヘッドレス CI では起動時にクラッシュするため、テストホスト時は最小シーンで立ち上げ、
+        // アプリのシンボル（@testable import 対象）だけを利用できるようにする。
+        if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil {
+            TestHostApp.main()
+            return
+        }
+        // UI 構築前に、メニューを開くと落ちる macOS 26 の NSSplitView バグを塞ぐ。
         SplitViewRecursionFix.install()
         LaboLaboApp.main()
+    }
+}
+
+/// ホスト型ユニットテスト専用の最小アプリ。重い UI を立てないことで、ヘッドレス CI でも
+/// テストホストが安定起動できる。UI スモーク（XCUITest）は別プロセスで実アプリを起動するため
+/// この分岐には入らない。
+struct TestHostApp: App {
+    var body: some Scene {
+        WindowGroup {
+            Color.clear.frame(width: 1, height: 1)
+        }
     }
 }
 
