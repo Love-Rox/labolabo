@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.4.0](https://github.com/Love-Rox/labolabo/compare/v0.3.2...v0.4.0) (2026-07-05)
+
+
+### 新機能
+
+* アップデート確認を設定に追加（GitHub Releases・無料配布路線の第一歩） ([#50](https://github.com/Love-Rox/labolabo/issues/50)) ([12028bd](https://github.com/Love-Rox/labolabo/commit/12028bd72d2ed032102e5266793d3a677d838f23))
+* バグ報告画面（環境情報つき GitHub Issue 作成）を追加 ([#57](https://github.com/Love-Rox/labolabo/issues/57)) ([656782a](https://github.com/Love-Rox/labolabo/commit/656782ac8499f1a99832929c05498ccf59451dc2))
+* メイン上部に org 付きリポジトリ名＋色表示／サイドバー選択を指定色に ([#51](https://github.com/Love-Rox/labolabo/issues/51)) ([1b92644](https://github.com/Love-Rox/labolabo/commit/1b92644d9f8908d1bcc0addff125e6d7385d4a43))
+* 平文 String の日本語 UI 文言を String(localized:) でローカライズ対応 ([#54](https://github.com/Love-Rox/labolabo/issues/54)) ([d5d5eb7](https://github.com/Love-Rox/labolabo/commit/d5d5eb7c4d22c2200730db37f40a1636f33fe74a))
+* 日英ローカライズ（String Catalog・SwiftUI リテラル 110 件を英語化） ([#53](https://github.com/Love-Rox/labolabo/issues/53)) ([aa1fcd0](https://github.com/Love-Rox/labolabo/commit/aa1fcd0ebbad8f41c512d412f3a4ed7f74129dce))
+
+
+### バグ修正
+
+* About/設定に実ビルド番号を表示（CFBundleVersion に git コミット数を注入） ([#56](https://github.com/Love-Rox/labolabo/issues/56)) ([2501464](https://github.com/Love-Rox/labolabo/commit/25014643d833db103c7b06c8d9a1f15137c4f7b3))
+* メニューを開くとクラッシュする（toggleSidebar: の無限再帰）を解消 ([#52](https://github.com/Love-Rox/labolabo/issues/52)) ([f38f6b4](https://github.com/Love-Rox/labolabo/commit/f38f6b42b6a8a2c37c7a6ccdc2942ce418ba5111))
+* メニューを開くと落ちる/固まる macOS 26 バグを根治＋メニューバー整備 ([#58](https://github.com/Love-Rox/labolabo/issues/58)) ([1b7e89d](https://github.com/Love-Rox/labolabo/commit/1b7e89d1ba975fa23df76b1f20d3164018a32c4a))
+
 ## [0.3.2](https://github.com/Love-Rox/labolabo/compare/v0.3.1...v0.3.2) (2026-07-04)
 
 
