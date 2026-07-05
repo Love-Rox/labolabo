@@ -1,0 +1,90 @@
+name: Release build
+
+# release-please がリリースを publish（＝タグ作成）したら、配布用の .app をビルドして
+# そのリリースにアセットとして添付する。署名は**アドホック**（無料・Developer ID なし）。
+# 手動実行（workflow_dispatch）で既存タグに対して後追いビルドも可能。
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "ビルド対象のリリースタグ（例: v0.4.1）"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build & attach .app
+    runs-on: macos-15
+    env:
+      # 未設定なら Cask 自動更新ステップをスキップする（step の if で参照するため job レベルに置く）。
+      TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+    steps:
+      - name: Resolve tag
+        id: tag
+        run: echo "tag=${{ github.event.release.tag_name || github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate --spec app/project.yml
+
+      - name: Build (Release, universal)
+        run: |
+          xcodebuild build \
+            -project app/LaboLabo.xcodeproj \
+            -scheme LaboLabo \
+            -configuration Release \
+            -destination 'generic/platform=macOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO
+
+      - name: Ad-hoc sign, zip, upload to release
+        id: package
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.tag.outputs.tag }}"
+          VERSION="${TAG#v}"
+          APP="build/Build/Products/Release/LaboLabo.app"
+
+          # 配布用に全体をアドホック署名（同一 null 署名なので library validation も通る）。
+          codesign --force --deep --sign - "$APP"
+          codesign --verify --strict "$APP"
+
+          ZIP="LaboLabo-${VERSION}.zip"
+          ditto -c -k --keepParent "$APP" "$ZIP"
+          SHA=$(shasum -a 256 "$ZIP" | awk '{print $1}')
+
+          gh release upload "$TAG" "$ZIP" --clobber
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
+          echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
+          echo "::notice title=Cask::labolabo $VERSION sha256=$SHA"
+
+      # Homebrew tap の Cask を version/sha256 で更新（cross-repo なので専用 PAT が要る）。
+      # HOMEBREW_TAP_TOKEN（Love-Rox/homebrew-tap へ Contents: write の fine-grained PAT）が
+      # 未設定なら、上の ::notice に出た sha256 で手動更新すればよい（初回など）。
+      - name: Bump Homebrew cask
+        if: ${{ env.TAP_TOKEN != '' }}
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.package.outputs.version }}"
+          SHA="${{ steps.package.outputs.sha256 }}"
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/Love-Rox/homebrew-tap.git" tap
+          cd tap
+          sed -i '' -E "s/  version \"[^\"]*\"/  version \"${VERSION}\"/" Casks/labolabo.rb
+          sed -i '' -E "s/  sha256 \"[^\"]*\"/  sha256 \"${SHA}\"/" Casks/labolabo.rb
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "labolabo ${VERSION}"
+          git push
