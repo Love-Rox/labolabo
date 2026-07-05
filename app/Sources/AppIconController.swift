@@ -14,9 +14,9 @@ enum AppIconMode: String, CaseIterable, Identifiable {
 
     var label: String {
         switch self {
-        case .auto: return "自動（外観に追従）"
-        case .dark: return "ダーク"
-        case .light: return "ライト"
+        case .auto: return String(localized: "自動（外観に追従）")
+        case .dark: return String(localized: "ダーク")
+        case .light: return String(localized: "ライト")
         }
     }
 

@@ -12,6 +12,6 @@ extension Error {
             if !stderr.isEmpty { return stderr }
         }
         let description = localizedDescription
-        return description.isEmpty ? "不明なエラーが発生しました。" : description
+        return description.isEmpty ? String(localized: "不明なエラーが発生しました。") : description
     }
 }

@@ -20,10 +20,10 @@ enum PaneKind: String {
     /// 復元時にタイトルが欠けていた場合の既定タイトル。
     var defaultTitle: String {
         switch self {
-        case .terminal: return "端末"
-        case .files: return "変更ファイル"
+        case .terminal: return String(localized: "端末")
+        case .files: return String(localized: "変更ファイル")
         case .diff: return "Diff"
-        case .commits: return "履歴"
+        case .commits: return String(localized: "履歴")
         }
     }
 }
@@ -132,9 +132,9 @@ final class PaneTilingModel {
 
     static func defaultLayout() -> PaneTilingModel {
         // Terminal on top; bottom row = commit graph | changed-files | diff (1:1:2).
-        let terminal = TileNode(pane: PaneItem(kind: .terminal, title: "端末"))
-        let commits = TileNode(pane: PaneItem(kind: .commits, title: "履歴"))
-        let files = TileNode(pane: PaneItem(kind: .files, title: "変更ファイル"))
+        let terminal = TileNode(pane: PaneItem(kind: .terminal, title: String(localized: "端末")))
+        let commits = TileNode(pane: PaneItem(kind: .commits, title: String(localized: "履歴")))
+        let files = TileNode(pane: PaneItem(kind: .files, title: String(localized: "変更ファイル")))
         let diff = TileNode(pane: PaneItem(kind: .diff, title: "Diff"))
         // files : diff = 1 : 2 → files takes 1/3 of (files+diff)
         let filesAndDiff = TileNode(orientation: .horizontal, ratio: 1.0 / 3.0, children: [files, diff])
@@ -434,7 +434,7 @@ final class TilingCoordinator: NSObject {
     // currently handling the drag / button tap (self) and crash AppKit.
 
     private func split(_ paneID: UUID, _ orientation: NSUserInterfaceLayoutOrientation) {
-        model.split(paneID: paneID, orientation: orientation, newPane: PaneItem(kind: .terminal, title: "端末"))
+        model.split(paneID: paneID, orientation: orientation, newPane: PaneItem(kind: .terminal, title: String(localized: "端末")))
     }
 
     private func close(_ paneID: UUID) {
@@ -479,7 +479,7 @@ final class TerminalLeafDelegate: NSObject, TerminalSurfaceTitleDelegate, Termin
     }
 
     func terminalDidChangeTitle(_ title: String) {
-        pane?.title = title.isEmpty ? "端末" : title
+        pane?.title = title.isEmpty ? String(localized: "端末") : title
     }
 
     func terminalDidClose(processAlive _: Bool) {

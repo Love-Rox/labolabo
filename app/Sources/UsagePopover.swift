@@ -25,12 +25,12 @@ struct UsagePopover: View {
             Divider()
 
             VStack(alignment: .leading, spacing: 4) {
-                tokenRow("入力", usage.inputTokens)
-                tokenRow("出力", usage.outputTokens)
-                tokenRow("キャッシュ書込", usage.cacheCreationTokens)
-                tokenRow("キャッシュ読取", usage.cacheReadTokens)
+                tokenRow(String(localized: "入力"), usage.inputTokens)
+                tokenRow(String(localized: "出力"), usage.outputTokens)
+                tokenRow(String(localized: "キャッシュ書込"), usage.cacheCreationTokens)
+                tokenRow(String(localized: "キャッシュ読取"), usage.cacheReadTokens)
                 Divider()
-                tokenRow("合計トークン", usage.totalTokens, bold: true)
+                tokenRow(String(localized: "合計トークン"), usage.totalTokens, bold: true)
             }
             .font(.caption.monospacedDigit())
 
@@ -60,7 +60,7 @@ struct UsagePopover: View {
     }
 
     private var costText: String {
-        guard let cost = usage.estimatedCostUSD else { return "価格未知（トークンのみ）" }
+        guard let cost = usage.estimatedCostUSD else { return String(localized: "価格未知（トークンのみ）") }
         return String(format: "$%.4f", cost)
     }
 }
