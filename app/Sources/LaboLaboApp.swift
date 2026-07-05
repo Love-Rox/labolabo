@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import UserNotifications
 
 /// 実行エントリ。`--hook <socket>` 付きで起動された場合は GUI を立ち上げず、
@@ -23,6 +24,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private var quitMonitor: Any?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // 単一ウインドウのユーティリティなのでネイティブのウインドウタブは使わない。
+        // これで「表示 > タブバーを表示」「ウインドウ > 前/次のタブ・ウインドウを結合」等の
+        // 無関係なメニュー項目が丸ごと消える。
+        NSWindow.allowsAutomaticWindowTabbing = false
         AppIconController.shared.start()
         AgentNotifier.configure(delegate: self)
         ToolDoctor.shared.check() // git/gh/claude の存在検査（依存機能のゲートに使う）
@@ -73,11 +78,16 @@ struct LaboLaboApp: App {
         // サイドバー上部に "LaboLabo"＋開くボタン、詳細上部に自前の操作バーを置く。
         .windowStyle(.hiddenTitleBar)
         .commands {
-            // 「サイドバーを表示/隠す」メニュー項目（toggleSidebar:）を撤去する。
-            // メニューを開くと AppKit がこの項目を検証する際、NavigationSplitView の
-            // サイドバー NSSplitView の respondsToSelector: が無限再帰してクラッシュする
-            // macOS の不具合があるため。サイドバーの開閉は自前ボタンで行っているので不要。
+            // 「サイドバーを表示/隠す」項目は自前ボタンで代替済みなので撤去（[[SplitViewRecursionFix]]
+            // でメニュー検証自体は無害化したが、重複するので不要）。
             CommandGroup(replacing: .sidebar) {}
+            // 既定の「LaboLabo ヘルプ」はヘルプブックが無く無意味なので、実用的な導線に差し替える。
+            CommandGroup(replacing: .help) {
+                Button("LaboLabo を GitHub で開く") { NSWorkspace.shared.open(GitHubRepo.homeURL) }
+                Button("リリースノート") { NSWorkspace.shared.open(GitHubRepo.releasesPage) }
+                Divider()
+                Button("問題を報告…") { NSWorkspace.shared.open(GitHubRepo.newIssuePage) }
+            }
         }
 
         // 設定画面（⌘,）。アプリアイコンの表示モードなど。

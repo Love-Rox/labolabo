@@ -1826,6 +1826,39 @@
           }
         }
       }
+    },
+    "LaboLabo を GitHub で開く": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open LaboLabo on GitHub"
+          }
+        }
+      }
+    },
+    "リリースノート": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Release Notes"
+          }
+        }
+      }
+    },
+    "問題を報告…": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Report an Issue…"
+          }
+        }
+      }
     }
   },
   "version": "1.0"

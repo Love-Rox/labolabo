@@ -1,64 +1,53 @@
 import AppKit
-import ObjectiveC.runtime
 
-/// macOS 26 (Tahoe) の AppKit 不具合対策 —— メニューを開くとクラッシュする問題。
+/// macOS 26 (Tahoe) の AppKit 不具合対策 —— メニューを開くとクラッシュ/フリーズする問題。
 ///
-/// メニューを開くと AppKit は各項目の有効/無効を検証するため responder chain を辿る
-/// (`-[NSApplication targetForAction:to:from:]` →
-///  `_objectFromResponderChainWhichRespondsToAction`)。その途中で NavigationSplitView の
-/// サイドバー用 `NSSplitView` に `respondsToSelector:` を送るが、macOS 26.5 の
-/// `-[NSSplitView(NSSplitViewSidebar) respondsToSelector:]` は弱参照経由で自分自身へ
-/// `respondsToSelector:` を転送し、無限再帰してスタックを溢れさせクラッシュする
-/// （Help など任意のメニューを開くと落ちる。EXC_BAD_ACCESS / stack guard）。
+/// メニューを開くと AppKit は各項目の有効/無効を自動検証する（`_sendMenuEnableItems`）。
+/// その過程で、responder chain 上の NavigationSplitView サイドバー `NSSplitView` の
+/// `NSSplitViewSidebar` カテゴリ（`respondsToSelector:` / `validateUserInterfaceItem:`）が
+/// 弱参照経由で自己参照し、**無限再帰（EXC_BAD_ACCESS でクラッシュ）**または
+/// **長大ループ（ビーチボールでフリーズ）**になる。項目種別に依らないので
+/// `CommandGroup(replacing: .sidebar)`（#52）では防げず、`respondsToSelector:` だけを
+/// swizzle しても `validateUserInterfaceItem:` 側でループするだけ（＝クラッシュがハングに化ける）。
 ///
-/// 対策として `-[NSSplitView respondsToSelector:]` を swizzle し、**同一オブジェクトへの
-/// 再入（循環）を検出したら本来の（バグった）実装を再帰させず、クラスレベルの素の応答可否**を
-/// 返して循環を断ち切る。非循環時は元実装をそのまま呼ぶので通常の挙動は変わらない。
-/// `class_respondsToSelector` は `respondsToSelector:` メッセージを介さずメソッドリストを
-/// 直接見るため、ここから再帰は起きない。
+/// 対策は**メニュー項目の自動検証そのものを無効化**すること（`NSMenu.autoenablesItems = false`）。
+/// これで項目検証の responder chain 走査が走らなくなり、バグった経路に入らない。代償として
+/// 一部の標準項目（Undo/Cut など）が状況に依らず有効表示になるが、ファーストレスポンダが
+/// 処理しなければ押しても無害。本アプリはカスタムメニューがほぼ無いので影響は軽微。
 ///
-/// 注: `CommandGroup(replacing: .sidebar) {}`（#52）はサイドバー開閉の項目を消すだけで、
-/// 再帰は他のメニュー項目の検証でも起きるため、この swizzle が本質的な修正。
+/// SwiftUI がメニューを組み直しても効くよう、起動後に一度適用し、以降は**メニュー追跡が
+/// 始まるたび**（`NSMenuDidBeginTracking`／個別メニューが開く前）にメインメニュー全体へ再適用する。
 enum SplitViewRecursionFix {
-    /// スレッドごとに「今 respondsToSelector 実行中の NSSplitView」を記録して再入を検出する。
-    private final class ReentryGuard { var ids = Set<UInt>() }
-    private static let tlsKey = "labolabo.splitview.respondsToSelector.guard"
-    // 起動時に main スレッドで一度だけ設定するので unsafe で問題ない。
     nonisolated(unsafe) private static var installed = false
 
-    /// アプリの UI 構築前に一度だけ呼ぶ（`AppEntry.main()` で実行）。
+    /// `AppEntry.main()` から UI 構築前に一度だけ呼ぶ（NSApp 未生成のうちに監視だけ仕込む）。
     static func install() {
         guard !installed else { return }
         installed = true
 
-        let selector = #selector(NSObject.responds(to:))
-        guard let method = class_getInstanceMethod(NSSplitView.self, selector) else { return }
-
-        typealias OrigFn = @convention(c) (AnyObject, Selector, Selector?) -> ObjCBool
-        let original = unsafeBitCast(method_getImplementation(method), to: OrigFn.self)
-
-        let block: @convention(block) (AnyObject, Selector?) -> ObjCBool = { object, querySelector in
-            let dict = Thread.current.threadDictionary
-            let guardBox: ReentryGuard
-            if let existing = dict[tlsKey] as? ReentryGuard {
-                guardBox = existing
-            } else {
-                guardBox = ReentryGuard()
-                dict[tlsKey] = guardBox
-            }
-
-            let id = UInt(bitPattern: Unmanaged.passUnretained(object).toOpaque())
-            if guardBox.ids.contains(id) {
-                // 再入（循環）検出: 元実装を再帰させず、素のクラス応答可否で断ち切る。
-                guard let s = querySelector else { return false }
-                return ObjCBool(class_respondsToSelector(object_getClass(object), s))
-            }
-
-            guardBox.ids.insert(id)
-            defer { guardBox.ids.remove(id) }
-            return original(object, selector, querySelector)
+        // メニュー追跡が始まるたびに、個別メニューの検証が走る前へ間に合うよう全体へ再適用。
+        NotificationCenter.default.addObserver(
+            forName: NSMenu.didBeginTrackingNotification, object: nil, queue: .main
+        ) { _ in
+            MainActor.assumeIsolated { applyToMainMenu() }
         }
+        // SwiftUI がメインメニューを構築した後に初回適用（起動直後は mainMenu が nil）。
+        DispatchQueue.main.async {
+            MainActor.assumeIsolated { applyToMainMenu() }
+        }
+    }
 
-        method_setImplementation(method, imp_implementationWithBlock(block))
+    @MainActor
+    private static func applyToMainMenu() {
+        guard let main = NSApp.mainMenu else { return }
+        disableAutoenable(main)
+    }
+
+    @MainActor
+    private static func disableAutoenable(_ menu: NSMenu) {
+        menu.autoenablesItems = false
+        for item in menu.items {
+            if let submenu = item.submenu { disableAutoenable(submenu) }
+        }
     }
 }
