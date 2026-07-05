@@ -1859,6 +1859,138 @@
           }
         }
       }
+    },
+    "バグを報告": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Report a Bug"
+          }
+        }
+      }
+    },
+    "バグを報告…": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Report a Bug…"
+          }
+        }
+      }
+    },
+    "GitHub の Issue としてブラウザで開きます。サーバーには送信されません。": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Opens as a prefilled GitHub Issue in your browser. Nothing is sent to any server."
+          }
+        }
+      }
+    },
+    "どんな問題ですか？（再現手順・期待する動作など）": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "What went wrong? (steps to reproduce, expected behavior, etc.)"
+          }
+        }
+      }
+    },
+    "アプリ": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "App"
+          }
+        }
+      }
+    },
+    "環境情報": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Environment"
+          }
+        }
+      }
+    },
+    "上記は本文に自動で添付されます。GitHub 上で送信前に確認・編集できます。": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This is attached to the report automatically. You can review and edit it on GitHub before submitting."
+          }
+        }
+      }
+    },
+    "内容をコピー": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Copy Contents"
+          }
+        }
+      }
+    },
+    "コピーしました": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Copied"
+          }
+        }
+      }
+    },
+    "GitHub で Issue を作成": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Create Issue on GitHub"
+          }
+        }
+      }
+    },
+    "フィードバック": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Feedback"
+          }
+        }
+      }
+    },
+    "バグや要望を GitHub の Issue として送信します。上記の環境情報が自動で添付されます。": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Send bugs or requests as a GitHub Issue. The environment info above is attached automatically."
+          }
+        }
+      }
     }
   },
   "version": "1.0"

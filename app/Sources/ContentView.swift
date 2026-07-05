@@ -27,6 +27,7 @@ struct ContentView: View {
     @State private var showOrgImporter = false
     @State private var orgFolder: IdentifiableURL?
     @State private var showChangelog = false
+    @State private var showBugReport = false
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var removalTarget: RemovalRequest?
     @State private var removalError: String?
@@ -232,6 +233,13 @@ struct ContentView: View {
             }
             .buttonStyle(.borderless)
             .help("変更履歴を表示")
+            Button {
+                showBugReport = true
+            } label: {
+                Image(systemName: "ladybug")
+            }
+            .buttonStyle(.borderless)
+            .help("バグを報告")
             Menu {
                 Button("新規セッション（worktree を作成）…") { showNewSession = true }
                 Button("既存のフォルダを開く…") { showImporter = true }
@@ -260,6 +268,9 @@ struct ContentView: View {
         .background(.bar)
         .sheet(isPresented: $showChangelog) {
             ChangelogView()
+        }
+        .sheet(isPresented: $showBugReport) {
+            BugReportSheet()
         }
     }
 }
