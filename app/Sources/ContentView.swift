@@ -23,8 +23,8 @@ enum LayoutMetrics {
 struct ContentView: View {
     @State private var store = SessionStore()
     @State private var showImporter = false
+    @State private var importerTarget: FolderImporterTarget = .repository
     @State private var showNewSession = false
-    @State private var showOrgImporter = false
     @State private var orgFolder: IdentifiableURL?
     @State private var showChangelog = false
     @State private var showBugReport = false
@@ -37,6 +37,14 @@ struct ContentView: View {
         let session: RepoSession
         let dirty: Bool
         var id: RepoSession.ID { session.id }
+    }
+
+    /// フォルダ選択パネルの用途。1 つの `.fileImporter` を用途で分岐させるための識別子。
+    private enum FolderImporterTarget {
+        /// 既存フォルダを開いてリポジトリとして登録する。
+        case repository
+        /// org 配下のリポジトリを個別に開く（選択後にシートを出す）。
+        case org
     }
 
     private var sidebarCollapsed: Bool { columnVisibility == .detailOnly }
@@ -96,16 +104,20 @@ struct ContentView: View {
             // NavigationSplitView が自動で出すサイドバー開閉ボタンを消す。自前ヘッダーの
             // ⓘ/＋ と重なるため（折りたたみは自前トグルで行う）。
             .toolbar(removing: .sidebarToggle)
+            // SwiftUI は同一ビューに同種のプレゼンテーション修飾子を複数付けると
+            // 片方しか発火しないため、フォルダ選択は 1 つの `.fileImporter` に統合し、
+            // `importerTarget` で用途（既存フォルダ／org）を分岐する。
             .fileImporter(isPresented: $showImporter, allowedContentTypes: [.folder]) { result in
-                if case let .success(url) = result {
+                guard case let .success(url) = result else { return }
+                switch importerTarget {
+                case .repository:
                     store.openRepository(at: url)
+                case .org:
+                    orgFolder = IdentifiableURL(url: url)
                 }
             }
             .sheet(isPresented: $showNewSession) {
                 NewSessionSheet(store: store)
-            }
-            .fileImporter(isPresented: $showOrgImporter, allowedContentTypes: [.folder]) { result in
-                if case let .success(url) = result { orgFolder = IdentifiableURL(url: url) }
             }
             .sheet(item: $orgFolder) { folder in
                 OrgOpenSheet(store: store, folder: folder.url)
@@ -145,7 +157,7 @@ struct ContentView: View {
                     Text("左上の ＋ から新規セッション（worktree 作成）または既存フォルダを開きます")
                 } actions: {
                     Button("新規セッション…") { showNewSession = true }
-                    Button("既存のフォルダを開く…") { showImporter = true }
+                    Button("既存のフォルダを開く…") { importerTarget = .repository; showImporter = true }
                 }
             } else {
                 // 全セッションの詳細を常駐させ、選択中だけを可視にする。切替時に端末(pty)や
@@ -254,9 +266,9 @@ struct ContentView: View {
             .help("バグを報告")
             Menu {
                 Button("新規セッション（worktree を作成）…") { showNewSession = true }
-                Button("既存のフォルダを開く…") { showImporter = true }
+                Button("既存のフォルダを開く…") { importerTarget = .repository; showImporter = true }
                 Divider()
-                Button("org 内のリポジトリを個別に開く…") { showOrgImporter = true }
+                Button("org 内のリポジトリを個別に開く…") { importerTarget = .org; showImporter = true }
             } label: {
                 Image(systemName: "plus")
             }
