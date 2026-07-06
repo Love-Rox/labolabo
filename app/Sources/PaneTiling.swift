@@ -595,7 +595,8 @@ final class PaneFrameView: NSView {
         addSubview(header)
 
         highlight.wantsLayer = true
-        highlight.layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.28).cgColor
+        // ドロップ先ハイライトはブランド色（NSColor は非 Sendable のため inline 生成）。
+        highlight.layer?.backgroundColor = NSColor(LaboTheme.brand).withAlphaComponent(0.28).cgColor
         highlight.isHidden = true
         addSubview(highlight)
 
@@ -677,7 +678,7 @@ struct PaneHeader: View {
                 .font(.system(size: 9))
                 .foregroundStyle(.secondary)
             Text(pane.title)
-                .font(.system(size: 11))
+                .font(.system(size: 11, weight: .medium))
                 .lineLimit(1)
                 .truncationMode(.middle)
             Spacer(minLength: 4)
@@ -700,7 +701,9 @@ struct PaneHeader: View {
         .font(.system(size: 10))
         .padding(.horizontal, 6)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(LaboTheme.panel)
+        // Web のヘッダ同様、下辺に 1px の罫線を敷いてコンテンツと区切る。
+        .overlay(alignment: .bottom) { LaboTheme.border.frame(height: 1) }
         .contentShape(Rectangle())
         .onDrag { NSItemProvider(object: pane.id.uuidString as NSString) }
     }

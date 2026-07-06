@@ -389,23 +389,34 @@ struct ChangedFileRow: View {
     let item: ChangedFileItem
     var showsSection: Bool = false
 
+    /// セクション capsule バッジの配色（文字色, 背景色）。Web 版の M=amber / A=lime /
+    /// D=rose の意味論を Unstaged=変更(amber) / Staged=追加準備(lime) /
+    /// Untracked=未追跡(rose) に写像する（モデルに M/A/D 文字が無いためセクション色で表現）。
+    private var sectionColor: (text: Color, background: Color) {
+        switch item.section.rawValue {
+        case "Staged": return (LaboTheme.brandText, LaboTheme.brand.opacity(0.15))
+        case "Unstaged": return (LaboTheme.amber, LaboTheme.amber.opacity(0.15))
+        default: return (LaboTheme.rose, LaboTheme.rose.opacity(0.15))
+        }
+    }
+
     var body: some View {
         HStack(spacing: 6) {
             Text(item.fileName).lineLimit(1).truncationMode(.middle)
             if showsSection {
                 Text(item.section.rawValue)
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(sectionColor.text)
                     .padding(.horizontal, 4)
                     .padding(.vertical, 1)
-                    .background(Capsule().fill(Color.secondary.opacity(0.15)))
+                    .background(Capsule().fill(sectionColor.background))
             }
             Spacer()
             if let adds = item.adds, adds > 0 {
-                Text("+\(adds)").foregroundStyle(.green).font(.caption.monospaced())
+                Text("+\(adds)").foregroundStyle(LaboTheme.brandText).font(.caption.monospaced())
             }
             if let dels = item.dels, dels > 0 {
-                Text("-\(dels)").foregroundStyle(.red).font(.caption.monospaced())
+                Text("-\(dels)").foregroundStyle(LaboTheme.rose).font(.caption.monospaced())
             }
             if let modifiedAt = item.modifiedAt {
                 Text(modifiedAt, format: .relative(presentation: .numeric, unitsStyle: .narrow))
@@ -461,11 +472,7 @@ struct FileDetailView: View {
                 Spacer()
                 // 変更ファイルのみ Diff⇄全文 を切替（未変更ファイルは全文のみ）。
                 if model.selectedItem != nil {
-                    Picker("", selection: viewModeBinding) {
-                        ForEach(FileViewMode.allCases) { Text($0.rawValue).tag($0) }
-                    }
-                    .pickerStyle(.segmented)
-                    .fixedSize()
+                    ViewModePillToggle(selection: viewModeBinding)
                 }
             } else {
                 Text("ファイル / コミットを選択").font(.caption).foregroundStyle(.secondary)
@@ -491,6 +498,34 @@ struct FileDetailView: View {
     }
 }
 
+/// Diff⇄全文 の切替ピル。Web 版のピル型トグルに合わせ、Capsule トラックの上に
+/// 選択中だけブランド色の Capsule を敷く（segmented Picker の置き換え）。
+private struct ViewModePillToggle: View {
+    @Binding var selection: FileViewMode
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(FileViewMode.allCases) { mode in
+                Button {
+                    selection = mode
+                } label: {
+                    Text(mode.rawValue)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(selection == mode ? LaboTheme.brandText : Color.secondary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 2)
+                        .background(
+                            Capsule().fill(selection == mode ? LaboTheme.brand.opacity(0.15) : Color.clear)
+                        )
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(2)
+        .background(Capsule().fill(LaboTheme.panel))
+    }
+}
+
 /// 1 コミットの差分（複数ファイル）をまとめて表示する。
 struct CommitDiffView: View {
     let diffs: [FileDiff]?
@@ -506,7 +541,7 @@ struct CommitDiffView: View {
                                 .padding(.vertical, 3)
                                 .padding(.horizontal, 8)
                                 .frame(minWidth: geo.size.width, alignment: .leading)
-                                .background(Color.accentColor.opacity(0.12))
+                                .background(LaboTheme.brand.opacity(0.12))
                             if file.isBinary {
                                 Text("(バイナリ)")
                                     .font(.caption).foregroundStyle(.secondary)
@@ -519,7 +554,7 @@ struct CommitDiffView: View {
                                         .foregroundStyle(.secondary)
                                         .padding(.vertical, 2).padding(.horizontal, 8)
                                         .frame(minWidth: geo.size.width, alignment: .leading)
-                                        .background(Color.gray.opacity(0.12))
+                                        .background(LaboTheme.panelRaised)
                                     ForEach(Array(hunk.lines.enumerated()), id: \.offset) { _, line in
                                         DiffLineRow(line: line, minWidth: geo.size.width)
                                     }
@@ -561,7 +596,7 @@ struct DiffView: View {
                                 .padding(.vertical, 2)
                                 .padding(.horizontal, 8)
                                 .frame(minWidth: geo.size.width, alignment: .leading)
-                                .background(Color.gray.opacity(0.12))
+                                .background(LaboTheme.panelRaised)
                             ForEach(Array(hunk.lines.enumerated()), id: \.offset) { _, line in
                                 DiffLineRow(line: line, minWidth: geo.size.width)
                             }
@@ -585,9 +620,18 @@ struct DiffLineRow: View {
 
     private var background: Color {
         switch line.kind {
-        case .addition: return .green.opacity(0.15)
-        case .deletion: return .red.opacity(0.15)
+        case .addition: return LaboTheme.diffAddBg
+        case .deletion: return LaboTheme.diffDelBg
         default: return .clear
+        }
+    }
+
+    /// 符号と本文の文字色（追加=lime 系 / 削除=rose、その他は既定色）。
+    private var lineForeground: Color {
+        switch line.kind {
+        case .addition: return LaboTheme.brandText
+        case .deletion: return LaboTheme.rose
+        default: return .primary
         }
     }
 
@@ -612,8 +656,9 @@ struct DiffLineRow: View {
                 .foregroundStyle(.secondary)
             Text(sign)
                 .frame(width: DiffGutter.signWidth, alignment: .center)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(lineForeground)
             Text(line.text.isEmpty ? " " : line.text)
+                .foregroundStyle(lineForeground)
                 .fixedSize(horizontal: true, vertical: false)
                 .textSelection(.enabled)
                 .padding(.leading, 4)

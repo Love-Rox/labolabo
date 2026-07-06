@@ -90,6 +90,9 @@ struct LaboLaboApp: App {
         WindowGroup {
             ContentView()
                 .frame(minWidth: 1000, minHeight: 640)
+                // Web ランディングと同じブランドカラー（ライム）をアクセントに。
+                // Settings シーンには及ばないため SettingsView 側でも tint する。
+                .tint(LaboTheme.brand)
                 // ウィンドウのサイズ・位置・スクリーンを記憶（複数モニタでも復元）。
                 .background(WindowAccessor(defaultsKey: "mainWindowFrame"))
         }

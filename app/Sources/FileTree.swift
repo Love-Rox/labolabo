@@ -224,10 +224,10 @@ struct FileTreeRow: View {
             Spacer(minLength: 4)
             if let change = node.change {
                 if let adds = change.adds, adds > 0 {
-                    Text("+\(adds)").foregroundStyle(.green).font(.caption2.monospaced())
+                    Text("+\(adds)").foregroundStyle(LaboTheme.brandText).font(.caption2.monospaced())
                 }
                 if let dels = change.dels, dels > 0 {
-                    Text("-\(dels)").foregroundStyle(.red).font(.caption2.monospaced())
+                    Text("-\(dels)").foregroundStyle(LaboTheme.rose).font(.caption2.monospaced())
                 }
             }
         }

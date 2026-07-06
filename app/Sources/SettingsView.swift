@@ -10,6 +10,8 @@ struct SettingsView: View {
         }
         .frame(width: 460)
         .scenePadding()
+        // Settings シーンには WindowGroup 側の tint が及ばないため、ここでもブランド色を指定する。
+        .tint(LaboTheme.brand)
     }
 }
 
@@ -172,7 +174,7 @@ struct GeneralSettingsView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
                     .overlay(
                         RoundedRectangle(cornerRadius: 11, style: .continuous)
-                            .strokeBorder(Color.accentColor, lineWidth: activeBorder(asset) ? 2 : 0)
+                            .strokeBorder(LaboTheme.brand, lineWidth: activeBorder(asset) ? 2 : 0)
                     )
             }
             Text(caption).font(.caption2).foregroundStyle(.secondary)
