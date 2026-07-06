@@ -55,7 +55,7 @@ struct SessionStatusPill: View {
 
     private var stateColor: Color {
         guard let status else { return .secondary }
-        return status.isDirty ? .orange : .green
+        return status.isDirty ? LaboTheme.amber : LaboTheme.brandText
     }
 
     private var agentSegment: some View {
@@ -75,9 +75,9 @@ struct SessionStatusPill: View {
     private var agentColor: Color {
         switch agentStatus {
         case .none, .ended: return .secondary
-        case .starting, .running: return .blue
-        case .waitingForInput: return .orange
-        case .idle: return .green
+        case .starting, .running: return LaboTheme.brand
+        case .waitingForInput: return LaboTheme.amber
+        case .idle: return LaboTheme.statusIdle
         }
     }
 
