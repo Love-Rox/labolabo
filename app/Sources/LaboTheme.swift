@@ -8,11 +8,13 @@ import SwiftUI
 enum LaboTheme {
     // MARK: - ブランドカラー
 
-    /// ブランドのライムイエロー #D0FF00。塗り（fill）やステータスドット用。両外観共通。
-    static let brand = Color(hex: 0xD0FF00)
+    /// ブランドのライムイエロー。塗り（fill）やステータスドット用。
+    /// ダークでは Web と同じ #D0FF00。ライトでは白背景でほぼ見えなくなるため、
+    /// 色相を保ったまま暗くした #6E8F00（白とのコントラスト比 ~3.8:1）に切り替える。
+    static let brand = Color(light: Color(hex: 0x6E8F00), dark: Color(hex: 0xD0FF00))
 
-    /// ブランド色の文字用。ライトでは #D0FF00 のままだとコントラスト不足のため
-    /// 暗いオリーブ #5C7300 に落とす。ダークではブランド色をそのまま使う。
+    /// ブランド色の文字用。文字はさらにコントラストが必要なので、ライトでは
+    /// brand より一段暗いオリーブ #5C7300。ダークではブランド色をそのまま使う。
     static let brandText = Color(light: Color(hex: 0x5C7300), dark: Color(hex: 0xD0FF00))
 
     // MARK: - アクセント / 状態色
