@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/Love-Rox/labolabo/compare/v0.5.0...v0.5.1) (2026-07-06)
+
+
+### バグ修正
+
+* ＋メニューの「既存のフォルダを開く…」でフォルダ選択パネルが開かない問題を修正 ([#72](https://github.com/Love-Rox/labolabo/issues/72)) ([3347b16](https://github.com/Love-Rox/labolabo/commit/3347b16f97deb22f35f66358965e812015921434))
+
 ## [0.5.0](https://github.com/Love-Rox/labolabo/compare/v0.4.1...v0.5.0) (2026-07-06)
 
 
