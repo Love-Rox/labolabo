@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.5.0](https://github.com/Love-Rox/labolabo/compare/v0.4.1...v0.5.0) (2026-07-06)
+
+
+### 新機能
+
+* Web ランディングのデザイン言語をアプリ UI に移植 ([#70](https://github.com/Love-Rox/labolabo/issues/70)) ([8643645](https://github.com/Love-Rox/labolabo/commit/86436455d2fbe4f46ef01791d2d89bc377bb1069))
+
+
+### ドキュメント
+
+* README にインストール手順（Homebrew）とサイトリンクを追加 ([#67](https://github.com/Love-Rox/labolabo/issues/67)) ([104ed3b](https://github.com/Love-Rox/labolabo/commit/104ed3b5c7e8c9bcfcd22c940975176f50724b46))
+
 ## [0.4.1](https://github.com/Love-Rox/labolabo/compare/v0.4.0...v0.4.1) (2026-07-05)
 
 
