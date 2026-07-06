@@ -2,11 +2,27 @@
 
 複数の AI コーディングエージェント（Claude Code / Codex / Gemini …）を **1 セッション = 1 git worktree** で並列に走らせ、**各セッションのライブ Git 状態とファイル差分を、動いているエージェント端末の真横で確認できる** macOS ネイティブ・デスクトップアプリ。
 
+🌐 **サイト: <https://labolabo.love-rox.cc>**
+
 ## コンセプト
 
 - **左ペイン**: リポジトリ/セッションのツリー（セッション名・ブランチ名・状態を一望）
 - **中央**: 本物の GPU 端末（libghostty 埋め込み）でエージェントがインタラクティブに動く
 - **右ペイン**: 変更ファイル一覧 ＋ Diff ⇄ ファイル全文の切替表示
+
+## インストール
+
+Homebrew（cask）で配布しています。
+
+```sh
+brew tap love-rox/tap
+brew trust love-rox/tap          # 第三者 tap の信頼（Homebrew の要件）
+brew install --cask labolabo
+```
+
+更新は `brew upgrade --cask labolabo`。`.app` を直接使う場合は [Releases](https://github.com/Love-Rox/labolabo/releases) から入手できます。
+
+> アドホック署名（Apple 公証なし・無料配布）のため、初回起動は macOS の Gatekeeper がブロックします。インストール時に表示される `caveats` の手順（`xattr -dr com.apple.quarantine "/Applications/LaboLabo.app"`、または Finder で右クリック →「開く」）で許可してください。
 
 ## スタック
 
