@@ -13,10 +13,10 @@ extension PullRequestInfo.State {
 
     var color: Color {
         switch self {
-        case .open: return .green
+        case .open: return LaboTheme.brandText
         case .draft: return .secondary
         case .merged: return .purple
-        case .closed: return .red
+        case .closed: return LaboTheme.rose
         }
     }
 
@@ -42,9 +42,9 @@ extension PullRequestInfo.Checks {
 
     var color: Color {
         switch self {
-        case .passing: return .green
-        case .failing: return .red
-        case .pending: return .orange
+        case .passing: return LaboTheme.brandText
+        case .failing: return LaboTheme.rose
+        case .pending: return LaboTheme.amber
         case .none: return .secondary
         }
     }

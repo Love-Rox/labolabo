@@ -57,7 +57,10 @@ struct ContentView: View {
                                 ForEach(group.sessions) { session in
                                     SessionRow(session: session, onClose: { store.close(session.id) })
                                         .tag(session.id)
-                                        .listRowBackground(rowBackground(colorID: store.colorID(forRepo: group.key)))
+                                        .listRowBackground(rowBackground(
+                                            colorID: store.colorID(forRepo: group.key),
+                                            isSelected: store.selection == session.id
+                                        ))
                                         .contextMenu {
                                             Button("セッションを閉じる") {
                                                 store.close(session.id)
@@ -81,8 +84,8 @@ struct ContentView: View {
                 }
                 .listStyle(.sidebar)
                 // 選択ハイライトを既定の青ではなく選択中リポジトリの色へ寄せる。
-                // 未割り当てのときは nil（既定アクセント）。
-                .tint(selectedRepoTint)
+                // 未割り当てのときはブランド色にフォールバックする。
+                .tint(selectedRepoTint ?? LaboTheme.brand)
                 // 先頭セクションの sticky 見出しが上部バー下へ潜って隠れるのを防ぐため、
                 // スクロール内容に上マージンを与える。併せて内容変化時も上を基準に保つ。
                 .contentMargins(.top, 8, for: .scrollContent)
@@ -193,12 +196,21 @@ struct ContentView: View {
         return String(localized: "「\(req.session.name)」の worktree を削除します。\n\n\(path)")
     }
 
-    /// セッション行の背景（リポジトリ色の淡いタイント）。色未設定は透明。
-    /// 選択ハイライト自体は List のシステム選択を使い、色は `.tint` で指定色に寄せる
-    /// （キーボード行移動を維持するため）。
+    /// セッション行の背景。選択中はブランド色の淡い塗り＋リングで強調し、
+    /// 非選択はリポジトリ色の淡いタイント（色未設定は透明）。
+    /// キーボード行移動は List のシステム選択のまま維持する。
     @ViewBuilder
-    private func rowBackground(colorID: String?) -> some View {
-        if let colorID {
+    private func rowBackground(colorID: String?, isSelected: Bool) -> some View {
+        if isSelected {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(LaboTheme.brand.opacity(0.15))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .strokeBorder(LaboTheme.brand.opacity(0.30), lineWidth: 1)
+                )
+                .padding(.vertical, 1)
+                .padding(.horizontal, 6)
+        } else if let colorID {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .fill(RepoPalette.color(for: colorID).opacity(0.16))
                 .padding(.vertical, 1)
@@ -333,6 +345,8 @@ struct AgentStatusIndicator: View {
             Circle()
                 .fill(tint ?? .clear)
                 .frame(width: 7, height: 7)
+                // 進行中はブランド色のグローで目立たせる。
+                .shadow(color: pulses ? (tint ?? .clear).opacity(0.8) : .clear, radius: 3)
         }
         .frame(width: 12, height: 12)
         .help(status == .none ? "" : status.label)
@@ -358,9 +372,9 @@ struct AgentStatusIndicator: View {
 
     private var tint: Color? {
         switch status {
-        case .waitingForInput: return .orange
-        case .running, .starting: return .blue
-        case .idle: return .green
+        case .waitingForInput: return LaboTheme.amber
+        case .running, .starting: return LaboTheme.brand
+        case .idle: return LaboTheme.statusIdle
         case .none, .ended: return nil
         }
     }
@@ -404,21 +418,24 @@ struct RepoGroupHeader: View {
 
     var body: some View {
         HStack(spacing: 6) {
+            // 色未割り当てのグループはブランド色のドットで示す。
             Circle()
-                .fill(RepoPalette.color(for: colorID))
+                .fill(colorID == nil ? LaboTheme.brand : RepoPalette.color(for: colorID))
                 .frame(width: 8, height: 8)
             Text(name)
-                .font(.caption)
-                .fontWeight(.semibold)
+                .font(.caption2.weight(.semibold))
+                .textCase(.uppercase)
+                .kerning(0.8)
+                .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .truncationMode(.middle)
             // 件数は名前の右隣に小さなピルで（far-right の薄いテキストは見づらいため）。
             Text("\(count)")
                 .font(.caption2.weight(.semibold).monospacedDigit())
-                .foregroundStyle(.secondary)
+                .foregroundStyle(LaboTheme.brandText)
                 .padding(.horizontal, 5)
                 .padding(.vertical, 1)
-                .background(Capsule().fill(.quaternary))
+                .background(Capsule().fill(LaboTheme.brand.opacity(0.12)))
                 .help("セッション数: \(count)")
             Spacer(minLength: 0)
         }
