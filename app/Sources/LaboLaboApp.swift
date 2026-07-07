@@ -47,6 +47,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         // これで「表示 > タブバーを表示」「ウインドウ > 前/次のタブ・ウインドウを結合」等の
         // 無関係なメニュー項目が丸ごと消える。
         NSWindow.allowsAutomaticWindowTabbing = false
+        // 外観（ライト/ダーク/システム準拠）を先に確定させてから、それ基準の Dock アイコン追従を開始する。
+        AppearanceController.shared.apply()
         AppIconController.shared.start()
         AgentNotifier.configure(delegate: self)
         ToolDoctor.shared.check() // git/gh/claude の存在検査（依存機能のゲートに使う）
