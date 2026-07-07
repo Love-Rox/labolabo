@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/Love-Rox/labolabo/compare/v0.5.1...v0.6.0) (2026-07-07)
+
+
+### 新機能
+
+* 外観のライト/ダーク/システム準拠を設定から選択可能に ([#75](https://github.com/Love-Rox/labolabo/issues/75)) ([adda3c9](https://github.com/Love-Rox/labolabo/commit/adda3c9a5ee9e7a18a4e8486c787dd8de4d1f7c6))
+
 ## [0.5.1](https://github.com/Love-Rox/labolabo/compare/v0.5.0...v0.5.1) (2026-07-06)
 
 
