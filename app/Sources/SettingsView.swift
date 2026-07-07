@@ -16,6 +16,7 @@ struct SettingsView: View {
 }
 
 struct GeneralSettingsView: View {
+    @AppStorage(AppearanceController.defaultsKey) private var appearanceRaw = AppAppearanceMode.system.rawValue
     @AppStorage(AppIconController.defaultsKey) private var iconModeRaw = AppIconMode.auto.rawValue
     @AppStorage(AgentNotifier.enabledKey) private var notifyWaiting = true
     @AppStorage(UpdateChecker.autoCheckKey) private var checkUpdatesOnLaunch = true
@@ -24,12 +25,29 @@ struct GeneralSettingsView: View {
     /// アップデートチェッカ（@Observable シングルトン）。
     private var updates: UpdateChecker { .shared }
 
+    private var appearanceMode: AppAppearanceMode { AppAppearanceMode(rawValue: appearanceRaw) ?? .system }
     private var iconMode: AppIconMode { AppIconMode(rawValue: iconModeRaw) ?? .auto }
 
     @State private var showBugReport = false
 
     var body: some View {
         Form {
+            Section {
+                Picker("外観", selection: Binding(
+                    get: { appearanceMode },
+                    set: { appearanceRaw = $0.rawValue; AppearanceController.shared.apply() }
+                )) {
+                    ForEach(AppAppearanceMode.allCases) { mode in
+                        Text(mode.label).tag(mode)
+                    }
+                }
+                .pickerStyle(.radioGroup)
+            } footer: {
+                Text("ウインドウ全体の配色をライト/ダークに固定できます。「システムに合わせる」は macOS の外観設定に追従します。変更は即時に反映されます。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section {
                 Picker("アプリアイコン", selection: Binding(
                     get: { iconMode },
