@@ -6,5 +6,5 @@
 // build/archive time from the monotonic git commit count
 // (`git rev-list --count HEAD`); the value below is only a local fallback.
 
-MARKETING_VERSION = 0.5.1 // x-release-please-version
+MARKETING_VERSION = 0.6.0 // x-release-please-version
 CURRENT_PROJECT_VERSION = 1
