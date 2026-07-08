@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.6.1](https://github.com/Love-Rox/labolabo/compare/v0.6.0...v0.6.1) (2026-07-08)
+
+
+### バグ修正
+
+* git 実行のスレッド枯渇デッドロックを根治し終了ハング・表示凍結を解消 ([#78](https://github.com/Love-Rox/labolabo/issues/78)) ([4df0085](https://github.com/Love-Rox/labolabo/commit/4df0085300f120c3f84b03bbd0901fa4abdc98cc))
+
+
+### パフォーマンス
+
+* 使い捨て SessionStore init の副作用排除と refresh デバウンスで常時 CPU を削減 ([#80](https://github.com/Love-Rox/labolabo/issues/80)) ([a1da3b6](https://github.com/Love-Rox/labolabo/commit/a1da3b6116c703857c5d78120bb7b65d86ff2e59))
+
 ## [0.6.0](https://github.com/Love-Rox/labolabo/compare/v0.5.1...v0.6.0) (2026-07-07)
 
 
