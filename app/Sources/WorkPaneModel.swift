@@ -118,8 +118,8 @@ final class WorkPaneModel {
             await discoverRepos()
             await refresh()
         }
-        let watcher = FileWatcher(path: worktree) { [weak self] in
-            Task { @MainActor in self?.scheduleRefresh() }
+        let watcher = FileWatcher(path: worktree) { [weak self] paths in
+            Task { @MainActor in self?.scheduleRefresh(paths: paths) }
         }
         watcher.start()
         self.watcher = watcher
@@ -131,19 +131,20 @@ final class WorkPaneModel {
     }
 
     private var refreshTask: Task<Void, Never>?
-    private var refreshPending = false
+    private var pendingPaths: Set<String> = []
 
     /// FSEvents からの再取得要求。実行中の refresh には合流し（多重実行しない）、
     /// バーストは 0.5 秒のデバウンスで 1 回にまとめる。refresh 中に届いた変更は
-    /// 完了後にもう 1 回だけ拾う。
-    private func scheduleRefresh() {
-        refreshPending = true
+    /// 完了後にもう 1 回だけ拾う。変更パスは蓄積して部分リフレッシュに使う。
+    private func scheduleRefresh(paths: [String]) {
+        pendingPaths.formUnion(paths)
         guard refreshTask == nil else { return }
         refreshTask = Task { [weak self] in
-            while let self, self.refreshPending {
+            while let self, !self.pendingPaths.isEmpty {
                 try? await Task.sleep(nanoseconds: 500_000_000)
-                self.refreshPending = false
-                await self.refresh()
+                let changed = self.pendingPaths
+                self.pendingPaths = []
+                await self.refresh(changedPaths: changed)
             }
             self?.refreshTask = nil
         }
@@ -157,6 +158,8 @@ final class WorkPaneModel {
 
     func selectRepo(_ id: String) {
         selectedRepoID = id
+        // ブランチバーは切替先のスキャン結果（キャッシュ）を即時反映する。
+        if let cached = scans[id]?.status { status = cached }
         Task {
             await loadCommits()
             if selectedCommit != nil { await loadCommitDiff() }
@@ -231,7 +234,23 @@ final class WorkPaneModel {
         }
     }
 
+    /// repo 単位のスキャン結果。部分リフレッシュ時に未変更 repo の分を使い回す。
+    private struct RepoScan {
+        var items: [ChangedFileItem] = []
+        var files: [String] = []
+        var status: GitStatus?
+    }
+
+    private var scans: [String: RepoScan] = [:]
+
     func refresh() async {
+        await refresh(changedPaths: nil)
+    }
+
+    /// `changedPaths` が nil なら全 repo を、指定時は該当 repo だけ git でスキャンし、
+    /// 残りはキャッシュから合成する。パスがどの repo にも紐づかないとき（シンボリック
+    /// リンク差異・新規 clone 等）は全量スキャンへフォールバックする。
+    func refresh(changedPaths: Set<String>?) async {
         if repos.isEmpty { await discoverRepos() }
         guard !repos.isEmpty else {
             // git リポジトリが 1 つも見つからない作業ディレクトリ。
@@ -240,12 +259,27 @@ final class WorkPaneModel {
             return
         }
 
-        var aggregated: [ChangedFileItem] = []
-        var aggregatedFiles: [String] = []
+        var targets = repos
+        if let changedPaths {
+            let affected = repos.filter { repo in
+                let root = repo.root.path
+                return changedPaths.contains {
+                    $0 == root || $0.hasPrefix(root + "/") || root.hasPrefix($0 + "/")
+                }
+            }
+            if affected.isEmpty {
+                await discoverRepos() // 新規 repo が増えた可能性も拾ってから全量へ
+                targets = repos
+            } else {
+                targets = affected
+            }
+        }
+
         let prefixWithRepo = repos.count > 1
 
-        for repo in repos {
+        for repo in targets {
             guard let status = try? await git.status(worktree: repo.root) else { continue }
+            var scan = RepoScan(status: status)
 
             let unstaged = (try? await git.numstat(worktree: repo.root, staged: false)) ?? []
             let staged = (try? await git.numstat(worktree: repo.root, staged: true)) ?? []
@@ -264,32 +298,50 @@ final class WorkPaneModel {
             }
 
             for entry in status.staged {
-                aggregated.append(makeItem(entry.path, .staged, stagedCounts[entry.path]))
+                scan.items.append(makeItem(entry.path, .staged, stagedCounts[entry.path]))
             }
             for entry in status.unstaged where entry.kind != .unmerged {
-                aggregated.append(makeItem(entry.path, .unstaged, unstagedCounts[entry.path]))
+                scan.items.append(makeItem(entry.path, .unstaged, unstagedCounts[entry.path]))
             }
             for entry in status.untracked {
-                aggregated.append(makeItem(entry.path, .untracked, nil))
+                scan.items.append(makeItem(entry.path, .untracked, nil))
             }
 
             let files = ((try? await git.listFiles(worktree: repo.root)) ?? [])
                 .filter { $0 != AgentSessionModel.localSettingsRelativePath }
-            aggregatedFiles.append(contentsOf: prefixWithRepo ? files.map { "\(repo.name)/\($0)" } : files)
+            scan.files = prefixWithRepo ? files.map { "\(repo.name)/\($0)" } : files
+
+            scans[repo.id] = scan
+        }
+
+        // 全 repo ぶんを（未変更分はキャッシュから）表示順に合成する。
+        var aggregated: [ChangedFileItem] = []
+        var aggregatedFiles: [String] = []
+        for repo in repos {
+            guard let scan = scans[repo.id] else { continue }
+            aggregated.append(contentsOf: scan.items)
+            aggregatedFiles.append(contentsOf: scan.files)
         }
 
         // 我々が注入する hooks 設定は一覧に出さない（ノイズ回避）。
         items = aggregated.filter { !$0.repoRelativePath.hasSuffix(AgentSessionModel.localSettingsRelativePath) }
         allFiles = aggregatedFiles
-        // ブランチバーは対象リポジトリの状態を表示。
-        status = try? await git.status(worktree: (selectedRepo ?? repos[0]).root)
+
+        // ブランチバー・履歴は対象リポジトリの状態を表示。対象 repo が今回スキャン
+        // されていなければ状態は変わっていないので、git を追加で叩き直さない。
+        let shown = selectedRepo ?? repos[0]
+        if targets.contains(where: { $0.id == shown.id }) {
+            status = scans[shown.id]?.status
+            await loadCommits()
+        } else if status == nil {
+            status = scans[shown.id]?.status
+        }
 
         if let selectedPath,
            !items.contains(where: { $0.path == selectedPath }),
            !allFiles.contains(selectedPath) {
             self.selectedPath = nil
         }
-        await loadCommits()
         loadError = nil
         await loadSelection()
     }
