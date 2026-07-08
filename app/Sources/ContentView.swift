@@ -168,6 +168,7 @@ struct ContentView: View {
                         SessionDetailView(
                             session: session,
                             store: store,
+                            isActive: isActive,
                             sidebarCollapsed: sidebarCollapsed,
                             onExpandSidebar: { columnVisibility = .all }
                         )
@@ -179,6 +180,7 @@ struct ContentView: View {
                 }
             }
         }
+        .task { store.start() }
     }
 
     /// worktree 削除の確認を開始（dirty 判定を待ってからダイアログ表示）。
@@ -474,6 +476,9 @@ struct RepoGroupHeader: View {
 struct SessionDetailView: View {
     let session: RepoSession
     let store: SessionStore
+    /// 選択中（可視）のセッションか。ZStack 常駐設計では非表示でもビューは生きるので、
+    /// git 監視（FileWatcher + refresh）は可視なものだけ動かして電力を抑える。
+    let isActive: Bool
     var sidebarCollapsed: Bool = false
     var onExpandSidebar: () -> Void = {}
 
@@ -540,11 +545,13 @@ struct SessionDetailView: View {
     init(
         session: RepoSession,
         store: SessionStore,
+        isActive: Bool = true,
         sidebarCollapsed: Bool = false,
         onExpandSidebar: @escaping () -> Void = {}
     ) {
         self.session = session
         self.store = store
+        self.isActive = isActive
         self.sidebarCollapsed = sidebarCollapsed
         self.onExpandSidebar = onExpandSidebar
         _work = State(initialValue: WorkPaneModel(worktree: session.worktreePath))
@@ -581,7 +588,14 @@ struct SessionDetailView: View {
         .padding(.leading, sidebarCollapsed ? 0 : 10)
         .ignoresSafeArea(.container, edges: .top)
         .navigationTitle(session.name)
-        .onAppear { work.start() }
+        .onAppear { if isActive { work.start() } }
+        .onChange(of: isActive) { _, active in
+            if active {
+                work.start()
+            } else {
+                work.stop()
+            }
+        }
         .onDisappear {
             work.stop()
             // ratio ドラッグは bump しないので、離脱時に最終配置を保存する。

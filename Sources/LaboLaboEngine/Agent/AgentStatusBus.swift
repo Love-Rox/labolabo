@@ -12,12 +12,21 @@ public final class AgentStatusBus: @unchecked Sendable {
 
     private var listenFD: Int32 = -1
     private var running = false
+    private var startedOnce = false
+    private let startLock = NSLock()
 
     public init(socketPath: String) {
         self.socketPath = socketPath
     }
 
     public func start() {
+        // 二重 start は 2 つの runServer が同一ソケットパスを奪い合い、
+        // スレッドと fd を漏らすので 1 回だけに制限する（stop 後の再開は非対応）。
+        startLock.lock()
+        let alreadyStarted = startedOnce
+        startedOnce = true
+        startLock.unlock()
+        guard !alreadyStarted else { return }
         // accept()/read() でブロックし続けるので、GCD のワーカープールを
         // 占有しないよう専用スレッドで待つ（セッション数ぶん常駐するため）。
         let thread = Thread { [weak self] in self?.runServer() }

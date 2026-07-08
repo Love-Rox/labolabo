@@ -113,12 +113,13 @@ final class WorkPaneModel {
     }
 
     func start() {
+        guard watcher == nil else { return }
         Task {
             await discoverRepos()
             await refresh()
         }
         let watcher = FileWatcher(path: worktree) { [weak self] in
-            Task { @MainActor in await self?.refresh() }
+            Task { @MainActor in self?.scheduleRefresh() }
         }
         watcher.start()
         self.watcher = watcher
@@ -127,6 +128,25 @@ final class WorkPaneModel {
     func stop() {
         watcher?.stop()
         watcher = nil
+    }
+
+    private var refreshTask: Task<Void, Never>?
+    private var refreshPending = false
+
+    /// FSEvents からの再取得要求。実行中の refresh には合流し（多重実行しない）、
+    /// バーストは 0.5 秒のデバウンスで 1 回にまとめる。refresh 中に届いた変更は
+    /// 完了後にもう 1 回だけ拾う。
+    private func scheduleRefresh() {
+        refreshPending = true
+        guard refreshTask == nil else { return }
+        refreshTask = Task { [weak self] in
+            while let self, self.refreshPending {
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                self.refreshPending = false
+                await self.refresh()
+            }
+            self?.refreshTask = nil
+        }
     }
 
     private func discoverRepos() async {

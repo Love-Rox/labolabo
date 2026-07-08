@@ -77,6 +77,16 @@ final class SessionStore {
         db = try? SessionDatabase(url: SessionDatabase.defaultURL())
         loadRepoColors()
         loadPresets()
+    }
+
+    private var started = false
+
+    /// セッション復元と常駐監視の開始。`@State` の初期値式は View の再 init のたびに
+    /// 評価され使い捨てインスタンスが生まれるため、プロセス起動・スレッド生成・
+    /// ソケット bind などの副作用は init に置かず、表示側から 1 回だけ呼ぶ。
+    func start() {
+        guard !started else { return }
+        started = true
         restore()
         startConflictWatch()
     }
