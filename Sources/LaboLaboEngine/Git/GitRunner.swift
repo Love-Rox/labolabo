@@ -13,59 +13,38 @@ public struct GitCommandError: Error, CustomStringConvertible {
 
 /// Runs the system `git` binary and returns its stdout.
 ///
-/// stdout/stderr are drained concurrently while the process runs so large diffs
-/// cannot deadlock on a full pipe buffer; the call hops to a background queue so
-/// `waitUntilExit()` never blocks a cooperative thread.
+/// 実行はスレッドを占有しない `ProcessRunner.run` に委譲する。ここで GCD の
+/// ワーカーをブロックすると、並行 git が重なったときにプール（64 本）が待ち側で
+/// 埋まり、アプリ全体（終了時のウィンドウ状態保存を含む）が固まる。
+/// 同時実行数もゲートで抑え、org ディレクトリを開いた直後の一斉 refresh で
+/// git プロセスが暴発しないようにする。
 public enum GitRunner {
+
+    private static let gate = ConcurrencyGate(limit: 16)
 
     @discardableResult
     public static func run(_ arguments: [String], in directory: URL) async throws -> String {
-        try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                let process = Process()
-                process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-                process.arguments = ["git"] + arguments
-                process.currentDirectoryURL = directory
-
-                let outPipe = Pipe()
-                let errPipe = Pipe()
-                process.standardOutput = outPipe
-                process.standardError = errPipe
-
-                do {
-                    try process.run()
-                } catch {
-                    continuation.resume(throwing: error)
-                    return
-                }
-
-                let outBox = DataBox()
-                let errBox = DataBox()
-                let group = DispatchGroup()
-                group.enter()
-                DispatchQueue.global().async {
-                    outBox.fill(from: outPipe.fileHandleForReading)
-                    group.leave()
-                }
-                group.enter()
-                DispatchQueue.global().async {
-                    errBox.fill(from: errPipe.fileHandleForReading)
-                    group.leave()
-                }
-
-                process.waitUntilExit()
-                group.wait()  // ensures both reads are visible before we use the buffers
-
-                if process.terminationStatus == 0 {
-                    continuation.resume(returning: String(decoding: outBox.value, as: UTF8.self))
-                } else {
-                    continuation.resume(throwing: GitCommandError(
-                        arguments: arguments,
-                        exitCode: process.terminationStatus,
-                        stderr: String(decoding: errBox.value, as: UTF8.self)
-                    ))
-                }
-            }
+        await gate.acquire()
+        let result: Result<ProcessRunner.Output, Error>
+        do {
+            result = .success(try await ProcessRunner.run(
+                executable: URL(fileURLWithPath: "/usr/bin/env"),
+                arguments: ["git"] + arguments,
+                in: directory
+            ))
+        } catch {
+            result = .failure(error)
         }
+        await gate.release()
+
+        let output = try result.get()
+        guard output.status == 0 else {
+            throw GitCommandError(
+                arguments: arguments,
+                exitCode: output.status,
+                stderr: output.stderr
+            )
+        }
+        return output.stdout
     }
 }

@@ -12,14 +12,17 @@ public final class AgentStatusBus: @unchecked Sendable {
 
     private var listenFD: Int32 = -1
     private var running = false
-    private let queue = DispatchQueue(label: "labolabo.agent.statusbus", qos: .utility)
 
     public init(socketPath: String) {
         self.socketPath = socketPath
     }
 
     public func start() {
-        queue.async { [weak self] in self?.runServer() }
+        // accept()/read() でブロックし続けるので、GCD のワーカープールを
+        // 占有しないよう専用スレッドで待つ（セッション数ぶん常駐するため）。
+        let thread = Thread { [weak self] in self?.runServer() }
+        thread.name = "labolabo.agent.statusbus"
+        thread.start()
     }
 
     public func stop() {

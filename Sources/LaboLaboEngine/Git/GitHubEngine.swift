@@ -137,57 +137,20 @@ public actor GitHubEngine {
         return Int(body[group])
     }
 
-    // MARK: - プロセス実行（stdout を返す。pipe を並行 drain してデッドロック回避）
+    // MARK: - プロセス実行（stdout を返す。スレッド非占有の ProcessRunner に委譲）
 
     static func run(executable: URL, arguments: [String], in directory: URL) async throws -> String {
-        try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                let process = Process()
-                process.executableURL = executable
-                process.arguments = arguments
-                process.currentDirectoryURL = directory
-
-                let outPipe = Pipe()
-                let errPipe = Pipe()
-                process.standardOutput = outPipe
-                process.standardError = errPipe
-
-                do {
-                    try process.run()
-                } catch {
-                    continuation.resume(throwing: error)
-                    return
-                }
-
-                let outBox = DataBox()
-                let errBox = DataBox()
-                let group = DispatchGroup()
-                group.enter()
-                DispatchQueue.global().async {
-                    outBox.fill(from: outPipe.fileHandleForReading)
-                    group.leave()
-                }
-                group.enter()
-                DispatchQueue.global().async {
-                    errBox.fill(from: errPipe.fileHandleForReading)
-                    group.leave()
-                }
-
-                process.waitUntilExit()
-                group.wait()
-
-                if process.terminationStatus == 0 {
-                    continuation.resume(returning: String(decoding: outBox.value, as: UTF8.self))
-                } else {
-                    // stderr を載せて UI に理由を出せるようにする（未認証・重複 PR など）。
-                    let stderr = String(decoding: errBox.value, as: UTF8.self)
-                        .trimmingCharacters(in: .whitespacesAndNewlines)
-                    continuation.resume(throwing: NSError(
-                        domain: "GitHubEngine", code: Int(process.terminationStatus),
-                        userInfo: stderr.isEmpty ? nil : [NSLocalizedDescriptionKey: stderr]
-                    ))
-                }
-            }
+        let output = try await ProcessRunner.run(
+            executable: executable, arguments: arguments, in: directory
+        )
+        guard output.status == 0 else {
+            // stderr を載せて UI に理由を出せるようにする（未認証・重複 PR など）。
+            let stderr = output.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            throw NSError(
+                domain: "GitHubEngine", code: Int(output.status),
+                userInfo: stderr.isEmpty ? nil : [NSLocalizedDescriptionKey: stderr]
+            )
         }
+        return output.stdout
     }
 }
