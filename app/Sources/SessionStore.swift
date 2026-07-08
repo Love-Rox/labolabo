@@ -77,8 +77,17 @@ final class SessionStore {
         db = try? SessionDatabase(url: SessionDatabase.defaultURL())
         loadRepoColors()
         loadPresets()
+    }
+
+    private var started = false
+
+    /// セッション復元と常駐監視の開始。`@State` の初期値式は View の再 init のたびに
+    /// 評価され使い捨てインスタンスが生まれるため、プロセス起動・スレッド生成・
+    /// ソケット bind などの副作用は init に置かず、表示側から 1 回だけ呼ぶ。
+    func start() {
+        guard !started else { return }
+        started = true
         restore()
-        startConflictWatch()
     }
 
     /// このブランチに対応する PR を gh から取得（失敗/未検出なら nil）。
@@ -127,6 +136,7 @@ final class SessionStore {
         )
         session.agent = agent
         agent.start()
+        attachConflictWatch(session)
     }
 
     /// 入力待ちに入ったら通知（前面かつ当該セッション選択中は不要＝ピルで見えているため）。
@@ -152,7 +162,8 @@ final class SessionStore {
 
     /// 変更ファイルの逆引きを更新する。コンフリクトは同一 repo に複数セッションが
     /// あるときだけ起きるので、その対象セッションについてのみ `git status` を回す。
-    func refreshChangedFiles() {
+    /// `only` を渡すと、その中の対象セッションだけ再スキャンする（イベント駆動用）。
+    func refreshChangedFiles(only dirty: Set<RepoSession.ID>? = nil) {
         let byRepo = Dictionary(grouping: sessions.filter { $0.repoKey != nil }) { $0.repoKey! }
         let targetIDs = Set(byRepo.filter { $0.value.count >= 2 }.flatMap { $0.value.map(\.id) })
 
@@ -161,7 +172,8 @@ final class SessionStore {
             changedFiles.removeValue(forKey: id)
         }
 
-        for session in sessions where targetIDs.contains(session.id) {
+        let scanIDs = dirty.map { targetIDs.intersection($0) } ?? targetIDs
+        for session in sessions where scanIDs.contains(session.id) {
             let sid = session.id
             let worktree = session.worktreePath
             Task { [weak self] in
@@ -193,15 +205,40 @@ final class SessionStore {
         }
     }
 
-    /// 背景セッション（エージェントが編集中など）でも検知できるよう、変更ファイルの
-    /// 逆引きを定期リフレッシュする。多重 repo が無ければ処理はほぼ空で軽い。
-    private func startConflictWatch() {
-        Task { [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 5_000_000_000) // 5s
-                guard let self else { return }
-                self.refreshChangedFiles()
+    /// 背景セッション（エージェントが編集中など）でも検知できるよう、セッション毎に
+    /// 軽量な FSEvents 監視を張る。イベントは dirty マークだけ付けて 2 秒デバウンスで
+    /// まとめ、`git status` は同一 repo に複数セッションがある対象だけに絞って回す
+    /// （定期ポーリングと違い、無変更なら git を一切起動しない）。
+    private var conflictWatchers: [RepoSession.ID: FileWatcher] = [:]
+    private var conflictDirty: Set<RepoSession.ID> = []
+    private var conflictTask: Task<Void, Never>?
+
+    private func attachConflictWatch(_ session: RepoSession) {
+        guard conflictWatchers[session.id] == nil else { return }
+        let sid = session.id
+        let watcher = FileWatcher(path: session.worktreePath) { [weak self] _ in
+            Task { @MainActor in self?.markConflictDirty(sid) }
+        }
+        watcher.start()
+        conflictWatchers[sid] = watcher
+    }
+
+    private func detachConflictWatch(_ id: RepoSession.ID) {
+        conflictWatchers[id]?.stop()
+        conflictWatchers.removeValue(forKey: id)
+    }
+
+    private func markConflictDirty(_ id: RepoSession.ID) {
+        conflictDirty.insert(id)
+        guard conflictTask == nil else { return }
+        conflictTask = Task { [weak self] in
+            while let self, !self.conflictDirty.isEmpty {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                let dirty = self.conflictDirty
+                self.conflictDirty = []
+                self.refreshChangedFiles(only: dirty)
             }
+            self?.conflictTask = nil
         }
     }
 
@@ -358,6 +395,7 @@ final class SessionStore {
         if let session = sessions.first(where: { $0.id == id }) {
             session.agent?.stop()  // hooks 撤去 + ソケット停止
         }
+        detachConflictWatch(id)
         sessions.removeAll { $0.id == id }
         changedFiles.removeValue(forKey: id)
         try? db?.deleteSession(id: id.uuidString)
