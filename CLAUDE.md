@@ -26,6 +26,12 @@ xcodebuild -project app/LaboLabo.xcodeproj -scheme LaboLabo \
   CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build
 open ~/Library/Developer/Xcode/DerivedData/LaboLabo-*/Build/Products/Debug/LaboLabo.app
 # 開発時は: open app/LaboLabo.xcodeproj → ⌘R
+
+# 常用は Release ビルド推奨（Debug は最適化なしで文字列パース等が数倍遅く、電力を余計に食う）
+xcodebuild -project app/LaboLabo.xcodeproj -scheme LaboLabo -configuration Release \
+  -destination 'platform=macOS,arch=arm64' \
+  CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build
+open ~/Library/Developer/Xcode/DerivedData/LaboLabo-*/Build/Products/Release/LaboLabo.app
 ```
 
 ## ブランチ / PR 運用
