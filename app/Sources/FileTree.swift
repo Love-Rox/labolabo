@@ -106,7 +106,13 @@ struct FileTreeView: View {
                 .listRowInsets(EdgeInsets(top: 0, leading: 8, bottom: 0, trailing: 8))
                 .contentShape(Rectangle())
                 .onTapGesture {
-                    if entry.node.isDirectory { toggle(entry.node.id) }
+                    // macOS の List では行上の TapGesture がクリックを消費して
+                    // List(selection:) が発火しないため、ファイル行の選択も自前で更新する。
+                    if entry.node.isDirectory {
+                        toggle(entry.node.id)
+                    } else {
+                        selection.wrappedValue = entry.node.id
+                    }
                 }
             }
         }

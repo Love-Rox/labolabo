@@ -174,9 +174,9 @@ final class WorkPaneModel {
         commitDiff = nil
         selectedPath = path
         let changed = items.first { $0.path == path }
-        if changed == nil || changed?.isUntracked == true {
-            viewMode = .whole
-        }
+        // diff が無いファイル（未変更/untracked）は全文へ。変更ファイルは Diff に戻す
+        // （直前の全文表示が引き継がれて diff が見えないままになるのを防ぐ）。
+        viewMode = (changed == nil || changed?.isUntracked == true) ? .whole : .diff
         Task { await loadSelection() }
     }
 
