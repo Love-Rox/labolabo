@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.2](https://github.com/Love-Rox/labolabo/compare/v0.6.1...v0.6.2) (2026-07-10)
+
+
+### バグ修正
+
+* ツリー表示でファイル行をクリックしても選択されず diff が出ない問題を修正 ([#83](https://github.com/Love-Rox/labolabo/issues/83)) ([1780674](https://github.com/Love-Rox/labolabo/commit/1780674b88c708cc986052a30ada12747c2b7c93))
+
 ## [0.6.1](https://github.com/Love-Rox/labolabo/compare/v0.6.0...v0.6.1) (2026-07-08)
 
 
