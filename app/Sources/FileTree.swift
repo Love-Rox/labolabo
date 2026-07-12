@@ -200,6 +200,8 @@ struct FileTreeRow: View {
     var isLast: Bool = true
     var lineage: [Bool] = []
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     static let rowHeight: CGFloat = 22
     static let indentWidth: CGFloat = 14
 
@@ -214,6 +216,9 @@ struct FileTreeRow: View {
                         .font(.system(size: 9, weight: .semibold))
                         .foregroundStyle(.secondary)
                         .rotationEffect(.degrees(expanded ? 90 : 0))
+                        // 回転だけアニメ。行の出入りは即時のまま（ツリーは高頻度操作なので
+                        // カスケードさせず crisp に保つ）。
+                        .animation(reduceMotion ? nil : LaboTheme.Motion.move, value: expanded)
                 } else {
                     Color.clear
                 }

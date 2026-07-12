@@ -66,3 +66,48 @@ private final class FrameTracker: NSView {
 
     deinit { NotificationCenter.default.removeObserver(self) }
 }
+
+// MARK: - ウィンドウ可視状態
+
+/// ホスト `NSWindow` の可視状態（occlusionState）を SwiftUI の Binding へ伝える。
+/// ウィンドウが完全に隠れている間（最小化・完全被覆・別 Space）に
+/// 無駄なアニメーションを止めて電力を守るために使う。
+struct WindowVisibilityReader: NSViewRepresentable {
+    @Binding var isVisible: Bool
+
+    func makeNSView(context: Context) -> NSView { VisibilityTracker(isVisible: $isVisible) }
+    func updateNSView(_ nsView: NSView, context: Context) {}
+}
+
+private final class VisibilityTracker: NSView {
+    private let isVisible: Binding<Bool>
+
+    init(isVisible: Binding<Bool>) {
+        self.isVisible = isVisible
+        super.init(frame: .zero)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        NotificationCenter.default.removeObserver(self)
+        guard let window else { return }
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(occlusionChanged),
+            name: NSWindow.didChangeOcclusionStateNotification, object: window
+        )
+        occlusionChanged()
+    }
+
+    @objc private func occlusionChanged() {
+        guard let window else { return }
+        let visible = window.occlusionState.contains(.visible)
+        guard isVisible.wrappedValue != visible else { return }
+        // ビュー更新中の状態書き換えを避けるため、次のランループで反映する。
+        let binding = isVisible
+        DispatchQueue.main.async { binding.wrappedValue = visible }
+    }
+
+    deinit { NotificationCenter.default.removeObserver(self) }
+}
