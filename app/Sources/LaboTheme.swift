@@ -57,6 +57,21 @@ enum LaboTheme {
     static let diffDelBg = rose.opacity(0.10)
 }
 
+// MARK: - モーション
+
+extension LaboTheme {
+    /// モーショントークン。UI アニメーションは 300ms 未満・この 3 種に統一する。
+    /// （曲線は標準の ease では弱いため、強めのカスタムカーブを使う）
+    enum Motion {
+        /// フィードバック（押下の戻り・コピー通知など短い応答の出入り）: 150ms の強い ease-out。
+        static let feedback = Animation.timingCurve(0.23, 1, 0.32, 1, duration: 0.15)
+        /// 画面内の移動・変形（選択ピルのスライド・シェブロン回転など）: 180ms の強い ease-in-out。
+        static let move = Animation.timingCurve(0.77, 0, 0.175, 1, duration: 0.18)
+        /// 色・数値のクロスフェード（状態色・カウント変化）: 200ms の ease-in-out。
+        static let tint = Animation.easeInOut(duration: 0.2)
+    }
+}
+
 // MARK: - 補助イニシャライザ
 
 extension Color {

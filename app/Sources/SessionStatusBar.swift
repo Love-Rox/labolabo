@@ -13,6 +13,8 @@ struct SessionStatusPill: View {
     let fallbackBranch: String?
     let changedCount: Int
     var agentStatus: AgentStatus = .none
+    @State private var windowVisible = true
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         HStack(spacing: 8) {
@@ -24,6 +26,8 @@ struct SessionStatusPill: View {
             Circle()
                 .fill(stateColor)
                 .frame(width: 8, height: 8)
+                // dirty⇄clean の色替えをクロスフェード（瞬間切替のチラつき防止）。
+                .animation(LaboTheme.Motion.tint, value: stateColor)
 
             HStack(spacing: 4) {
                 Image(systemName: "arrow.triangle.branch")
@@ -63,6 +67,19 @@ struct SessionStatusPill: View {
             Image(systemName: "sparkles")
                 .font(.caption2)
                 .foregroundStyle(agentColor)
+                // 実行中はレイヤーが順に点灯する variableColor で「処理が続いている」を、
+                // 入力待ちは pulse で「操作待ち」を一目で伝える。どちらもウィンドウが
+                // 隠れている間と Reduce Motion 時は止めて電力を守る。
+                .symbolEffect(
+                    .variableColor.iterative,
+                    options: .repeating,
+                    isActive: animatable && (agentStatus == .starting || agentStatus == .running)
+                )
+                .symbolEffect(
+                    .pulse,
+                    options: .repeating,
+                    isActive: animatable && agentStatus == .waitingForInput
+                )
             Circle()
                 .fill(agentColor)
                 .frame(width: 7, height: 7)
@@ -70,7 +87,13 @@ struct SessionStatusPill: View {
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(agentColor)
         }
+        // 状態遷移の色替えをクロスフェード。ラベル文字列の差し替えは即時でよい。
+        .animation(LaboTheme.Motion.tint, value: agentStatus)
+        .background(WindowVisibilityReader(isVisible: $windowVisible))
     }
+
+    /// 継続アニメーションを動かしてよいか（可視ウィンドウ & Reduce Motion オフ）。
+    private var animatable: Bool { windowVisible && !reduceMotion }
 
     private var agentColor: Color {
         switch agentStatus {
@@ -88,6 +111,10 @@ struct SessionStatusPill: View {
                 .labelStyle(.titleAndIcon)
                 .font(.caption.weight(.medium))
                 .foregroundStyle(.orange)
+                // 変更数の増減を数字ロールで見せる（増=上へ、減=下へ）。
+                // Reduce Motion 時は動きのないクロスフェードに落とす。
+                .contentTransition(reduceMotion ? .opacity : .numericText(value: Double(changedCount)))
+                .animation(LaboTheme.Motion.tint, value: changedCount)
         } else {
             Label("クリーン", systemImage: "checkmark.circle")
                 .labelStyle(.titleAndIcon)
@@ -271,7 +298,9 @@ struct CircleIconButtonStyle: ButtonStyle {
                     )
                 )
                 .opacity(isEnabled ? 1 : 0.4)
-                .scaleEffect(configuration.isPressed ? 0.92 : 1)
+                .scaleEffect(configuration.isPressed ? 0.95 : 1)
+                // 押下は即時（nil）・解放だけアニメ。押した瞬間の応答を遅らせない。
+                .animation(configuration.isPressed ? nil : LaboTheme.Motion.feedback, value: configuration.isPressed)
                 .contentShape(Circle())
         }
     }

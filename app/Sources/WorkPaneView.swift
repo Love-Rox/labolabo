@@ -500,23 +500,34 @@ struct FileDetailView: View {
 
 /// Diff⇄全文 の切替ピル。Web 版のピル型トグルに合わせ、Capsule トラックの上に
 /// 選択中だけブランド色の Capsule を敷く（segmented Picker の置き換え）。
+/// 選択カプセルは matchedGeometryEffect で共有し、切替時に横へスライドさせる。
 private struct ViewModePillToggle: View {
     @Binding var selection: FileViewMode
+    @Namespace private var selectionNS
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         HStack(spacing: 2) {
             ForEach(FileViewMode.allCases) { mode in
                 Button {
-                    selection = mode
+                    if reduceMotion {
+                        selection = mode
+                    } else {
+                        withAnimation(LaboTheme.Motion.move) { selection = mode }
+                    }
                 } label: {
                     Text(mode.rawValue)
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(selection == mode ? LaboTheme.brandText : Color.secondary)
                         .padding(.horizontal, 8)
                         .padding(.vertical, 2)
-                        .background(
-                            Capsule().fill(selection == mode ? LaboTheme.brand.opacity(0.15) : Color.clear)
-                        )
+                        .background {
+                            if selection == mode {
+                                Capsule()
+                                    .fill(LaboTheme.brand.opacity(0.15))
+                                    .matchedGeometryEffect(id: "selection", in: selectionNS)
+                            }
+                        }
                 }
                 .buttonStyle(.plain)
             }
