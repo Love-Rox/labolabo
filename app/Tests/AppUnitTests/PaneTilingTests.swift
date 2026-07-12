@@ -71,7 +71,7 @@ final class PaneTilingTests: XCTestCase {
         XCTAssertEqual(model.root.children.count, 2)
         // ルート第 1 子は端末リーフ。
         XCTAssertTrue(model.root.children[0].isLeaf)
-        XCTAssertEqual(model.root.children[0].pane?.kind, .terminal)
+        XCTAssertEqual(model.root.children[0].selectedPane?.kind, .terminal)
     }
 
     // MARK: - split / add / close
@@ -188,21 +188,107 @@ final class PaneTilingTests: XCTestCase {
         XCTAssertEqual(model.panes.map(\.kind), [.terminal, .commits, .files, .diff])
     }
 
-    // MARK: - swap / revision
+    // MARK: - タブ（中央ドロップ合流 / 端ドロップで分割独立 / タブ単位クローズ）
 
-    /// swap は 2 ペインの中身を入れ替える（位置は保つ）。
-    func testSwapExchangesPaneKinds() {
+    /// 中央ドロップで別ペインのタブグループへ合流し、合流したタブが選択される。
+    func testMoveCenterMergesIntoTabGroup() {
         let model = makeSinglePaneModel(kind: .terminal)
         model.addPane(PaneItem(kind: .files, title: "f"))
-        XCTAssertEqual(model.panes.map(\.kind), [.terminal, .files])
+        let terminalID = model.panes[0].id
+        let filesID = model.panes[1].id
+
+        model.move(terminalID, toEdgeOf: filesID, edge: .center)
+
+        XCTAssertEqual(model.panes.count, 2, "タブ合流でペイン総数は変わらない")
+        XCTAssertTrue(model.root.isLeaf, "リーフ 2 枚が 1 つのタブグループに畳まれる")
+        XCTAssertEqual(model.root.panes.map(\.kind), [.files, .terminal])
+        XCTAssertEqual(model.root.selectedPane?.id, terminalID, "合流したタブが選択される")
+    }
+
+    /// グループ内のタブを端へドロップすると分割で独立する。
+    func testMoveEdgeSplitsTabOutOfGroup() {
+        let model = makeSinglePaneModel(kind: .terminal)
+        model.addPane(PaneItem(kind: .files, title: "f"))
+        let terminalID = model.panes[0].id
+        let filesID = model.panes[1].id
+        model.move(terminalID, toEdgeOf: filesID, edge: .center) // まず合流
+
+        model.move(terminalID, toEdgeOf: filesID, edge: .right) // 右へ分割独立
+
+        XCTAssertFalse(model.root.isLeaf)
+        XCTAssertEqual(model.panes.count, 2)
+        XCTAssertEqual(model.root.children[0].selectedPane?.kind, .files)
+        XCTAssertEqual(model.root.children[1].selectedPane?.kind, .terminal)
+    }
+
+    /// 複数タブのグループで close はそのタブだけ閉じ、前面になるタブの id を返す。
+    func testCloseTabInGroupKeepsSiblingTabs() {
+        let model = makeSinglePaneModel(kind: .terminal)
+        model.addPane(PaneItem(kind: .files, title: "f"))
+        let terminalID = model.panes[0].id
+        let filesID = model.panes[1].id
+        model.move(terminalID, toEdgeOf: filesID, edge: .center)
+
+        let revealed = model.close(paneID: terminalID)
+
+        XCTAssertEqual(model.panes.count, 1)
+        XCTAssertEqual(model.panes[0].kind, .files)
+        XCTAssertEqual(revealed, filesID, "閉じた結果前面になるタブが返る")
+    }
+
+    // MARK: - タブグループの保存 / 復元
+
+    /// タブグループ（2 枚以上）は panes/selectedIndex で往復し、
+    /// タブ別のセッション ID / transcript パスも保たれる。
+    func testTabGroupSnapshotRoundTrip() {
+        let model = makeSinglePaneModel(kind: .terminal)
+        model.addPane(PaneItem(kind: .terminal, title: "t2"))
         let a = model.panes[0].id
         let b = model.panes[1].id
+        model.move(a, toEdgeOf: b, edge: .center)
+        model.panes[0].agentSessionID = "sid-1"
+        model.panes[0].agentTranscriptPath = "/tmp/t1.jsonl"
 
-        model.swap(a, b)
+        let restored = PaneTilingModel.model(from: model.snapshot())
 
-        XCTAssertEqual(model.panes.count, 2)
-        XCTAssertEqual(model.panes.map(\.kind), [.files, .terminal], "位置は保ったまま種別が入れ替わる")
+        XCTAssertNotNil(restored)
+        XCTAssertTrue(restored?.root.isLeaf ?? false)
+        XCTAssertEqual(restored?.root.panes.count, 2)
+        XCTAssertEqual(restored?.root.panes[0].agentSessionID, "sid-1")
+        XCTAssertEqual(restored?.root.panes[0].agentTranscriptPath, "/tmp/t1.jsonl")
+        XCTAssertEqual(restored?.root.selectedIndex, model.root.selectedIndex)
     }
+
+    /// 単一タブのリーフは旧形式（paneKind）で書き出し、旧データも読める（後方互換）。
+    func testSingleTabEncodesLegacyFormatAndDecodesIt() {
+        let model = makeSinglePaneModel(kind: .terminal)
+        model.panes[0].agentSessionID = "sid-9"
+        let layout = model.snapshot()
+        XCTAssertEqual(layout.paneKind, "terminal", "単一タブは旧形式キーで書く")
+        XCTAssertNil(layout.panes)
+        XCTAssertEqual(layout.paneAgentSessionId, "sid-9")
+
+        // 旧形式（タブ導入前の JSON 相当）も復元できる。
+        let legacy = TileLayout(paneKind: "files", paneTitle: "変更")
+        let restored = PaneTilingModel.model(from: legacy)
+        XCTAssertEqual(restored?.root.selectedPane?.kind, .files)
+        XCTAssertEqual(restored?.root.selectedPane?.title, "変更")
+    }
+
+    /// strippingAgentSessions はタブ別のセッション情報だけ除き、配置の形は保つ。
+    func testStrippingAgentSessionsRemovesIDs() {
+        let model = makeSinglePaneModel(kind: .terminal)
+        model.addPane(PaneItem(kind: .terminal, title: "t2", agentSessionID: "sid-2", agentTranscriptPath: "/tmp/x"))
+        model.panes[0].agentSessionID = "sid-1"
+
+        let restored = PaneTilingModel.model(from: model.snapshot().strippingAgentSessions())
+
+        XCTAssertEqual(restored?.panes.count, 2)
+        XCTAssertTrue(restored?.panes.allSatisfy { $0.agentSessionID == nil } ?? false)
+        XCTAssertTrue(restored?.panes.allSatisfy { $0.agentTranscriptPath == nil } ?? false)
+    }
+
+    // MARK: - revision
 
     /// 構造変更ごとに revision がインクリメントされ、onLayoutChanged が呼ばれる。
     func testMutationBumpsRevisionAndFiresLayoutCallback() {
