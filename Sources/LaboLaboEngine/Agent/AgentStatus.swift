@@ -29,18 +29,23 @@ public struct AgentStatusEvent: Sendable {
     public let sessionID: String?
     public let transcriptPath: String?
     public let cwd: String?
+    /// フォワーダが環境変数 LABOLABO_PANE から付与した端末ペイン ID（UUID 文字列）。
+    /// LaboLabo が生成した端末以外（外部ターミナル等）からのイベントでは nil。
+    public let paneID: String?
 
     public init(
         hookEvent: String,
         status: AgentStatus,
         sessionID: String?,
         transcriptPath: String?,
-        cwd: String?
+        cwd: String?,
+        paneID: String? = nil
     ) {
         self.hookEvent = hookEvent
         self.status = status
         self.sessionID = sessionID
         self.transcriptPath = transcriptPath
         self.cwd = cwd
+        self.paneID = paneID
     }
 }
