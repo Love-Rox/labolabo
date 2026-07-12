@@ -187,10 +187,10 @@ struct BugReportSheet: View {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(issueBody, forType: .string)
-        withAnimation { copied = true }
+        withAnimation(LaboTheme.Motion.feedback) { copied = true }
         Task {
             try? await Task.sleep(for: .seconds(2))
-            withAnimation { copied = false }
+            withAnimation(LaboTheme.Motion.feedback) { copied = false }
         }
     }
 }
