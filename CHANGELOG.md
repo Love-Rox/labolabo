@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.7.0](https://github.com/Love-Rox/labolabo/compare/v0.6.2...v0.7.0) (2026-07-12)
+
+
+### 新機能
+
+* Claude セッションのタブ別記憶と自動 resume・終了時保存 ([753bd70](https://github.com/Love-Rox/labolabo/commit/753bd707c87e544c0b83ed6fb1e2fe97ce699bf2))
+* UI アニメーションを整備（モーショントークン・電力/Reduce Motion 対応） ([cda417b](https://github.com/Love-Rox/labolabo/commit/cda417b6749da62d7e089a8345db34e355f24e52))
+* 端末ペインのタブ化とフォーカス制御 ([749cc10](https://github.com/Love-Rox/labolabo/commit/749cc10f31d5b820b32bd3c8de68fe3092b53163))
+
 ## [0.6.2](https://github.com/Love-Rox/labolabo/compare/v0.6.1...v0.6.2) (2026-07-10)
 
 
