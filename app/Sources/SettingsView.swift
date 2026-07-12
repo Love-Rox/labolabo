@@ -20,6 +20,7 @@ struct GeneralSettingsView: View {
     @AppStorage(AppIconController.defaultsKey) private var iconModeRaw = AppIconMode.auto.rawValue
     @AppStorage(AgentNotifier.enabledKey) private var notifyWaiting = true
     @AppStorage(UpdateChecker.autoCheckKey) private var checkUpdatesOnLaunch = true
+    @AppStorage("autoResumeAgentOnRestore") private var autoResumeAgentOnRestore = true
     /// ツール診断（@Observable シングルトン。body でのアクセスが追跡される）。
     private var doctor: ToolDoctor { .shared }
     /// アップデートチェッカ（@Observable シングルトン）。
@@ -77,6 +78,16 @@ struct GeneralSettingsView: View {
                 Text("通知")
             } footer: {
                 Text("別のセッションで作業中や、アプリが非アクティブのときに、エージェントが入力・許可待ちになったら macOS 通知で知らせます。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section {
+                Toggle("復元したセッションを開いたとき Claude を自動再開", isOn: $autoResumeAgentOnRestore)
+            } header: {
+                Text("自動再開")
+            } footer: {
+                Text("前回のセッション ID がある場合のみ。セッションを最初に表示したときに端末へ claude --resume を自動入力します。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

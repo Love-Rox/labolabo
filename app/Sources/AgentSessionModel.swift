@@ -34,6 +34,10 @@ final class AgentSessionModel {
     private let onSessionID: ((String, String?) -> Void)?
     /// 状態が変化したときに呼ばれる（入力待ちの通知などに使う）。
     private let onStatusChange: ((AgentStatus) -> Void)?
+    /// (sessionID, ペイン UUID 文字列, transcript パス) を受信したら呼ばれる。端末タブごとの
+    /// Claude セッション対応付け（タブ別 --resume）に使う。UI 層（SessionDetailView）が
+    /// 表示時に差し込むため、init 引数ではなく差し替え可能な var にしている。
+    @ObservationIgnored var onPaneSessionID: ((String, String, String?) -> Void)?
 
     /// resume に使う ID。今回受信済みなら最新、無ければ前回永続化分。
     private var resumeID: String? { lastSessionID ?? initialResumeID }
@@ -82,6 +86,8 @@ final class AgentSessionModel {
             if let id = event.sessionID {
                 lastSessionID = id
                 onSessionID?(id, event.transcriptPath) // 次回起動の --resume 用に永続化
+                // LaboLabo の端末から起動されたものはペイン ID が付く → タブと対応付け。
+                if let paneID = event.paneID { onPaneSessionID?(id, paneID, event.transcriptPath) }
             }
             if status != previous { onStatusChange?(status) }
             // 応答完了/終了時に transcript から使用量を集計（推定）。

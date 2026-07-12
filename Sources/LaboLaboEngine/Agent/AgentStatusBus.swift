@@ -100,7 +100,8 @@ public final class AgentStatusBus: @unchecked Sendable {
             status: status,
             sessionID: object["session_id"] as? String,
             transcriptPath: object["transcript_path"] as? String,
-            cwd: object["cwd"] as? String
+            cwd: object["cwd"] as? String,
+            paneID: object["labolabo_pane_id"] as? String
         )
         DispatchQueue.main.async { [weak self] in
             self?.onEvent?(event)

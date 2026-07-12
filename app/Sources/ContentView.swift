@@ -325,15 +325,18 @@ struct SessionRow: View {
                 PRBadge(pr: pr)
             }
             // ホバー時に閉じる×を表示（サイドバー内で直接閉じる）。
-            if hovering {
-                Button(action: onClose) {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 10, weight: .semibold))
-                }
-                .buttonStyle(.borderless)
-                .foregroundStyle(.secondary)
-                .help("セッションを閉じる")
+            // if で挿入すると PRBadge や名前のトランケーションがホバーのたびに
+            // 横シフトするため、常駐させて opacity だけ切り替える（表示は即時）。
+            Button(action: onClose) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 10, weight: .semibold))
             }
+            .buttonStyle(.borderless)
+            .foregroundStyle(.secondary)
+            .help("セッションを閉じる")
+            .opacity(hovering ? 1 : 0)
+            .allowsHitTesting(hovering)
+            .accessibilityHidden(!hovering)
         }
         .padding(.vertical, 2)
         .padding(.trailing, 8)
@@ -341,39 +344,63 @@ struct SessionRow: View {
     }
 }
 
-/// セッション行のエージェント状態ドット。進行中（起動中/実行中/入力待ち）は
-/// パルスで目立たせ、待機(idle)は点灯のみ、未起動/終了は非表示。
+/// セッション行のエージェント状態ドット。実行中はソナー風ピング、入力待ちは
+/// 呼吸ハローで動きを変えて区別し、待機(idle)は点灯のみ、未起動/終了は非表示。
 struct AgentStatusIndicator: View {
     let status: AgentStatus
-    @State private var animate = false
+    @State private var windowVisible = true
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         ZStack {
-            if let tint, pulses {
-                Circle()
-                    .fill(tint.opacity(0.35))
-                    .frame(width: 15, height: 15)
-                    .scaleEffect(animate ? 1.0 : 0.4)
-                    .opacity(animate ? 0 : 0.85)
+            // 進行中のアニメーション。ウィンドウが完全に隠れている間と Reduce Motion
+            // 有効時は階層から外して描画コストをゼロにする（状態はグロー付きドット
+            // だけでも伝わる）。駆動は PhaseAnimator: onAppear + repeatForever は
+            // ビューの初回挿入と同じトランザクションだとアニメが始まらないことが
+            // あるため、挿入タイミングに依存しない方式にする。
+            if let tint, windowVisible, !reduceMotion {
+                switch status {
+                case .starting, .running:
+                    // ソナー風ピング: 「動き続けている」ことの表現。
+                    Circle()
+                        .fill(tint.opacity(0.35))
+                        .frame(width: 15, height: 15)
+                        .phaseAnimator([false, true]) { ring, expanded in
+                            ring
+                                .scaleEffect(expanded ? 1.0 : 0.4)
+                                .opacity(expanded ? 0 : 0.85)
+                        } animation: { expanded in
+                            // 拡散は 1.1s ease-out、開始位置への戻りは無アニメ（リセット）。
+                            expanded ? .easeOut(duration: 1.1) : nil
+                        }
+                case .waitingForInput:
+                    // 呼吸するハロー: ピングと動きの種類を変え、「入力を待っている」
+                    // 注意喚起を琥珀色と併せて一目で区別できるようにする。
+                    Circle()
+                        .fill(tint.opacity(0.45))
+                        .frame(width: 13, height: 13)
+                        .phaseAnimator([false, true]) { halo, up in
+                            halo
+                                .scaleEffect(up ? 1.5 : 0.9)
+                                .opacity(up ? 0.2 : 0.7)
+                        } animation: { _ in
+                            .easeInOut(duration: 0.55)
+                        }
+                case .idle, .none, .ended:
+                    EmptyView()
+                }
             }
             Circle()
                 .fill(tint ?? .clear)
                 .frame(width: 7, height: 7)
                 // 進行中はブランド色のグローで目立たせる。
                 .shadow(color: pulses ? (tint ?? .clear).opacity(0.8) : .clear, radius: 3)
+                // 状態遷移の色（とグロー）をクロスフェード。
+                .animation(LaboTheme.Motion.tint, value: status)
         }
         .frame(width: 12, height: 12)
         .help(status == .none ? "" : status.label)
-        .onAppear { restartPulse() }
-        .onChange(of: status) { _, _ in restartPulse() }
-    }
-
-    private func restartPulse() {
-        animate = false
-        guard pulses else { return }
-        withAnimation(.easeOut(duration: 1.1).repeatForever(autoreverses: false)) {
-            animate = true
-        }
+        .background(WindowVisibilityReader(isVisible: $windowVisible))
     }
 
     /// 進行中はパルスさせる。
@@ -568,6 +595,49 @@ struct SessionDetailView: View {
         configSource = GhosttyConfig.userConfigSource()
     }
 
+    /// 起動復元されたセッションを初めて表示したとき、前回の Claude セッションを自動再開する。
+    /// pendingAutoResume は初回消費で false に戻る一時フラグ（RepoSession 側）。
+    /// タブ別のセッション ID が保存されていれば **各端末タブへそれぞれの --resume** を打ち、
+    /// 無ければ従来どおりセッション単位の ID を最初の端末へ（それも無ければ ✨ ボタンと
+    /// 同じ経路で新規端末に）フォールバックする。新規ペインはむやみに増やさない。
+    private func triggerAutoResumeIfNeeded() {
+        guard session.pendingAutoResume else { return }
+        session.pendingAutoResume = false // 1 回だけ
+        guard (UserDefaults.standard.object(forKey: "autoResumeAgentOnRestore") as? Bool) ?? true else { return }
+        // 既に動いていたら何もしない。.ended も許可するのは、アプリ終了時に死んだ旧 claude の
+        // SessionEnd hook が再起動直後の（同一パスで bind し直した）ソケットへ遅れて届き、
+        // status が .ended になって resume がスキップされるレースがあるため。
+        guard let agent = session.agent,
+              agent.status == .none || agent.status == .ended else { return }
+
+        // タブ別 resume: hooks の LABOLABO_PANE 対応付けで保存された各タブの ID を再開。
+        if agentAdapter.capabilities.resume {
+            let resumable = tiling.terminalPanes.filter { pane in
+                guard let id = pane.agentSessionID, !id.isEmpty else { return false }
+                // transcript が記録済みなのに実在しない = 会話を保存せず終了した空セッション。
+                // resume しても "No conversation found" になるだけなのでスキップする。
+                if let path = pane.agentTranscriptPath,
+                   !FileManager.default.fileExists(atPath: path) { return false }
+                return true
+            }
+            if !resumable.isEmpty {
+                for pane in resumable {
+                    tiling.sendToTerminal(
+                        paneID: pane.id,
+                        command: agentAdapter.launchCommand(resumeID: pane.agentSessionID)
+                    )
+                }
+                return
+            }
+        }
+
+        // 従来フォールバック（タブ別 ID の無い旧データ）: セッション単位の ID を 1 本だけ。
+        let command = agent.launchCommand()
+        if !tiling.sendToExistingTerminal(command: command) {
+            tiling.launchInNewTerminal(title: agentAdapter.displayName, command: command)
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             sessionBar
@@ -588,10 +658,27 @@ struct SessionDetailView: View {
         .padding(.leading, sidebarCollapsed ? 0 : 10)
         .ignoresSafeArea(.container, edges: .top)
         .navigationTitle(session.name)
-        .onAppear { if isActive { work.start() } }
+        .onAppear {
+            // hooks イベントの（ペイン, セッション ID）対応をタブへ記録する配線。
+            // 背景セッションでも claude は動き続けるので、isActive に関係なく張る。
+            // SessionDetailView は ZStack に常駐するため実質セッションごとに 1 回。
+            let tiling = tiling
+            session.agent?.onPaneSessionID = { sessionID, paneUUIDString, transcriptPath in
+                tiling.recordAgentSession(
+                    id: sessionID, paneUUIDString: paneUUIDString, transcriptPath: transcriptPath
+                )
+            }
+            // アプリ終了時の最終レイアウト保存用（onDisappear は終了時に呼ばれる保証がない）。
+            store.registerLiveLayout(session.id) { [weak tiling] in tiling?.snapshot() }
+            if isActive {
+                work.start()
+                triggerAutoResumeIfNeeded()
+            }
+        }
         .onChange(of: isActive) { _, active in
             if active {
                 work.start()
+                triggerAutoResumeIfNeeded()
             } else {
                 work.stop()
             }

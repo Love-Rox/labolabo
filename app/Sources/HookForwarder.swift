@@ -4,7 +4,8 @@ import Foundation
 /// AF_UNIX ソケットへ 1 接続で送って即 exit する。Claude を待たせないよう速やかに終了。
 enum HookForwarder {
     static func forward(socketPath: String) {
-        let input = FileHandle.standardInput.readDataToEndOfFile()
+        var input = FileHandle.standardInput.readDataToEndOfFile()
+        input = annotatePane(input)
 
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { exit(0) }
@@ -29,5 +30,18 @@ enum HookForwarder {
             }
         }
         exit(0)
+    }
+
+    /// hook プロセスは claude（→ そのペインのシェル）の子孫なので、LaboLabo が端末ごとに
+    /// 仕込んだ LABOLABO_PANE（ペイン UUID）を環境変数として継承している。それをペイロードに
+    /// `labolabo_pane_id` として足すことで、session_id とタブの対応付けをアプリ側で復元できる。
+    /// 変数が無い（外部ターミナル等）/ JSON でない場合は原文をそのまま返す。
+    private static func annotatePane(_ input: Data) -> Data {
+        guard let paneID = ProcessInfo.processInfo.environment["LABOLABO_PANE"], !paneID.isEmpty,
+              var object = (try? JSONSerialization.jsonObject(with: input)) as? [String: Any] else {
+            return input
+        }
+        object["labolabo_pane_id"] = paneID
+        return (try? JSONSerialization.data(withJSONObject: object)) ?? input
     }
 }

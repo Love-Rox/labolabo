@@ -28,6 +28,9 @@ final class RepoSession: Identifiable {
     /// このセッションのエージェント状態モデル（開いている間 store が保持・監視）。
     /// 背景セッションでも hooks を受信するため、選択の有無に関係なく生かす。
     var agent: AgentSessionModel?
+    /// 起動復元されたセッションで、初回表示時に claude --resume を自動送信するか。
+    /// 消費（送信 or スキップ判定）したら false に戻す。永続化しない一時フラグ。
+    var pendingAutoResume = false
 
     init(
         id: UUID = UUID(),
@@ -73,6 +76,14 @@ final class SessionStore {
     private let github = GitHubEngine()
     private let db: SessionDatabase?
 
+    /// 生存中セッションの現在レイアウト提供者（アプリ終了時の最終保存用）。
+    /// SessionDetailView が weak 経由の closure を登録するので、閉じたセッションは
+    /// nil を返すだけになり自然に無効化される。
+    @ObservationIgnored private var liveLayoutProviders: [RepoSession.ID: () -> TileLayout?] = [:]
+    /// willTerminate を同期で受けるためのセレクタ式オブザーバ（async 監視だと
+    /// 通知後すぐプロセスが終了して実行されないことがある）。
+    @ObservationIgnored private var terminationObserver: TerminationObserver?
+
     init() {
         db = try? SessionDatabase(url: SessionDatabase.defaultURL())
         loadRepoColors()
@@ -87,7 +98,25 @@ final class SessionStore {
     func start() {
         guard !started else { return }
         started = true
+        // 終了時に全セッションの最終レイアウト（onLayoutChanged を発火しない divider の
+        // ratio 変更など）を保存する。onDisappear はアプリ終了時に呼ばれる保証がない。
+        terminationObserver = TerminationObserver { [weak self] in
+            self?.flushLiveLayouts()
+        }
         restore()
+    }
+
+    /// 表示中セッションのレイアウト提供者を登録する（SessionDetailView から）。
+    func registerLiveLayout(_ id: RepoSession.ID, provider: @escaping () -> TileLayout?) {
+        liveLayoutProviders[id] = provider
+    }
+
+    /// 全セッションの現在レイアウトを保存する（アプリ終了時に同期実行）。
+    private func flushLiveLayouts() {
+        for (id, provider) in liveLayoutProviders {
+            guard let layout = provider() else { continue }
+            savePaneLayout(id, layout)
+        }
     }
 
     /// このブランチに対応する PR を gh から取得（失敗/未検出なら nil）。
@@ -448,6 +477,8 @@ final class SessionStore {
                 transcriptPath: record.transcriptPath,
                 adapterID: record.adapterId ?? AgentAdapters.default.id
             )
+            // 前回の Claude セッション ID がある場合のみ、初回表示時に自動 resume する。
+            session.pendingAutoResume = record.agentSessionId != nil
             sessions.append(session)
             refreshBranch(session)
             resolveRepo(session)
@@ -508,10 +539,14 @@ final class SessionStore {
     }
 
     /// セッションの配置を保存し、同時に「新規セッションが継承する既定配置」も更新する。
+    /// 既定配置は「形」だけを継承させたいので、タブ別の Claude セッション ID は取り除く
+    /// （残すと新規セッションのタブが他所の会話 ID を引き継いでしまう）。
     func savePaneLayout(_ id: RepoSession.ID, _ layout: TileLayout) {
         guard let json = encodeLayout(layout) else { return }
         try? db?.setAppState(json, forKey: "paneLayout:" + id.uuidString)
-        try? db?.setAppState(json, forKey: Self.defaultLayoutKey)
+        if let defaultJSON = encodeLayout(layout.strippingAgentSessions()) {
+            try? db?.setAppState(defaultJSON, forKey: Self.defaultLayoutKey)
+        }
     }
 
     /// 名前付きプリセット一覧（全セッション共通）。
@@ -528,11 +563,13 @@ final class SessionStore {
     }
 
     /// 現在の配置を名前付きプリセットとして保存（同名は上書き）。
+    /// プリセットは全セッション共通の「配置の形」なので、タブ別の Claude セッション ID は
+    /// 保存前に取り除く（別セッションで適用したとき無関係な会話を resume しないように）。
     func savePreset(name: String, layout: TileLayout) {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         var list = presets.filter { $0.name != trimmed }
-        list.append(LayoutPreset(name: trimmed, layout: layout))
+        list.append(LayoutPreset(name: trimmed, layout: layout.strippingAgentSessions()))
         list.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
         persistPresets(list)
     }
@@ -569,4 +606,30 @@ final class SessionStore {
         if let transcriptPath { session.transcriptPath = transcriptPath }
         persist(session)
     }
+}
+
+// MARK: - アプリ終了の同期オブザーバ
+
+/// `NSApplication.willTerminateNotification` をセレクタ方式で**同期**受信する小さなヘルパ。
+/// block/async 監視だと通知直後にプロセスが終了してハンドラが走らないことがあるため、
+/// メインスレッドで同期に呼ばれるセレクタで受ける（willTerminate はメイン配送なので
+/// クラスごと @MainActor にできる）。
+@MainActor
+private final class TerminationObserver: NSObject {
+    private let onTerminate: () -> Void
+
+    init(_ onTerminate: @escaping () -> Void) {
+        self.onTerminate = onTerminate
+        super.init()
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(handleWillTerminate),
+            name: NSApplication.willTerminateNotification, object: nil
+        )
+    }
+
+    @objc private func handleWillTerminate() {
+        onTerminate()
+    }
+
+    deinit { NotificationCenter.default.removeObserver(self) }
 }

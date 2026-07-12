@@ -30,6 +30,18 @@ final class AgentStatusBusTests: XCTestCase {
         XCTAssertEqual(event.sessionID, "s1")
         XCTAssertEqual(event.transcriptPath, "/tmp/t.jsonl")
         XCTAssertEqual(event.cwd, "/tmp")
+        // フォワーダ由来の pane id が無い（外部ターミナル等）場合は nil。
+        XCTAssertNil(event.paneID)
+    }
+
+    func testPaneIDIsParsedWhenForwarderAnnotates() throws {
+        // フォワーダが LABOLABO_PANE から付与する labolabo_pane_id がイベントへ載ること。
+        // タブ別 resume（session_id ↔ ペインの対応付け）の要。
+        let json = #"{"hook_event_name":"SessionStart","session_id":"s9","labolabo_pane_id":"ABC-123"}"#
+        let event = try XCTUnwrap(expectEvent(sending: json))
+        XCTAssertEqual(event.status, .starting)
+        XCTAssertEqual(event.sessionID, "s9")
+        XCTAssertEqual(event.paneID, "ABC-123")
     }
 
     func testStopEventRoundTripEmitsIdle() throws {
