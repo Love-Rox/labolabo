@@ -5,11 +5,14 @@ import GhosttyTerminal
 
 // MARK: - Model
 //
-// One session's work area is a single binary tile tree whose leaves are any of:
-// a terminal surface, the changed-files pane, or the diff pane. The AppKit layer
-// (TilingCoordinator) owns the leaf NSViews and only *reparents* them between
-// NSSplitViews as the tree changes, so a terminal's pty/scrollback survives
-// split / move / swap (AppTerminalView keeps its surface across reparenting).
+// One session's work area is a single binary tile tree whose leaves are *tab
+// groups*: each leaf holds one or more panes (a terminal surface, the
+// changed-files pane, the diff pane, or the commit graph) stacked as tabs, with
+// one selected. The AppKit layer (TilingCoordinator) owns the leaf NSViews and
+// only *reparents* them between NSSplitViews as the tree changes, so a
+// terminal's pty/scrollback survives split / move / tab-merge (AppTerminalView
+// keeps its surface across reparenting). Dropping a pane on another leaf's
+// center merges it in as a tab; dropping on an edge still splits.
 
 enum PaneKind: String {
     case terminal
@@ -26,26 +29,78 @@ enum PaneKind: String {
         case .commits: return String(localized: "履歴")
         }
     }
+
+    /// ヘッダー / タブチップ共用の SF Symbol 名。
+    var iconName: String {
+        switch self {
+        case .terminal: return "terminal"
+        case .files: return "list.bullet.rectangle"
+        case .diff: return "doc.text"
+        case .commits: return "point.3.connected.trianglepath.dotted"
+        }
+    }
 }
 
-/// タイル配置の保存表現（Codable）。leaf は `paneKind`/`paneTitle`、split は
-/// `orientation`/`ratio`/`children`。セッション別配置と名前付きプリセットに使う。
+/// タブ 1 枚分の保存表現。
+struct PanePayload: Codable, Equatable {
+    var kind: String
+    var title: String?
+    /// この端末タブで最後に観測した Claude セッション ID（タブ別 --resume 用）。
+    var agentSessionId: String?
+    /// 対応する transcript(JSONL) のパス。resume 前の実在チェックに使う（保存前に
+    /// 終了した空セッションの ID へ無駄打ちしないため）。
+    var agentTranscriptPath: String?
+}
+
+/// タイル配置の保存表現（Codable）。leaf は単一タブなら旧形式（`paneKind`/`paneTitle`）、
+/// 2 枚以上のタブグループなら `panes`/`selectedIndex`。split は `orientation`/`ratio`/`children`。
+/// セッション別配置と名前付きプリセットに使う。
 struct TileLayout: Codable, Equatable {
     var paneKind: String?
     var paneTitle: String?
+    /// 旧形式（単一タブ）リーフ用の Claude セッション ID。旧リーダーには未知キーとして無害。
+    var paneAgentSessionId: String?
+    /// 旧形式（単一タブ）リーフ用の transcript パス。
+    var paneAgentTranscriptPath: String?
+    /// タブグループ（タブが 2 枚以上のときだけ書き出す。後方互換のため単一タブは旧形式）。
+    var panes: [PanePayload]?
+    /// 選択中タブの index（`panes` を書いたときだけ意味を持つ）。
+    var selectedIndex: Int?
     var orientation: String?
     var ratio: CGFloat?
     var children: [TileLayout]?
 
     init(
-        paneKind: String? = nil, paneTitle: String? = nil,
+        paneKind: String? = nil, paneTitle: String? = nil, paneAgentSessionId: String? = nil,
+        paneAgentTranscriptPath: String? = nil,
+        panes: [PanePayload]? = nil, selectedIndex: Int? = nil,
         orientation: String? = nil, ratio: CGFloat? = nil, children: [TileLayout]? = nil
     ) {
         self.paneKind = paneKind
         self.paneTitle = paneTitle
+        self.paneAgentSessionId = paneAgentSessionId
+        self.paneAgentTranscriptPath = paneAgentTranscriptPath
+        self.panes = panes
+        self.selectedIndex = selectedIndex
         self.orientation = orientation
         self.ratio = ratio
         self.children = children
+    }
+
+    /// タブ別の Claude セッション情報（ID / transcript パス）を除いたコピー。プリセットは
+    /// 全セッション共通の「配置の形」なので、特定セッションの再開情報を持ち込まないために使う。
+    func strippingAgentSessions() -> TileLayout {
+        var copy = self
+        copy.paneAgentSessionId = nil
+        copy.paneAgentTranscriptPath = nil
+        copy.panes = copy.panes?.map { payload in
+            var stripped = payload
+            stripped.agentSessionId = nil
+            stripped.agentTranscriptPath = nil
+            return stripped
+        }
+        copy.children = copy.children?.map { $0.strippingAgentSessions() }
+        return copy
     }
 }
 
@@ -62,39 +117,67 @@ final class PaneItem: Identifiable {
     let id = UUID()
     let kind: PaneKind
     var title: String
+    /// この端末タブで最後に観測した Claude セッション ID（hooks の labolabo_pane_id 対応付け）。
+    /// レイアウトと一緒に保存し、次回起動のタブ別 --resume に使う。端末以外は常に nil。
+    var agentSessionID: String?
+    /// 対応する transcript(JSONL) のパス（hooks 由来）。resume 前の実在チェック用。
+    var agentTranscriptPath: String?
 
-    init(kind: PaneKind, title: String) {
+    init(kind: PaneKind, title: String, agentSessionID: String? = nil, agentTranscriptPath: String? = nil) {
         self.kind = kind
         self.title = title
+        self.agentSessionID = agentSessionID
+        self.agentTranscriptPath = agentTranscriptPath
     }
 }
 
-/// A node in the binary tile tree: a leaf (`pane != nil`) or a 2-way split.
+/// A node in the binary tile tree: a leaf (tab group, `panes` non-empty) or a
+/// 2-way split (`panes` empty, two `children`).
 @MainActor
 @Observable
 final class TileNode: Identifiable {
     let id = UUID()
-    var pane: PaneItem?
+    /// リーフのタブ群（空 = split ノード）。並び順 = タブバーの表示順。
+    var panes: [PaneItem]
+    /// 選択中タブの index。panes を変えたら必ず有効範囲へクランプする（範囲外だと
+    /// selectedPane が first に退避してしまい、表示と保存がずれる）。
+    var selectedIndex: Int
     var orientation: NSUserInterfaceLayoutOrientation
     var children: [TileNode]
     /// First child's fraction of the split (0…1). Persisted across rebuilds.
     var ratio: CGFloat
 
     init(pane: PaneItem) {
-        self.pane = pane
+        panes = [pane]
+        selectedIndex = 0
+        orientation = .horizontal
+        children = []
+        ratio = 0.5
+    }
+
+    /// グループごと（タブ構成 + 選択）を新しいノードへ移すとき用。
+    init(panes: [PaneItem], selectedIndex: Int) {
+        self.panes = panes
+        self.selectedIndex = selectedIndex
         orientation = .horizontal
         children = []
         ratio = 0.5
     }
 
     init(orientation: NSUserInterfaceLayoutOrientation, ratio: CGFloat, children: [TileNode]) {
-        pane = nil
+        panes = []
+        selectedIndex = 0
         self.orientation = orientation
         self.ratio = ratio
         self.children = children
     }
 
-    var isLeaf: Bool { pane != nil }
+    var isLeaf: Bool { !panes.isEmpty }
+
+    /// 表示中タブ。selectedIndex が壊れていても first に退避して 1 枚は必ず返す。
+    var selectedPane: PaneItem? {
+        panes.indices.contains(selectedIndex) ? panes[selectedIndex] : panes.first
+    }
 }
 
 /// Where a dragged pane is dropped relative to the target pane.
@@ -117,7 +200,7 @@ final class PaneTilingModel {
     private(set) var revision: Int = 0
     /// AppKit 側コーディネータ（端末への text 送信に使う）。
     weak var coordinator: TilingCoordinator?
-    /// 構造変更（追加/削除/分割/移動/入替）ごとに呼ばれる。配置の永続化に使う。
+    /// 構造変更（追加/削除/分割/移動/合流）とタブ選択のたびに呼ばれる。配置の永続化に使う。
     /// ratio（ドラッグ）は bump しないので、離脱時に別途 snapshot して保存する。
     @ObservationIgnored var onLayoutChanged: (() -> Void)?
 
@@ -127,7 +210,38 @@ final class PaneTilingModel {
     func launchInNewTerminal(title: String, command: String) {
         let pane = PaneItem(kind: .terminal, title: title)
         addPane(pane)
+        // 開いた端末でそのまま操作できるよう、再構築後にフォーカスを渡す。
+        coordinator?.pendingFocusPaneID = pane.id
         coordinator?.scheduleSend(paneID: pane.id, text: command)
+    }
+
+    /// 既存の端末ペイン（最初に見つかったもの）へコマンドを送る。無ければ false。
+    /// 自動 resume 用: 新規ペインを増やさず、復元直後のシェルに resume を打ち込む。
+    func sendToExistingTerminal(command: String) -> Bool {
+        guard let pane = panes.first(where: { $0.kind == .terminal }) else { return false }
+        coordinator?.scheduleSend(paneID: pane.id, text: command)
+        return true
+    }
+
+    /// 端末タブ（全リーフ横断・木の順）。タブ別 resume の走査に使う。
+    var terminalPanes: [PaneItem] { panes.filter { $0.kind == .terminal } }
+
+    /// 指定ペインの端末へコマンドを送る（タブ別 resume 用）。
+    func sendToTerminal(paneID: UUID, command: String) {
+        coordinator?.scheduleSend(paneID: paneID, text: command)
+    }
+
+    /// hooks 由来の（ペイン, Claude セッション ID, transcript パス）対応を記録し、
+    /// レイアウトと一緒に永続化する。構造は変わらないので bump しない（reconcile 不要）。
+    func recordAgentSession(id: String, paneUUIDString: String, transcriptPath: String?) {
+        guard let uuid = UUID(uuidString: paneUUIDString),
+              let pane = panes.first(where: { $0.id == uuid }),
+              pane.kind == .terminal else { return }
+        let newTranscript = transcriptPath ?? pane.agentTranscriptPath
+        guard pane.agentSessionID != id || pane.agentTranscriptPath != newTranscript else { return }
+        pane.agentSessionID = id
+        pane.agentTranscriptPath = newTranscript
+        onLayoutChanged?()
     }
 
     static func defaultLayout() -> PaneTilingModel {
@@ -149,7 +263,9 @@ final class PaneTilingModel {
         onLayoutChanged?()
     }
 
-    var panes: [PaneItem] { Self.leaves(root).compactMap(\.pane) }
+    /// 全リーフの全タブ。非表示タブも含めることで reconcile の liveIDs（contentCache の
+    /// purge 判定）に残り、隠れているタブの pty が殺されない。
+    var panes: [PaneItem] { Self.leaves(root).flatMap(\.panes) }
     func hasPane(kind: PaneKind) -> Bool { panes.contains { $0.kind == kind } }
 
     // MARK: - 配置のシリアライズ / 復元 / プリセット適用
@@ -177,8 +293,27 @@ final class PaneTilingModel {
     }
 
     private static func encode(_ node: TileNode) -> TileLayout {
-        if let pane = node.pane {
-            return TileLayout(paneKind: pane.kind.rawValue, paneTitle: pane.title)
+        if node.isLeaf {
+            // 後方互換: 単一タブは旧形式（paneKind/paneTitle）で書く。タブ導入前のリーダーでも
+            // 読めるよう、2 枚以上のときだけ新しい panes/selectedIndex を使う。
+            if node.panes.count == 1, let pane = node.panes.first {
+                return TileLayout(
+                    paneKind: pane.kind.rawValue,
+                    paneTitle: pane.title,
+                    paneAgentSessionId: pane.agentSessionID,
+                    paneAgentTranscriptPath: pane.agentTranscriptPath
+                )
+            }
+            return TileLayout(
+                panes: node.panes.map {
+                    PanePayload(
+                        kind: $0.kind.rawValue, title: $0.title,
+                        agentSessionId: $0.agentSessionID,
+                        agentTranscriptPath: $0.agentTranscriptPath
+                    )
+                },
+                selectedIndex: node.selectedIndex
+            )
         }
         return TileLayout(
             orientation: node.orientation == .vertical ? "vertical" : "horizontal",
@@ -188,8 +323,29 @@ final class PaneTilingModel {
     }
 
     private static func decode(_ layout: TileLayout) -> TileNode? {
+        // 新形式のタブグループを優先。不正 kind の要素は捨て、全滅ならリーフ不成立で nil。
+        if let payloads = layout.panes {
+            let items = payloads.compactMap { payload -> PaneItem? in
+                guard let kind = PaneKind(rawValue: payload.kind) else { return nil }
+                return PaneItem(
+                    kind: kind,
+                    title: payload.title ?? kind.defaultTitle,
+                    agentSessionID: payload.agentSessionId,
+                    agentTranscriptPath: payload.agentTranscriptPath
+                )
+            }
+            guard !items.isEmpty else { return nil }
+            let idx = min(max(0, layout.selectedIndex ?? 0), items.count - 1)
+            return TileNode(panes: items, selectedIndex: idx)
+        }
+        // 旧形式: 単一リーフ。
         if let kindRaw = layout.paneKind, let kind = PaneKind(rawValue: kindRaw) {
-            return TileNode(pane: PaneItem(kind: kind, title: layout.paneTitle ?? kind.defaultTitle))
+            return TileNode(pane: PaneItem(
+                kind: kind,
+                title: layout.paneTitle ?? kind.defaultTitle,
+                agentSessionID: layout.paneAgentSessionId,
+                agentTranscriptPath: layout.paneAgentTranscriptPath
+            ))
         }
         guard let children = layout.children, children.count >= 2 else { return nil }
         let nodes = children.compactMap(decode)
@@ -203,13 +359,9 @@ final class PaneTilingModel {
     // MARK: mutations
 
     func split(paneID: UUID, orientation: NSUserInterfaceLayoutOrientation, newPane: PaneItem) {
-        guard let node = Self.findLeaf(root, paneID: paneID), let existing = node.pane else { return }
-        let keep = TileNode(pane: existing)
-        let added = TileNode(pane: newPane)
-        node.pane = nil
-        node.orientation = orientation
-        node.children = [keep, added]
-        node.ratio = 0.5
+        guard let node = Self.findLeaf(containing: paneID, in: root) else { return }
+        // keep 側はグループ全体（タブ構成/選択を引き継ぐ）、added 側は新ペイン単独。
+        splitLeafOut(node, movedPane: newPane, edge: orientation == .horizontal ? .right : .bottom)
         bump()
     }
 
@@ -225,45 +377,93 @@ final class PaneTilingModel {
         addPane(PaneItem(kind: kind, title: title))
     }
 
-    func close(paneID: UUID) {
-        guard let node = Self.findLeaf(root, paneID: paneID),
-              let (parent, index) = Self.findParent(root, childID: node.id) else {
-            return // root-only pane: keep at least one
+    /// タブ/ペインを閉じる。戻り値は「閉じた結果、新しく前面になったタブ」の id
+    ///（フォーカス移動に使う。閉じられなかった/前面が定まらないときは nil）。
+    @discardableResult
+    func close(paneID: UUID) -> UUID? {
+        guard let node = Self.findLeaf(containing: paneID, in: root),
+              let index = node.panes.firstIndex(where: { $0.id == paneID }) else { return nil }
+        if node.panes.count > 1 {
+            // グループに複数タブ → その 1 枚だけ閉じる（残タブの pty は温存される）。
+            removePane(at: index, from: node)
+            bump()
+            return node.selectedPane?.id
         }
-        collapse(parent, into: parent.children[index == 0 ? 1 : 0])
+        // 最後の 1 枚: 従来どおり親を兄弟へ collapse。root 単独リーフなら最低 1 ペインを維持して no-op。
+        guard let (parent, pIndex) = Self.findParent(root, childID: node.id) else { return nil }
+        collapse(parent, into: parent.children[pIndex == 0 ? 1 : 0])
         bump()
+        // collapse 後の parent がリーフ（タブグループ）ならその選択タブが前面になる。
+        return parent.selectedPane?.id
     }
 
-    func move(_ sourceID: UUID, toEdgeOf targetID: UUID, edge: DropEdge) {
-        guard sourceID != targetID else { return }
-        if edge == .center { swap(sourceID, targetID); return }
-        guard let sourceNode = Self.findLeaf(root, paneID: sourceID),
-              let sourcePane = sourceNode.pane else { return }
-        detach(sourceNode)
-        // Tree changed; re-find the target by pane id.
-        guard let targetNode = Self.findLeaf(root, paneID: targetID),
-              let targetPane = targetNode.pane else { bump(); return }
+    /// タブ/ペインの移動。実際に木を変更したら true（フォーカス移動の判定に使う）。
+    @discardableResult
+    func move(_ sourceID: UUID, toEdgeOf targetID: UUID, edge: DropEdge) -> Bool {
+        guard let sourceLeaf = Self.findLeaf(containing: sourceID, in: root),
+              let sourceIndex = sourceLeaf.panes.firstIndex(where: { $0.id == sourceID }),
+              let targetLeaf = Self.findLeaf(containing: targetID, in: root) else { return false }
+        let source = sourceLeaf.panes[sourceIndex]
 
+        // 同一グループへのドロップ。
+        if sourceLeaf === targetLeaf {
+            if edge == .center { return false }                     // 合流済み（同じグループの中央）= no-op
+            guard sourceLeaf.panes.count > 1 else { return false }  // 単独タブを自分の端に落とすのは無意味
+            removePane(at: sourceIndex, from: sourceLeaf)
+            // 残ったグループを edge 方向へ 2 分割し、source を新リーフとして edge 側へ独立させる。
+            splitLeafOut(sourceLeaf, movedPane: source, edge: edge)
+            bump()
+            return true
+        }
+
+        // 別グループへ: source を元グループから取り除く（空になれば親を collapse で畳む）。
+        removePane(at: sourceIndex, from: sourceLeaf)
+        if sourceLeaf.panes.isEmpty { detach(sourceLeaf) }
+
+        // 木が変わったので target を取り直す（消えていれば現行 move と同じく bump して return）。
+        guard let target = Self.findLeaf(containing: targetID, in: root) else { bump(); return true }
+        if edge == .center {
+            // タブ合流: 末尾に足して選択。
+            target.panes.append(source)
+            target.selectedIndex = target.panes.count - 1
+        } else {
+            splitLeafOut(target, movedPane: source, edge: edge)
+        }
+        bump()
+        return true
+    }
+
+    /// タブ選択の変更。構造は変わらない（reconcile 不要）ので bump しないが、選択状態の永続化の
+    /// ため onLayoutChanged だけ呼ぶ。表示（isHidden）の張り替えは AppKit 側が行う。
+    func selectTab(paneID: UUID) {
+        guard let node = Self.findLeaf(containing: paneID, in: root),
+              let i = node.panes.firstIndex(where: { $0.id == paneID }),
+              node.selectedIndex != i else { return }
+        node.selectedIndex = i
+        onLayoutChanged?()
+    }
+
+    /// リーフ `node`（グループ全体を保持）を edge 方向に 2 分割し、`movedPane` を edge 側の
+    /// 新リーフとして置く。keep 側は既存のタブ構成/選択を丸ごと引き継ぐ。
+    private func splitLeafOut(_ node: TileNode, movedPane: PaneItem, edge: DropEdge) {
         let orientation: NSUserInterfaceLayoutOrientation =
             (edge == .left || edge == .right) ? .horizontal : .vertical
-        let sourceOnSecond = (edge == .right || edge == .bottom)
-        let keep = TileNode(pane: targetPane)
-        let moved = TileNode(pane: sourcePane)
-        targetNode.pane = nil
-        targetNode.orientation = orientation
-        targetNode.children = sourceOnSecond ? [keep, moved] : [moved, keep]
-        targetNode.ratio = 0.5
-        bump()
+        let movedOnSecond = (edge == .right || edge == .bottom)
+        let keep = TileNode(panes: node.panes, selectedIndex: node.selectedIndex)
+        let moved = TileNode(pane: movedPane)
+        node.panes = []
+        node.selectedIndex = 0
+        node.orientation = orientation
+        node.children = movedOnSecond ? [keep, moved] : [moved, keep]
+        node.ratio = 0.5
     }
 
-    func swap(_ a: UUID, _ b: UUID) {
-        guard a != b,
-              let na = Self.findLeaf(root, paneID: a),
-              let nb = Self.findLeaf(root, paneID: b) else { return }
-        let tmp = na.pane
-        na.pane = nb.pane
-        nb.pane = tmp
-        bump()
+    /// リーフからタブ 1 枚を取り除き、selectedIndex を「見ていたタブが動かない」ように寄せる。
+    /// 除去位置より前を選択中だったら index を 1 つ手前へずらす（後続タブが繰り上がるため）。
+    private func removePane(at index: Int, from node: TileNode) {
+        node.panes.remove(at: index)
+        if index < node.selectedIndex { node.selectedIndex -= 1 }
+        node.selectedIndex = node.panes.isEmpty ? 0 : min(node.selectedIndex, node.panes.count - 1)
     }
 
     /// Remove a leaf by collapsing its parent into the sibling (no bump).
@@ -273,7 +473,8 @@ final class PaneTilingModel {
     }
 
     private func collapse(_ parent: TileNode, into sibling: TileNode) {
-        parent.pane = sibling.pane
+        parent.panes = sibling.panes
+        parent.selectedIndex = sibling.selectedIndex
         parent.orientation = sibling.orientation
         parent.children = sibling.children
         parent.ratio = sibling.ratio
@@ -285,10 +486,13 @@ final class PaneTilingModel {
         node.isLeaf ? [node] : node.children.flatMap(leaves)
     }
 
-    static func findLeaf(_ node: TileNode, paneID: UUID) -> TileNode? {
-        if node.pane?.id == paneID { return node }
+    /// paneID を含むリーフノードを返す。
+    static func findLeaf(containing paneID: UUID, in node: TileNode) -> TileNode? {
+        if node.isLeaf {
+            return node.panes.contains(where: { $0.id == paneID }) ? node : nil
+        }
         for child in node.children {
-            if let found = findLeaf(child, paneID: paneID) { return found }
+            if let found = findLeaf(containing: paneID, in: child) { return found }
         }
         return nil
     }
@@ -338,6 +542,11 @@ final class TilingCoordinator: NSObject {
 
     private var contentCache: [UUID: NSView] = [:]
     private var terminalDelegates: [UUID: TerminalLeafDelegate] = [:]
+    /// 次の reconcile 後にキーフォーカスを渡す端末ペイン。構造変更（タブ移動・分割・
+    /// 閉じる・新規端末）で「新しく前面になった端末」へ、木の再構築を待ってから
+    /// フォーカスを移すために使う（再構築前に makeFirstResponder しても view が
+    /// 入れ替わって無効になるため）。
+    var pendingFocusPaneID: UUID?
     /// 最後に再構築した revision。構造が変わっていないのに毎回ツリーを作り直すと
     /// 端末がチラつくため、revision が変わったときだけ reconcile する。
     private var lastRevision: Int = -1
@@ -350,7 +559,8 @@ final class TilingCoordinator: NSObject {
     func reconcile() {
         guard let container else { return }
         // 構造未変更（revision 据え置き）なら再構築しない。SwiftUI の再評価（状態ドットの
-        // パルス・git 更新など）で updateNSView が走ってもツリーを壊さず、チラつきを防ぐ。
+        // パルス・git 更新・タブ選択の onLayoutChanged など）で updateNSView が走っても
+        // ツリーを壊さず、チラつきを防ぐ。
         guard model.revision != lastRevision else { return }
         lastRevision = model.revision
         let liveIDs = Set(model.panes.map(\.id))
@@ -366,19 +576,33 @@ final class TilingCoordinator: NSObject {
             tree.bottomAnchor.constraint(equalTo: container.bottomAnchor),
         ])
 
-        // Release content (and surfaces) for panes that no longer exist.
+        // Release content (and surfaces) for panes that no longer exist. `liveIDs` は
+        // 非表示タブも含む全タブなので、隠れているだけのタブは purge されない。
         for id in contentCache.keys where !liveIDs.contains(id) {
             contentCache[id] = nil
             terminalDelegates[id] = nil
         }
+
+        // 構造変更で新しく前面になった端末へフォーカスを渡す（AppKit の親付け完了後）。
+        if let focusID = pendingFocusPaneID {
+            pendingFocusPaneID = nil
+            if let terminal = contentCache[focusID] as? AppTerminalView {
+                DispatchQueue.main.async { [weak terminal] in
+                    guard let terminal, let window = terminal.window else { return }
+                    window.makeFirstResponder(terminal)
+                }
+            }
+        }
     }
 
     private func buildNode(_ node: TileNode) -> NSView {
-        if let pane = node.pane {
+        if node.isLeaf {
+            // リーフの全タブ content を渡す。非表示タブも subview として温存され、pty と
+            // スクロールバックが死なない（model.panes が全タブを返すので contentCache も残る）。
             return PaneFrameView(
-                pane: pane,
+                node: node,
                 coordinator: self,
-                content: contentView(for: pane)
+                contents: node.panes.map { ($0.id, contentView(for: $0)) }
             )
         }
         let split = RatioSplitView()
@@ -397,7 +621,11 @@ final class TilingCoordinator: NSObject {
         switch pane.kind {
         case .terminal:
             let term = AppTerminalView(frame: NSRect(x: 0, y: 0, width: 480, height: 320))
-            term.controller = TerminalController(configSource: context.configSource)
+            // ペイン専用 config で LABOLABO_PANE（ペイン UUID）をシェル環境へ注入する。
+            // 手打ちの claude を含む子孫プロセスが hook 経由でタブと対応付くようになる。
+            term.controller = TerminalController(
+                configSource: Self.paneConfigSource(base: context.configSource, paneID: pane.id)
+            )
             term.configuration = TerminalSurfaceOptions(
                 backend: .exec,
                 workingDirectory: context.workingDirectory
@@ -417,32 +645,83 @@ final class TilingCoordinator: NSObject {
         return view
     }
 
-    // MARK: actions invoked from AppKit headers / drops
+    // MARK: - ペイン専用 Ghostty config（LABOLABO_PANE の注入）
 
-    func actions(for pane: PaneItem) -> PaneActions {
-        PaneActions(
-            splitRight: { [weak self] in self?.split(pane.id, .horizontal) },
-            splitDown: { [weak self] in self?.split(pane.id, .vertical) },
-            close: { [weak self] in self?.close(pane.id) },
-            canClose: model.panes.count > 1
-        )
+    /// ペイン専用の Ghostty config を生成する。ユーザー config を config-file で取り込みつつ、
+    /// command を「/usr/bin/env LABOLABO_PANE=<ペインUUID> + ユーザーのログインシェル」へ
+    /// 差し替える。これでこのペインのシェルと子孫プロセス（手打ちの claude を含む）が
+    /// ペイン ID を環境変数として持ち、hook フォワーダが session_id とタブを対応付けられる。
+    /// ユーザー config の `command` は意図的に無視する: LaboLabo のペインはコマンドを
+    /// 打ち込む前提の「シェル」であることが必須で、ghostty 用の command 設定（tmux 等）を
+    /// 持ち込むと ✨ 起動・自動 resume・WorkPane の前提が全部壊れるため。
+    /// NOTE: libghostty の C API（ghostty_surface_config_s.env_vars）は env 注入を持つが、
+    /// libghostty-spm 1.2.8 の TerminalSurfaceOptions が未公開のためこの方式を使う。
+    /// upstream が対応したらこの関数ごと env 注入へ差し替える。
+    static func paneConfigSource(
+        base: TerminalController.ConfigSource, paneID: UUID
+    ) -> TerminalController.ConfigSource {
+        var lines: [String] = []
+        switch base {
+        case let .file(path):
+            // ユーザー config は `config-file =` include ではなく**内容をそのまま**取り込む。
+            // include は ghostty 1.3.1 CLI でも黙って失敗することを確認しており（実機では
+            // フォント・テーマが既定に落ちた）、従来の .file 直読みと同一の入力を再現する
+            // のが確実。読めない場合は素通し（libghostty 既定 + command だけになる）。
+            // 注意: ユーザー config 内の相対パス config-file はこの方式では解決されない。
+            if let contents = try? String(contentsOfFile: path, encoding: .utf8) {
+                lines.append(contents)
+            }
+        case let .generated(contents):
+            lines.append(contents)
+        case .none:
+            break
+        }
+        lines.append("command = /usr/bin/env LABOLABO_PANE=\(paneID.uuidString) \(loginShellCommand())")
+        return .generated(lines.joined(separator: "\n") + "\n")
     }
+
+    /// ユーザーのログインシェル（passwd → $SHELL → zsh の順）。`-l` でログインシェル動作を
+    /// 再現する（.exec 既定のシェル起動に揃える）。
+    private static func loginShellCommand() -> String {
+        var shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+        if let pw = getpwuid(getuid()), let cShell = pw.pointee.pw_shell, cShell.pointee != 0 {
+            shell = String(cString: cShell)
+        }
+        return "\(shell) -l"
+    }
+
+    // MARK: actions invoked from AppKit headers / drops
 
     // NOTE: these only mutate the model. The rebuild is driven by SwiftUI via
     // `revision` → updateNSView → reconcile(), which runs on the *next* runloop
     // turn. Calling reconcile() synchronously here would tear down the very view
     // currently handling the drag / button tap (self) and crash AppKit.
 
-    private func split(_ paneID: UUID, _ orientation: NSUserInterfaceLayoutOrientation) {
-        model.split(paneID: paneID, orientation: orientation, newPane: PaneItem(kind: .terminal, title: String(localized: "端末")))
+    /// PaneFrameView（ヘッダーの分割ボタン）から呼ぶ。対象 pane は選択中タブとして解決済み。
+    func split(_ paneID: UUID, _ orientation: NSUserInterfaceLayoutOrientation) {
+        let newPane = PaneItem(kind: .terminal, title: String(localized: "端末"))
+        model.split(paneID: paneID, orientation: orientation, newPane: newPane)
+        // 開いた端末でそのまま入力できるように。
+        pendingFocusPaneID = newPane.id
     }
 
-    private func close(_ paneID: UUID) {
-        model.close(paneID: paneID)
+    /// PaneFrameView（ヘッダーの閉じるボタン）から呼ぶ。閉じた結果前面になった端末へ
+    /// フォーカスを渡す（ユーザー操作起点のときだけ。シェル exit 由来は handleProcessExit）。
+    func close(_ paneID: UUID) {
+        if let revealed = model.close(paneID: paneID),
+           model.panes.first(where: { $0.id == revealed })?.kind == .terminal {
+            pendingFocusPaneID = revealed
+        }
     }
 
     func handleDrop(sourceID: UUID, targetID: UUID, edge: DropEdge) {
-        model.move(sourceID, toEdgeOf: targetID, edge: edge)
+        // 実際に移動したときだけ、移動したタブ（端末なら）へ再構築後にフォーカスを移す。
+        // no-op（同一グループ中央など）でセットすると、次の無関係な再構築で非表示タブへ
+        // フォーカスが飛ぶので避ける。
+        if model.move(sourceID, toEdgeOf: targetID, edge: edge),
+           model.panes.first(where: { $0.id == sourceID })?.kind == .terminal {
+            pendingFocusPaneID = sourceID
+        }
     }
 
     /// 新規端末ペインのシェルが立ち上がった頃合いを見てテキスト（コマンド）を送る。
@@ -490,6 +769,7 @@ final class TerminalLeafDelegate: NSObject, TerminalSurfaceTitleDelegate, Termin
 extension TilingCoordinator {
     func handleProcessExit(paneID: UUID) {
         // Defer past the libghostty close callback; reconcile via `revision`.
+        // グループに複数タブがあれば close はそのタブだけ閉じる（model.close 側で分岐）。
         model.close(paneID: paneID)
     }
 }
@@ -564,9 +844,10 @@ final class RatioSplitView: NSSplitView, NSSplitViewDelegate {
     }
 }
 
-// MARK: - Leaf frame: header (SwiftUI) + content + drop zones (AppKit)
+// MARK: - Leaf frame: header (SwiftUI) + tab contents + drop zones (AppKit)
 
 struct PaneActions {
+    var onSelect: (UUID) -> Void
     var splitRight: () -> Void
     var splitDown: () -> Void
     var close: () -> Void
@@ -574,25 +855,29 @@ struct PaneActions {
 }
 
 final class PaneFrameView: NSView {
-    private let paneID: UUID
+    private let node: TileNode
     private weak var coordinator: TilingCoordinator?
-    private let header: NSView
-    private let content: NSView
+    /// self を参照する actions を張るため super.init 後に生成する（それまで nil）。
+    private var header: NSView!
+    /// タブ id → content view。選択中以外も subview として保持し（isHidden）、pty と
+    /// スクロールバックを温存する。木を作り直さずタブ切替できるのがこの配列の役目。
+    private let contents: [(id: UUID, view: NSView)]
     private let highlight = NSView()
     private static let headerHeight: CGFloat = 24
 
-    init(pane: PaneItem, coordinator: TilingCoordinator, content: NSView) {
-        paneID = pane.id
+    init(node: TileNode, coordinator: TilingCoordinator, contents: [(UUID, NSView)]) {
+        self.node = node
         self.coordinator = coordinator
-        self.content = content
-        header = NSHostingView(
-            rootView: PaneHeader(pane: pane, actions: coordinator.actions(for: pane))
-        )
+        self.contents = contents.map { (id: $0.0, view: $0.1) }
         super.init(frame: .zero)
 
         wantsLayer = true
-        addSubview(content)
-        addSubview(header)
+        // 全タブの content を重ねて配置（表示は showSelected の isHidden で 1 枚に絞る）。
+        for entry in self.contents { addSubview(entry.view) }
+
+        let hosting = NSHostingView(rootView: PaneHeader(node: node, actions: makeActions()))
+        header = hosting
+        addSubview(hosting)
 
         highlight.wantsLayer = true
         // ドロップ先ハイライトはブランド色（NSColor は非 Sendable のため inline 生成）。
@@ -601,17 +886,72 @@ final class PaneFrameView: NSView {
         addSubview(highlight)
 
         registerForDraggedTypes([.string])
+        showSelected()
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
+
+    private func makeActions() -> PaneActions {
+        PaneActions(
+            onSelect: { [weak self] id in
+                guard let self else { return }
+                // 選択はモデルだけ更新（bump しない = reconcile なし）し、表示は自前の
+                // isHidden 張り替えで即時反映。端末のチラつき防止のため木は作り直さない。
+                self.coordinator?.model.selectTab(paneID: id)
+                self.showSelected()
+                self.focusSelectedTerminal()
+            },
+            splitRight: { [weak self] in self?.splitSelected(.horizontal) },
+            splitDown: { [weak self] in self?.splitSelected(.vertical) },
+            close: { [weak self] in self?.closeSelected() },
+            canClose: (coordinator?.model.panes.count ?? 0) > 1
+        )
+    }
+
+    // 分割 / 閉じるは「クリック時点の選択中タブ」を対象にする（生成時の固定 id ではない）。
+    private func splitSelected(_ orientation: NSUserInterfaceLayoutOrientation) {
+        guard let id = node.selectedPane?.id else { return }
+        coordinator?.split(id, orientation)
+    }
+
+    private func closeSelected() {
+        guard let id = node.selectedPane?.id else { return }
+        coordinator?.close(id)
+    }
+
+    /// 選択中タブの content だけ表示。木を作り直さず isHidden を張り替えるだけなので
+    /// 非表示タブの pty / スクロールバックは生きたまま。
+    func showSelected() {
+        let selectedID = node.selectedPane?.id
+        for entry in contents {
+            let hidden = (entry.id != selectedID)
+            entry.view.isHidden = hidden
+            // 非表示タブの ghostty サーフェスは描画（display link）を止めて電力を守る。
+            // pty とスクロールバックは生きたままなので、再表示時に内容は最新に追いつく。
+            (entry.view as? AppTerminalView)?.setSurfaceVisible(!hidden)
+        }
+    }
+
+    /// タブ選択直後、表示された端末へキーフォーカスを移す（チップをクリックしたまま
+    /// 打鍵できるように）。isHidden の反映後に行うため次のランループで実行する。
+    private func focusSelectedTerminal() {
+        guard let id = node.selectedPane?.id,
+              let terminal = contents.first(where: { $0.id == id })?.view as? AppTerminalView else { return }
+        DispatchQueue.main.async { [weak terminal] in
+            guard let terminal, let window = terminal.window else { return }
+            window.makeFirstResponder(terminal)
+        }
+    }
 
     override func layout() {
         super.layout()
         let h = Self.headerHeight
         // Non-flipped coordinates: header sits at the top (high y).
         header.frame = NSRect(x: 0, y: bounds.height - h, width: bounds.width, height: h)
-        content.frame = NSRect(x: 0, y: 0, width: bounds.width, height: max(0, bounds.height - h))
+        let contentRect = NSRect(x: 0, y: 0, width: bounds.width, height: max(0, bounds.height - h))
+        // 全タブを同じ content rect に重ねる（表示は isHidden で 1 枚に絞る）。
+        for entry in contents { entry.view.frame = contentRect }
     }
 
     // MARK: dragging destination
@@ -624,21 +964,37 @@ final class PaneFrameView: NSView {
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
         highlight.isHidden = true
         guard let string = sender.draggingPasteboard.string(forType: .string),
-              let source = UUID(uuidString: string), source != paneID else { return false }
+              let source = UUID(uuidString: string),
+              let targetID = node.selectedPane?.id else { return false }
         let point = convert(sender.draggingLocation, from: nil)
-        coordinator?.handleDrop(sourceID: source, targetID: paneID, edge: edge(at: point))
+        let dropEdge = edge(at: point)
+        // 自リーフのタブ: 中央は合流済みで no-op、単独タブ（count==1）の端も分割の意味がなく no-op。
+        if containsSource(source), dropEdge == .center || contents.count == 1 { return false }
+        coordinator?.handleDrop(sourceID: source, targetID: targetID, edge: dropEdge)
         return true
     }
 
     private func update(_ sender: NSDraggingInfo) -> NSDragOperation {
-        if let string = sender.draggingPasteboard.string(forType: .string), string == paneID.uuidString {
+        guard let string = sender.draggingPasteboard.string(forType: .string),
+              let source = UUID(uuidString: string) else {
             highlight.isHidden = true
             return []
         }
         let point = convert(sender.draggingLocation, from: nil)
-        highlight.frame = highlightRect(for: edge(at: point))
+        let dropEdge = edge(at: point)
+        // 自リーフへのドロップは中央（合流済み）と単独タブの端を弾く。それ以外は許可。
+        if containsSource(source), dropEdge == .center || contents.count == 1 {
+            highlight.isHidden = true
+            return []
+        }
+        highlight.frame = highlightRect(for: dropEdge)
         highlight.isHidden = false
         return .move
+    }
+
+    /// ドラッグ中の source がこのリーフのいずれかのタブか。
+    private func containsSource(_ source: UUID) -> Bool {
+        contents.contains { $0.id == source }
     }
 
     private func edge(at point: NSPoint) -> DropEdge {
@@ -664,23 +1020,48 @@ final class PaneFrameView: NSView {
     }
 }
 
-/// SwiftUI header for one pane: title + split/close + drag handle.
+/// SwiftUI header for one leaf: single title (1 tab) or a row of tab chips (2+).
 struct PaneHeader: View {
-    @Bindable var pane: PaneItem
+    @Bindable var node: TileNode
     let actions: PaneActions
 
     var body: some View {
+        row
+            .buttonStyle(.borderless)
+            .font(.system(size: 10))
+            .padding(.horizontal, 6)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(LaboTheme.panel)
+            // Web のヘッダ同様、下辺に 1px の罫線を敷いてコンテンツと区切る。
+            .overlay(alignment: .bottom) { LaboTheme.border.frame(height: 1) }
+            .contentShape(Rectangle())
+            // 単一タブのときだけヘッダー全体がドラッグ源（そのペインを移動）。複数タブ時は
+            // 各チップが個別に .onDrag するので、ヘッダー全体のドラッグは付けない。
+            .modifier(PaneHeaderDrag(pane: node.panes.count == 1 ? node.selectedPane : nil))
+    }
+
+    @ViewBuilder private var row: some View {
         HStack(spacing: 6) {
             Image(systemName: "line.3.horizontal")
                 .font(.system(size: 9))
                 .foregroundStyle(.tertiary)
-            Image(systemName: icon)
-                .font(.system(size: 9))
-                .foregroundStyle(.secondary)
-            Text(pane.title)
-                .font(.system(size: 11, weight: .medium))
-                .lineLimit(1)
-                .truncationMode(.middle)
+            if node.panes.count > 1 {
+                ForEach(node.panes) { pane in
+                    PaneTabChip(
+                        pane: pane,
+                        isSelected: pane.id == node.selectedPane?.id,
+                        onSelect: { actions.onSelect(pane.id) }
+                    )
+                }
+            } else {
+                Image(systemName: node.selectedPane?.kind.iconName ?? "square")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
+                Text(node.selectedPane?.title ?? "")
+                    .font(.system(size: 11, weight: .medium))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
             Spacer(minLength: 4)
             Button(action: actions.splitRight) {
                 Image(systemName: "rectangle.split.2x1")
@@ -694,26 +1075,49 @@ struct PaneHeader: View {
                 Button(action: actions.close) {
                     Image(systemName: "xmark")
                 }
-                .help("このペインを閉じる")
+                .help(node.panes.count > 1 ? "選択中のタブを閉じる" : "このペインを閉じる")
             }
         }
-        .buttonStyle(.borderless)
-        .font(.system(size: 10))
-        .padding(.horizontal, 6)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(LaboTheme.panel)
-        // Web のヘッダ同様、下辺に 1px の罫線を敷いてコンテンツと区切る。
-        .overlay(alignment: .bottom) { LaboTheme.border.frame(height: 1) }
-        .contentShape(Rectangle())
-        .onDrag { NSItemProvider(object: pane.id.uuidString as NSString) }
     }
+}
 
-    private var icon: String {
-        switch pane.kind {
-        case .terminal: return "terminal"
-        case .files: return "list.bullet.rectangle"
-        case .diff: return "doc.text"
-        case .commits: return "point.3.connected.trianglepath.dotted"
+/// タブバーの 1 チップ。タップで選択、ドラッグでそのタブだけを別ペインへ移動できる。
+/// title は libghostty のタイトル変更で動的に変わる（PaneItem が @Observable なので追従）。
+private struct PaneTabChip: View {
+    @Bindable var pane: PaneItem
+    let isSelected: Bool
+    let onSelect: () -> Void
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: pane.kind.iconName)
+                .font(.system(size: 9))
+            Text(pane.title)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+        .font(.system(size: 11, weight: .medium))
+        .foregroundStyle(isSelected ? .primary : .secondary)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+        .background(isSelected ? LaboTheme.panelRaised : Color.clear)
+        .clipShape(RoundedRectangle(cornerRadius: 4))
+        .contentShape(Rectangle())
+        .onTapGesture { onSelect() }
+        .onDrag { NSItemProvider(object: pane.id.uuidString as NSString) }
+        .help(pane.title)
+    }
+}
+
+/// 単一タブのヘッダーだけ、全体をドラッグ源にする条件付きモディファイア。
+private struct PaneHeaderDrag: ViewModifier {
+    let pane: PaneItem?
+
+    func body(content: Content) -> some View {
+        if let pane {
+            content.onDrag { NSItemProvider(object: pane.id.uuidString as NSString) }
+        } else {
+            content
         }
     }
 }
