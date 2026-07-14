@@ -88,6 +88,32 @@ jobs:
       - name: cargo test
         run: cargo test
 
+  # labolabo-app（gpui 端末シェル、第5波 a）。gpui はビルドが重いデスクトップ UI 依存
+  # なので rust/Cargo.toml の default-members から外してあり（上の `rust` ジョブは
+  # gpui を一切ビルドしない）、専用ジョブでのみ検証する。まずは macOS のみ -- Linux
+  # 版 gpui のビルドはシステム依存の導入が重く、この波では見送り
+  # （crates/labolabo-app/README.md 参照）。
+  rust-app:
+    name: rust-app (macos-15)
+    runs-on: macos-15
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: cargo fmt --check
+        run: cargo fmt --check
+      - name: cargo build -p labolabo-app
+        run: cargo build -p labolabo-app
+      - name: cargo clippy -p labolabo-app
+        run: cargo clippy -p labolabo-app --all-targets -- -D warnings
+
   # labolabo-term の ghostty-vt バックエンド（本命の VT コア＝実 libghostty-vt）を、
   # 実際に Zig 0.16 でベンダビルドしてテストするジョブ。既定バックエンド（alacritty,
   # 上の `rust` ジョブ）が crates.io だけで常に green なのに対し、こちらは外部依存が重く

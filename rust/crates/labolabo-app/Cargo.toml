@@ -1,0 +1,28 @@
+[package]
+name = "labolabo-app"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+description = "gpui terminal-shell binary for LaboLabo's Rust cross-platform port (wave 5a: bootable skeleton -- window, tab bar, keyboard input, event-driven redraw over labolabo-term's TermSession)."
+
+[[bin]]
+name = "labolabo-app"
+path = "src/main.rs"
+
+[features]
+# Passthrough to labolabo-term's own backend features (see its README/
+# Cargo.toml) so the VT backend can be switched at this crate's own `-p
+# labolabo-app` command line, e.g.:
+#   cargo run -p labolabo-app --no-default-features --features backend-ghostty-vt
+# `default-features = false` on the dependency below means labolabo-term
+# contributes no backend unless one of these is selected -- same
+# default-is-alacritty, opt-in-is-ghostty shape as labolabo-term itself.
+default = ["backend-alacritty"]
+backend-alacritty = ["labolabo-term/backend-alacritty"]
+backend-ghostty-vt = ["labolabo-term/backend-ghostty-vt"]
+
+[dependencies]
+labolabo-term = { path = "../labolabo-term", default-features = false }
+anyhow = "1"
+futures = "0.3"
+gpui = "0.2"

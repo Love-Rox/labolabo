@@ -15,6 +15,16 @@ algorithms — from Swift to Rust.
 > It has its own CI job (`rust-term-ghostty`, `continue-on-error`) and is
 > distilled from the `term-poc` spike. See its README for the design.
 
+> **Sibling crate — `labolabo-app`.** This workspace also contains
+> [`crates/labolabo-app`](crates/labolabo-app/README.md): the wave-5a
+> bootable skeleton of the cross-platform UI — a [gpui](https://www.gpui.rs/)
+> binary that renders `labolabo-term`'s `GridSnapshot` in a window, routes
+> keyboard input to a `TermSession`, and drives a minimal tab bar. It is
+> **not** in `default-members` (gpui is a heavy desktop-UI dependency this
+> workspace's plain `cargo build`/`test`/`clippy` must not pull in), so build
+> and test it explicitly with `-p labolabo-app`; it has its own CI job
+> (`rust-app`, macOS-only for now). See its README for design/scope/TODOs.
+
 As of wave 4c, "pure-logic" no longer means "no I/O": `store` (ported from
 `LaboLaboStore`) is real, fallible SQLite persistence, not a parser or an
 in-memory model. It's still in-scope for this crate (the porting brief
