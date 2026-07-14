@@ -43,6 +43,22 @@ jobs:
           echo "::error::swift test failed after 3 attempts"
           exit 1
 
+  # エンジン層（Sources/LaboLaboEngine）が Linux でもビルド・テストできることを継続的に
+  # 実証するジョブ。LaboLaboStore（GRDB）は Ubuntu 標準の libsqlite3 が
+  # SQLITE_ENABLE_SNAPSHOT 無効ビルドのため WAL スナップショット API がリンクできず、
+  # Package.swift 側で Linux では対象から外している（詳細はそちらのコメント参照）。
+  # swift:6.0 の公式イメージをそのままコンテナに使い、ツールチェイン導入の手間を省く。
+  linux-engine-tests:
+    name: linux engine tests
+    runs-on: ubuntu-latest
+    container: swift:6.0
+    steps:
+      - uses: actions/checkout@v4
+      - name: Show toolchain
+        run: swift --version
+      - name: swift test (LaboLaboEngine only on Linux)
+        run: swift test
+
   # アプリ層のビルドとテスト（エンジンの swift test では届かない SwiftUI/AppKit 層）。
   # XcodeGen で .xcodeproj を生成 → 一度ビルド → アプリ単体テスト（ブロッキング）→
   # 起動＋メニュー開閉の UI スモーク（当面は informational: ランナー権限差で不安定な
