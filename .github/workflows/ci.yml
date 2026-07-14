@@ -59,6 +59,35 @@ jobs:
       - name: swift test (LaboLaboEngine only on Linux)
         run: swift test
 
+  # rust/ ワークスペース（labolabo-core, クロスプラットフォーム化の Rust 移植先）。
+  # golden fixtures（fixtures/expected/**）は Swift オラクルで生成済みのものをコミット
+  # 済みなので、CI では swift 側の再生成は不要 -- cargo test はチェックイン済みの
+  # 期待値と突き合わせるだけ。ubuntu / macOS 両方でツールチェイン差を早期に検知する。
+  rust:
+    name: rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15]
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: cargo fmt --check
+        run: cargo fmt --check
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: cargo test
+        run: cargo test
+
   # アプリ層のビルドとテスト（エンジンの swift test では届かない SwiftUI/AppKit 層）。
   # XcodeGen で .xcodeproj を生成 → 一度ビルド → アプリ単体テスト（ブロッキング）→
   # 起動＋メニュー開閉の UI スモーク（当面は informational: ランナー権限差で不安定な
