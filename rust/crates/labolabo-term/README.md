@@ -59,6 +59,23 @@ running the **same** integration tests as ghostty (`tests/backend_common.rs`).
 - **`env` injection is first-class** in `spawn_with_command(cols, rows,
   command, env)` — the mechanism LaboLabo's hooks protocol uses to tag a pane
   (`LABOLABO_PANE`, `LABOLABO_TASK`, …) for the spawned agent.
+- **Color configuration is opt-in via `spawn_with_options(cols, rows,
+  command, env, &ColorScheme)`** — `spawn`/`spawn_with_command` are thin
+  wrappers passing `ColorScheme::default()` (every backend's own built-in
+  colors, unchanged). `ColorScheme` (`src/color.rs`) carries optional
+  foreground/background/cursor overrides plus `(index, Rgb)` palette
+  entries; `VtBackend::new` takes it and each backend applies it to its own
+  VT core (alacritty: an in-crate 256-color table built from `ANSI_16` +
+  the standard xterm cube/grayscale ramp, with the scheme's overrides
+  layered on top; ghostty: `libghostty-vt`'s own
+  `set_default_fg_color`/`set_default_bg_color`/`set_default_cursor_color`/
+  `set_default_color_palette` setters) — see `backend/alacritty.rs` and
+  `backend/ghostty.rs` for the exact mapping, and that ghostty file's
+  comment on `set_default_fg_color`/`set_default_bg_color` for a real
+  upstream quirk (must be set together, never just one) this crate works
+  around. `labolabo-app`'s `ghostty_config.rs` is the intended source of a
+  real `ColorScheme` (the user's own Ghostty config); this crate has no
+  opinion on where one comes from.
 - **Explicit teardown via `shutdown()`** (added for the gpui shell's
   close-tab action): signals the child through `portable-pty`'s
   `ChildKiller` (SIGHUP on Unix — what a real terminal sends on window
@@ -102,7 +119,10 @@ GHOSTTY_SOURCE_DIR=/path/to/ghostty-zig016-src \
 The same test file runs on both backends: `spawn_with_command("echo hello &&
 sleep 0.2")` → snapshot contains `hello`; injected `$LABOLABO_PANE` reaches the
 child; resize changes the reported grid dimensions; the `Exit` event fires when
-the child ends.
+the child ends; and (via `spawn_with_options`) a configured `background`
+shows up as `GridSnapshot::background`, a configured `foreground` shows up
+as the fg color of an unstyled cell, and a `palette` override shows up as
+the fg color of an SGR-colored cell.
 
 ## Building the ghostty-vt backend
 

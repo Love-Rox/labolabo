@@ -1,0 +1,12 @@
+# A minimal theme file -- just another Ghostty config, same syntax.
+
+background = #111111
+foreground = #eeeeee
+cursor-color = #dddddd
+palette = 1=#ff0000
+palette = 2=#0000ff
+
+# A theme file cannot set `theme` or `config-file` -- silently ignored,
+# same as upstream.
+theme = should-be-ignored
+config-file = should-also-be-ignored

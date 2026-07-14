@@ -1,0 +1,22 @@
+# A representative Ghostty user config's color-relevant slice.
+
+background = #101214
+foreground = 1a2b3c
+cursor-color = #ff00ff
+
+palette = 0=#000000
+palette = 1 = AABBCC
+palette = 0x2=#223344
+
+# Invalid index (out of u8 range) -- warned and skipped.
+palette = 999=#ffffff
+# Invalid color -- warned and skipped.
+palette = 3=notacolor
+
+# An unparseable background leaves the previous (valid) value in place,
+# same as font-size's "last valid value wins".
+background = not-a-color
+
+# Unrelated keys must be skipped.
+theme = catppuccin-mocha
+window-padding-x = 4

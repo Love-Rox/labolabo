@@ -70,12 +70,17 @@ impl CellSnapshot {
     }
 }
 
-/// Cursor position (0-based, viewport-relative) and visibility.
+/// Cursor position (0-based, viewport-relative), visibility, and color.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CursorSnapshot {
     pub col: u16,
     pub row: u16,
     pub visible: bool,
+    /// The cursor's effective color (the session's configured default --
+    /// see `ColorScheme::cursor` -- or a live OSC-12 override, backend
+    /// permitting). `None` means no color is configured; callers that paint
+    /// a cursor overlay should fall back to their own default in that case.
+    pub color: Option<Rgb>,
 }
 
 /// A fully-extracted, plain-data render of one terminal grid at some point in
@@ -102,6 +107,7 @@ impl GridSnapshot {
                 col: 0,
                 row: 0,
                 visible: true,
+                color: None,
             },
         }
     }
