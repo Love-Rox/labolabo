@@ -88,6 +88,54 @@ jobs:
       - name: cargo test
         run: cargo test
 
+  # labolabo-term の ghostty-vt バックエンド（本命の VT コア＝実 libghostty-vt）を、
+  # 実際に Zig 0.16 でベンダビルドしてテストするジョブ。既定バックエンド（alacritty,
+  # 上の `rust` ジョブ）が crates.io だけで常に green なのに対し、こちらは外部依存が重く
+  # 壊れやすい: (1) upstream ghostty はまだ Zig 0.15.2 要求（このクラスの Xcode/Zig
+  # 破綻が理由）で、動くのは fork vancluever/ghostty の zig-0.16 ブランチ（PR
+  # ghostty-org/ghostty#12726）を **ピン SHA** で使う暫定措置、(2) libghostty-vt-sys の
+  # build.rs が zig のパッケージ依存をネットワーク取得する。よって **continue-on-error:
+  # true** とし、この不安定な経路がマージをブロックしないようにする（本命バックエンドの
+  # 継続的な実証が目的で、ゲートは既定の `rust` ジョブが担う）。upstream に 0.16 対応が
+  # マージされたら GHOSTTY_REF を上流へ再ピンする。
+  # 注: LIBGHOSTTY_VT_SYS_OPTIMIZE=ReleaseFast は rust/.cargo/config.toml [env] で既定化
+  # 済み（未設定だと Zig が Debug ビルドになり ~2万倍遅くなる罠。spike M6c 参照）。ここでも
+  # 明示して意図を可視化する。
+  rust-term-ghostty:
+    name: rust-term-ghostty (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15]
+    env:
+      # vancluever/ghostty zig-0.16 ブランチのピン SHA（ローカル clone の
+      # `git rev-parse HEAD` と一致）。upstream マージ後に再ピンする。
+      GHOSTTY_REF: 4c729855e1ad03689d94af3e0a173b81ca423eb8
+      GHOSTTY_SOURCE_DIR: ${{ github.workspace }}/ghostty-src
+      LIBGHOSTTY_VT_SYS_OPTIMIZE: ReleaseFast
+    steps:
+      - uses: actions/checkout@v4
+      - name: Checkout vancluever/ghostty (pinned)
+        uses: actions/checkout@v4
+        with:
+          repository: vancluever/ghostty
+          ref: ${{ env.GHOSTTY_REF }}
+          path: ghostty-src
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: cargo test (backend-ghostty-vt)
+        working-directory: rust
+        run: cargo test -p labolabo-term --no-default-features --features backend-ghostty-vt
+
   # アプリ層のビルドとテスト（エンジンの swift test では届かない SwiftUI/AppKit 層）。
   # XcodeGen で .xcodeproj を生成 → 一度ビルド → アプリ単体テスト（ブロッキング）→
   # 起動＋メニュー開閉の UI スモーク（当面は informational: ランナー権限差で不安定な

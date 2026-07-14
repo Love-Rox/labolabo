@@ -4,6 +4,17 @@ The Rust cross-platform migration's pure-logic core: a faithful port of
 LaboLaboEngine's OS/process/UI-independent logic — parsers and pure
 algorithms — from Swift to Rust.
 
+> **Sibling crate — `labolabo-term`.** This workspace also contains
+> [`crates/labolabo-term`](crates/labolabo-term/README.md): the cross-platform
+> **terminal-session core** (a real PTY via `portable-pty` driving a VT parser,
+> producing a UI-independent `GridSnapshot`). Unlike `labolabo-core`'s pure
+> parsers, it owns live OS resources and has a pluggable VT backend —
+> `backend-alacritty` (default, crates.io-only, keeps the standing `rust` CI
+> job green) or `backend-ghostty-vt` (the intended production core, real
+> `libghostty-vt`, opt-in because it needs Zig 0.16 + a Ghostty source tree).
+> It has its own CI job (`rust-term-ghostty`, `continue-on-error`) and is
+> distilled from the `term-poc` spike. See its README for the design.
+
 ## Wave 1 (`Sources/LaboLaboEngine/Git/`, no runtime deps)
 
 | Swift source | Rust module |
