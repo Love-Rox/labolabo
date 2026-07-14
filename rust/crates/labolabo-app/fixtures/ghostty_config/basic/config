@@ -1,0 +1,18 @@
+# A representative Ghostty user config (font-relevant slice).
+
+font-family = First Font
+font-family = "Second Font"
+
+# Reset the list, then set the real ones (Ghostty's documented idiom).
+font-family = ""
+font-family = "JetBrains Mono"
+font-family = Symbols Nerd Font
+
+font-size = not-a-number
+font-size = 13
+	font-size	 =	 15.5	
+
+# Unrelated keys must be skipped, including ones with '=' in the value.
+theme = catppuccin-mocha
+keybind = ctrl+shift+t=new_tab
+window-padding-x = 4
