@@ -13,7 +13,7 @@
 
 use std::time::Duration;
 
-use labolabo_term::Terminal;
+use labolabo_term::{ColorScheme, Rgb, Terminal};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -114,6 +114,104 @@ fn shutdown_is_idempotent_and_safe_after_natural_exit() {
     // Child is gone (and by now reaped by the worker); these must be no-ops.
     term.shutdown();
     term.shutdown();
+}
+
+/// `spawn_with_options` with a default (empty) `ColorScheme` behaves exactly
+/// like the older, narrower `spawn_with_command` -- guards the API-
+/// compatibility contract `spawn_with_command` was refactored to lean on
+/// (`ColorScheme::default()` under the hood).
+#[test]
+fn default_color_scheme_matches_spawn_with_command() {
+    let via_options = Terminal::spawn_with_options(
+        40,
+        10,
+        Some("printf same; sleep 0.2"),
+        &[],
+        &ColorScheme::default(),
+    )
+    .expect("spawn_with_options");
+    let via_command =
+        Terminal::spawn_with_command(40, 10, Some("printf same; sleep 0.2"), &[]).expect("spawn");
+
+    let a = via_options.wait_for(TIMEOUT, |g| g.contains_text("same"));
+    let b = via_command.wait_for(TIMEOUT, |g| g.contains_text("same"));
+    assert!(
+        a.is_some() && b.is_some(),
+        "both sessions should produce output"
+    );
+    assert_eq!(
+        a.unwrap().background,
+        b.unwrap().background,
+        "default ColorScheme must not change the built-in background"
+    );
+}
+
+/// A configured `background` shows up as `GridSnapshot::background`.
+#[test]
+fn colors_background_override_reflected_in_snapshot() {
+    let custom = Rgb::new(0x11, 0x22, 0x33);
+    let colors = ColorScheme {
+        background: Some(custom),
+        ..ColorScheme::default()
+    };
+    let term = Terminal::spawn_with_options(40, 10, Some("printf ready; sleep 0.2"), &[], &colors)
+        .expect("spawn");
+    let snap = term.wait_for(TIMEOUT, |g| g.contains_text("ready"));
+    assert!(snap.is_some(), "expected output before asserting on colors");
+    assert_eq!(term.snapshot().background, custom);
+}
+
+/// A configured `foreground` shows up as the fg color of a cell with no SGR
+/// styling of its own -- the direct fix for the reported symptom (Ghostty's
+/// configured foreground wasn't reaching the embedded terminal).
+#[test]
+fn colors_foreground_override_reflected_in_unstyled_cell() {
+    let custom = Rgb::new(0xaa, 0xbb, 0xcc);
+    let colors = ColorScheme {
+        foreground: Some(custom),
+        ..ColorScheme::default()
+    };
+    let term = Terminal::spawn_with_options(40, 10, Some("printf PLAIN; sleep 0.2"), &[], &colors)
+        .expect("spawn");
+    let snap = term.wait_for(TIMEOUT, |g| g.contains_text("PLAIN"));
+    assert!(snap.is_some(), "expected output before asserting on colors");
+    let latest = term.snapshot();
+    let cell = find_cell(&latest, "P").expect("the printed 'P' cell");
+    assert_eq!(cell.fg, custom);
+}
+
+/// A `palette` override for a given index shows up as the fg color of a cell
+/// whose text was styled with the matching SGR code (SGR 31 = red = ANSI
+/// palette index 1).
+#[test]
+fn colors_palette_override_reflected_in_sgr_colored_cell() {
+    let custom = Rgb::new(0x12, 0x34, 0x56);
+    let colors = ColorScheme {
+        palette: vec![(1, custom)],
+        ..ColorScheme::default()
+    };
+    let term = Terminal::spawn_with_options(
+        40,
+        10,
+        Some(r#"printf '\033[31mX\033[0m'; sleep 0.2"#),
+        &[],
+        &colors,
+    )
+    .expect("spawn");
+    let snap = term.wait_for(TIMEOUT, |g| g.contains_text("X"));
+    assert!(snap.is_some(), "expected output before asserting on colors");
+    let latest = term.snapshot();
+    let cell = find_cell(&latest, "X").expect("the SGR-red 'X' cell");
+    assert_eq!(cell.fg, custom);
+}
+
+/// Find the first cell whose text matches `needle` (a single grapheme, as
+/// printed by the tests above -- there's no ambiguity to resolve).
+fn find_cell<'a>(
+    snapshot: &'a labolabo_term::GridSnapshot,
+    needle: &str,
+) -> Option<&'a labolabo_term::CellSnapshot> {
+    snapshot.cells.iter().find(|c| c.text == needle)
 }
 
 /// Drain events until `Exit` (Wakeups may precede it), bounded by `timeout`.

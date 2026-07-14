@@ -1,11 +1,11 @@
 # labolabo-app (Rust, gpui)
 
 A [gpui](https://www.gpui.rs/) binary: the first UI layer of LaboLabo's Rust
-cross-platform port. This is **wave 5a** — a bootable skeleton, not the
+cross-platform port. This is **wave 5a/5b** — a bootable skeleton, not the
 production terminal UI. It exists to prove the shape of the gpui <->
 `labolabo-term` wiring (window, keyboard input, resize, event-driven
-redraw, a minimal tab bar, the user's Ghostty font settings) before a real
-task/tile UI is built on top of it.
+redraw, a minimal tab bar, the user's Ghostty font *and color* settings)
+before a real task/tile UI is built on top of it.
 
 Not in the workspace's `default-members` (see `rust/Cargo.toml`): gpui is a
 heavy desktop-UI dependency, and the existing `rust` CI job's fast,
@@ -50,21 +50,21 @@ GHOSTTY_SOURCE_DIR=/path/to/ghostty-zig016-src \
 |---|---|
 | `main.rs` | Entry point: reads the Ghostty font config, opens the one window at a starting size. |
 | `app.rs` | The gpui root view (`TerminalApp`): tab model, key/click routing, the redraw-bridge thread, session-exit handling, the render tree. |
-| `ghostty_config.rs` | Pure-ish loader for the user's Ghostty config (`font-family`/`font-size`, `config-file` includes). Fixture-tested; never reads `$HOME` in tests. |
+| `ghostty_config.rs` | Pure-ish loader for the user's Ghostty config (`font-family`/`font-size`, `background`/`foreground`/`cursor-color`/`palette`/`theme`, `config-file` includes). Fixture-tested; never reads `$HOME` in tests. |
 | `grid.rs` | Pure function: pixel area + cell size -> terminal column/row count. No gpui types — unit-tested without a gpui `Application`. |
 | `keys.rs` | Pure function: `gpui::Keystroke` -> PTY input bytes. `Keystroke`/`Modifiers` are plain data, so this is unit-tested directly too. |
 | `render.rs` | `RenderSpec` (font resolution + cell measurement) and painting one `labolabo_term::GridSnapshot` into a gpui canvas (background, glyphs, cursor). |
 
-### Ghostty configuration (font-family / font-size)
+### Ghostty configuration (font-family / font-size / colors)
 
-At startup, `ghostty_config::load_user_font_config` reads the user's
-existing Ghostty configuration so the embedded terminal matches their
-normal Ghostty font — same idea as the Swift app's `GhosttyConfig.swift`,
-but as a (partial) parser instead of handing the file to libghostty. The
-loading rules are ported from the actual Ghostty source
-(`ghostty-zig016-src`, upstream PR #12726 state) and are documented
-key-by-key with source references in `ghostty_config.rs`'s module docs.
-The short version:
+At startup, `ghostty_config::load_user_font_config` and `::
+load_user_color_config` read the user's existing Ghostty configuration so
+the embedded terminal matches their normal Ghostty look — same idea as the
+Swift app's `GhosttyConfig.swift`, but as a (partial) parser instead of
+handing the file to libghostty. The loading rules are ported from the
+actual Ghostty source (`ghostty-zig016-src`, upstream PR #12726 state) and
+are documented key-by-key with source references in `ghostty_config.rs`'s
+module docs. The short version:
 
 - **Files, in load order (later wins)**: `$XDG_CONFIG_HOME/ghostty/config`
   (legacy) then `.../config.ghostty` (Ghostty >= 1.3.0), then on macOS
@@ -78,10 +78,11 @@ The short version:
   order, recursively (queue semantics, cycle-safe), `?` marks an include
   optional, relative paths resolve against the including file, `~/`
   against home — matching `Config.loadRecursiveFiles` + `path.zig`.
-- **Keys read**: `font-family` (repeatable; empty value resets the list)
-  and `font-size` (float, last valid wins). Everything else is skipped —
-  notably **colors and themes are not read** (see "Colors" under Known
-  limitations).
+- **Keys read**: `font-family` (repeatable; empty value resets the list),
+  `font-size` (float, last valid wins), `background`/`foreground`/
+  `cursor-color` (scalar, last *valid* value wins), `palette` (repeatable
+  `N=COLOR`, one index per occurrence), and `theme`. Everything else is
+  skipped.
 
 Font resolution + measurement (`render::RenderSpec::resolve`): the first
 `font-family` entry that exists on the system (case-insensitive match
@@ -93,6 +94,22 @@ descent become `cell_width`/`cell_height` (ceil-rounded so cell backgrounds
 tile without hairline gaps), used by both the renderer and the grid-size
 math. gpui 0.2 exposes no public line-gap metric, so rows can be slightly
 tighter than Ghostty.app's for fonts with a non-zero line gap.
+
+Color resolution (`ghostty_config::extract_color_config`, full rationale +
+source references in the module doc comment): a `theme = NAME` value (if
+any) is resolved to a theme file (absolute path, else searched for in the
+user's own `ghostty/themes` dir, then a best-effort macOS guess at
+Ghostty.app's bundled themes) and loaded as a color *baseline*; the user's
+own explicit `background`/`foreground`/`cursor-color`/`palette` settings
+then override it field-by-field (and, for `palette`, index-by-index) —
+matching upstream's documented "additional colors... override the colors
+specified in the theme" rule, regardless of where `theme = ` appears in the
+user's own files. The result is a `labolabo_term::ColorScheme`, passed to
+every tab's `Terminal::spawn_with_options` call
+(`app::TerminalApp::open_tab`) so the embedded terminal's default
+fg/bg/cursor/palette match what the user configured. Color *values* only
+support `#rgb`/`#rrggbb` hex (with or without the `#`) — see "Known
+limitations" for what's deliberately unsupported.
 
 ### Keyboard input path
 
@@ -199,28 +216,35 @@ survive that replacement.
 
 - **No IME support** (see "Keyboard input path" above) — the biggest
   functional gap in this wave.
-- **Colors are not themed yet.** The user's Ghostty
-  `background`/`foreground`/`palette`/`theme` settings are not applied;
-  cells render with `labolabo-term`'s built-in palette. Investigated, not
-  implemented — what it needs:
-  - `GridSnapshot` deliberately carries fully-*resolved* RGB per cell, so
-    theming has to happen where colors are resolved: inside the
-    `labolabo-term` backends. Supporting it means adding a
-    palette/default-colors parameter to session/backend construction (e.g.
-    a `spawn_with_options` carrying an optional 256-entry palette +
-    fg/bg/cursor).
-  - The **alacritty backend** resolves colors through its own hardcoded
-    table (`backend/alacritty.rs`: `ANSI_16` + `DEFAULT_FG`/`BLACK`), so
-    honoring a user palette there is pure data plumbing — replace those
-    constants with the passed-in palette.
-  - The **ghostty backend** can accept it natively: `libghostty-vt` 0.2
-    exposes `Terminal::set_default_fg_color` / `set_default_bg_color` /
-    `set_default_cursor_color` / `set_default_color_palette(Option<[RgbColor;
-    256]>)` (its snapshots already resolve palette-indexed cells through
-    render-state colors).
-  - Ghostty's `theme = <name>` indirection (named theme files shipped in
-    Ghostty's resources dir, with light/dark variants) is a further layer on
-    top of raw `palette` keys and would need its own file discovery.
+- **Colors: light/dark theme switching is out of scope.** Ghostty's `theme
+  = light:NAME,dark:NAME` syntax picks a theme based on the desktop
+  appearance; this port only ever resolves the **light** side and has no
+  appearance-tracking logic at all (see `ghostty_config.rs`'s module doc
+  comment, "Scope limitation"). A config that relies on the dark variant
+  will render with the light theme's colors regardless of the window's
+  actual appearance.
+- **Colors: unsupported color value syntax is skipped, not approximated.**
+  Only `#rgb`/`#rrggbb` hex (with or without the leading `#`) is parsed;
+  Ghostty's `rgb:`/`rgbi:` device syntax, the 12-/16-bit-per-channel forms,
+  and the ~750 X11 named colors are reported (stderr) and left as whatever
+  the value was before, same as an unparseable `font-size`. A scan of all
+  463 themes bundled with a real Ghostty.app install found none of these
+  forms in use, so this covers every built-in theme; a hand-written config
+  using an X11 color name (e.g. `background = "royal blue"`) would need to
+  switch to hex to be picked up here.
+- **Colors: the macOS theme-resources-dir lookup is a hardcoded guess.**
+  `theme = NAME` search order matches upstream (user's own `ghostty/themes`
+  dir, then the app bundle's bundled themes), but the second location is
+  hardcoded to `/Applications/Ghostty.app/Contents/Resources/ghostty/themes`
+  rather than resolved via a real bundle/LaunchServices lookup — a
+  differently-installed Ghostty.app (a non-`/Applications` location) won't
+  be found for *bundled* (not user-authored) themes.
+- **Cursor color tints, rather than recolors, the existing overlay.**
+  `render::paint_cursor`'s block-cursor is still a translucent overlay (not
+  a solid block with an inverted glyph, as some terminals draw it) — a
+  configured `ColorScheme::cursor` (via `CursorSnapshot::color`) changes the
+  overlay's tint at the same alpha as before; an unconfigured cursor renders
+  exactly as it did before this wave (hardcoded translucent white).
 - **`shutdown` signals the shell, not its descendants.** `TermSession::
   shutdown` SIGHUPs the direct child (the shell); a descendant process that
   detaches from the PTY and ignores SIGHUP can outlive the tab, same as in
@@ -243,24 +267,51 @@ survive that replacement.
 Verified locally:
 
 - `cargo build -p labolabo-app`, `cargo clippy -p labolabo-app --all-targets
-  -- -D warnings`, and workspace-wide `cargo fmt --check` all pass.
+  -- -D warnings`, and workspace-wide `cargo fmt --check` all pass, on
+  **both** backends (`--no-default-features --features backend-ghostty-vt`
+  too, with `GHOSTTY_SOURCE_DIR`/Zig 0.16 on `PATH`).
 - `cargo test -p labolabo-app`: the `grid`/`keys` pure-function unit tests
-  plus the `ghostty_config` parser/loader tests (fixture trees under
-  `fixtures/ghostty_config/`; no test touches `$HOME` or the real user
-  config).
+  plus the `ghostty_config` parser/loader tests -- font *and* color/theme
+  extraction, all fixture-tree-based (`fixtures/ghostty_config/`; no test
+  touches `$HOME`, `/Applications`, or the real user config/theme files).
 - `cargo test -p labolabo-term` on **both** backends (alacritty and
   ghostty-vt), including the new `shutdown` integration tests
   (`shutdown_kills_child_and_fires_exit`,
-  `shutdown_is_idempotent_and_safe_after_natural_exit`).
+  `shutdown_is_idempotent_and_safe_after_natural_exit`) and the new color
+  integration tests (`colors_background_override_reflected_in_snapshot`,
+  `colors_foreground_override_reflected_in_unstyled_cell`,
+  `colors_palette_override_reflected_in_sgr_colored_cell`,
+  `default_color_scheme_matches_spawn_with_command`) -- headless, real PTY
+  children whose SGR-colored/unstyled output is asserted against the
+  extracted `GridSnapshot`.
+- While building this wave's color support, the headless ghostty-vt
+  integration tests caught a real upstream quirk before it shipped:
+  `libghostty-vt`'s `RenderState.update` only resolves the effective
+  background/foreground pair when **both** are set at the `Terminal` level
+  (a labeled-block `orelse break` in `terminal/render.zig` bails on the
+  *whole pair* if either is left unset) -- worked around in
+  `backend/ghostty.rs` by always configuring both, falling back to this
+  crate's own default constants for whichever side a `ColorScheme` leaves
+  unconfigured (see that file's comment for the exact upstream source
+  quoted).
 - Root `cargo build`/`cargo test`/`cargo clippy` (the workspace's
   `default-members`, unchanged) still pass and do not build gpui.
-- `cargo run -p labolabo-app`, run for 5 seconds and killed: the window
-  opens and the process does not crash or panic, with a real user Ghostty
-  config present (its `font-family` resolved without a fallback warning).
+- `cargo run -p labolabo-app`, run for ~5 seconds and killed, on **both**
+  backends: the window opens and the process does not crash or panic, with
+  a real user Ghostty config present (`font-family` resolved without a
+  fallback warning; no color/theme parsing warnings on stderr against a
+  config using a user-authored theme file with bare-hex colors).
 
-**Not verified — no synthetic keyboard input was used anywhere in this
-work, on explicit instruction (`osascript keystroke`/`cliclick t:`/`kp:`
-and similar are banned).** As a direct consequence:
+**Not verified — no synthetic keyboard/mouse input and no window
+inspection were used anywhere in this work, on explicit instruction
+(`osascript keystroke`/`cliclick t:`/`kp:` and similar are banned).** As a
+direct consequence:
+
+- **The actual on-screen colors have not been visually confirmed.** The
+  parsing/merging/backend-plumbing is unit- and integration-tested (see
+  above), and the headless ghostty-vt tests assert on real resolved cell
+  colors, but "does the running window actually look like my Ghostty" is
+  the user's call -- this is the single biggest thing to check by hand.
 
 - `keys::keystroke_to_bytes` has never been exercised against a real
   keypress by the author — only its unit tests (hand-constructed

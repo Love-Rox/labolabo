@@ -24,10 +24,12 @@ const INITIAL_WIDTH: f32 = 900.0;
 const INITIAL_HEIGHT: f32 = 600.0;
 
 fn main() {
-    // Read the user's Ghostty config (font-family / font-size) once, up
-    // front -- pure file I/O, no gpui needed. Missing config just means
-    // Ghostty-default font settings.
+    // Read the user's Ghostty config (font-family/font-size, plus
+    // background/foreground/cursor-color/palette/theme) once, up front --
+    // pure file I/O, no gpui needed. Missing config just means Ghostty-
+    // default font settings and each backend's own built-in colors.
     let font_config = ghostty_config::load_user_font_config();
+    let color_config = ghostty_config::load_user_color_config();
 
     Application::new().run(move |cx: &mut App| {
         let bounds = Bounds::centered(None, size(px(INITIAL_WIDTH), px(INITIAL_HEIGHT)), cx);
@@ -36,7 +38,7 @@ fn main() {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 ..Default::default()
             },
-            |window, cx| cx.new(|cx| TerminalApp::new(&font_config, window, cx)),
+            |window, cx| cx.new(|cx| TerminalApp::new(&font_config, &color_config, window, cx)),
         )
         .expect("failed to open labolabo-app window");
         cx.activate(true);
