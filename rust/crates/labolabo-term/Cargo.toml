@@ -1,0 +1,27 @@
+[package]
+name = "labolabo-term"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+description = "Cross-platform terminal-session core for LaboLabo: a real PTY (portable-pty) driving a VT parser, exposing a UI-independent GridSnapshot + wakeup channel. Pluggable backend: `backend-ghostty-vt` (libghostty-vt, the intended production core) or `backend-alacritty` (default, crates.io-only, keeps CI green). Distilled from the term-poc spike (labolabo-spikes)."
+
+[features]
+# The default backend is alacritty: it resolves entirely from crates.io, so a
+# plain `cargo test` (and the existing `rust` CI job) always builds green with
+# no Zig toolchain / no vendored Ghostty source. The *intended production*
+# backend is `backend-ghostty-vt` (real libghostty-vt VT core) -- see the crate
+# docs (`src/lib.rs`) and README. It is opt-in because it needs a local Ghostty
+# source tree (`GHOSTTY_SOURCE_DIR`) built with Zig 0.16, a fragile external
+# dependency we deliberately keep off the always-on CI path.
+default = ["backend-alacritty"]
+backend-alacritty = ["dep:alacritty_terminal"]
+backend-ghostty-vt = ["dep:libghostty-vt"]
+
+[dependencies]
+# Shared across both backends -- always compiled.
+anyhow = "1"
+portable-pty = "0.9"
+
+# Backend-specific VT cores -- each gated behind its feature.
+alacritty_terminal = { version = "0.26", optional = true }
+libghostty-vt = { version = "0.2", optional = true }

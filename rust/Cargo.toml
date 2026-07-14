@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/labolabo-core"]
+members = ["crates/labolabo-core", "crates/labolabo-term"]
 
 [workspace.package]
 edition = "2021"
