@@ -1,5 +1,10 @@
-//! `labolabo-core`: the OS/UI-independent pure-logic core of LaboLabo,
-//! ported from the Swift `LaboLaboEngine` package.
+//! `labolabo-core`: the OS/UI-independent core of LaboLabo, ported from the
+//! Swift `LaboLaboEngine` package (waves 1-2), the app's `PaneTilingModel`
+//! (wave 3), and `LaboLaboStore` (wave 4c). "Pure-logic" describes waves
+//! 1-3 (parsers and in-memory models, no I/O); `store` (wave 4c) is real,
+//! fallible SQLite persistence, still OS/UI-framework-independent but no
+//! longer side-effect-free — see its module doc comment and `README.md`'s
+//! "Wave 4c" section.
 //!
 //! ## Wave 1 (`Sources/LaboLaboEngine/Git/`, no runtime deps)
 //!
@@ -143,3 +148,22 @@ pub use tool_locator::{ToolLocating, ToolLocator};
 #[cfg(unix)]
 pub use hooks::{forward_hook, UnixSocketEventTransport};
 pub use hooks::{AgentEventTransport, AgentStatusBus, OnEvent, OnMessage};
+
+// Wave 4c (session persistence). Appended at the end of this file rather
+// than interleaved with the wave 1-3 declarations above to minimize merge
+// conflicts with parallel in-flight ports touching the same file (w4a/w4b);
+// see `rust/README.md`'s "Wave 4c" section for the full writeup.
+//
+// - `store`: port of `Sources/LaboLaboStore/` (`SessionRecord`,
+//   `SessionDatabase`, `SessionPersisting`, `AppDataDirectory`) -- SQLite
+//   session/appState persistence, via `rusqlite` instead of GRDB. The first
+//   module in this crate that is fallible I/O rather than a pure
+//   parser/model -- see `store`'s module doc comment (and
+//   `store::database`'s, for the GRDB on-disk compatibility contract) for
+//   details. Golden coverage is a fixture SQLite database written by real
+//   GRDB (`fixtures/store/`, `tests/store_golden.rs`), the same oracle
+//   philosophy as waves 1/2 but comparing database contents instead of
+//   JSON.
+pub mod store;
+
+pub use store::{SessionDatabase, SessionPersisting, SessionRecord, StoreError, StoreResult};

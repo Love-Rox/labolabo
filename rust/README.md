@@ -15,6 +15,13 @@ algorithms — from Swift to Rust.
 > It has its own CI job (`rust-term-ghostty`, `continue-on-error`) and is
 > distilled from the `term-poc` spike. See its README for the design.
 
+As of wave 4c, "pure-logic" no longer means "no I/O": `store` (ported from
+`LaboLaboStore`) is real, fallible SQLite persistence, not a parser or an
+in-memory model. It's still in-scope for this crate (the porting brief
+explicitly puts it here rather than a new crate — see the wave 4c section
+below) because it's still OS/UI-framework-independent, just no longer
+side-effect-free.
+
 ## Wave 1 (`Sources/LaboLaboEngine/Git/`, no runtime deps)
 
 | Swift source | Rust module |
@@ -267,7 +274,7 @@ Wave 2 edge cases:
 rust/
   Cargo.toml                        # workspace, resolver = "2"
   crates/labolabo-core/
-    Cargo.toml                      # serde_json is a runtime dep (wave 2); serde's derive feature too (wave 3); libc (unix-only) too (wave 4b)
+    Cargo.toml                      # runtime deps: serde_json (wave 2), serde derive (wave 3), libc (unix-only, wave 4b), rusqlite + chrono (wave 4c)
     src/
       lib.rs
       git_models.rs                 # wave 1: port of GitModels.swift + unit tests ported from Swift XCTest
@@ -281,6 +288,14 @@ rust/
       cross_session_conflicts.rs    # wave 2: port of CrossSessionConflicts.swift + unit tests
       release_version.rs            # wave 2: port of ReleaseVersion.swift + unit tests
       tiling.rs                     # wave 3: port of app/Sources/PaneTilingModel.swift + unit tests
+      store/                        # wave 4c: port of Sources/LaboLaboStore/ -- see "Wave 4c" above
+        mod.rs
+        record.rs                  # port of SessionRecord.swift
+        database.rs                # port of SessionDatabase.swift (rusqlite) + unit tests
+        datetime.rs                # GRDB `Date` <-> TEXT compatibility (format/parse) + unit tests
+        persisting.rs              # port of SessionPersisting.swift (trait)
+        data_dir.rs                # port of AppDataDirectory.swift (macOS/Linux/Windows) + unit tests
+        error.rs                   # StoreError/StoreResult
       util.rs                       # small string helpers shared by the parsers
       hooks.rs                      # wave 4b: port of AgentStatusBus.swift + HookForwarder.swift + unit tests
       bin/
@@ -289,9 +304,11 @@ rust/
       golden.rs                     # golden-oracle test (see below; wave 1/2 modules only)
       tiling_golden.rs               # wave 3: tiling's own golden test (separate oracle mechanism, see below)
       labolabo_hook_bin.rs           # wave 4b: end-to-end test spawning the real labolabo-hook binary
+      store_golden.rs                # wave 4c: store's own golden test, against a real-GRDB-written fixture DB (see "Wave 4c" above)
     fixtures/
       generate.swift                # the Swift-side "oracle" generator (see below; wave 1/2 modules only)
       tiling/*.json                 # wave 3: real JSONEncoder output for TileLayout (separate oracle, see below)
+      store/fixture.db               # wave 4c: real GRDB-written SQLite fixture (separate oracle, see "Wave 4c" above)
       inputs/
         porcelain/*.txt, *.raw      # git status --porcelain=v2 -z inputs
         diff/*.diff                 # git diff inputs
@@ -454,23 +471,158 @@ commands on both `ubuntu-latest` and `macos-15`.
 
 ## Known scope limits / what's next
 
-- `GitRunner`/`GitEngine` (process execution + orchestration), `FileWatcher`,
-  and persistence (`LaboLaboStore`) remain unported and out of scope. The
-  `AgentStatusBus`/`AgentEventTransport` socket-transport layer was ported in
-  wave 4b (see above) -- the settings.local.json hooks-injection app-layer
-  logic (`app/Sources/AgentSessionModel.swift`) that creates
-  `/tmp/labolabo` and merges/restores the worktree's `.claude/settings.local.json`
-  is still unported (app-layer, not engine-layer, same split as the Swift
-  source).
-- `commit_graph::build`'s only consumer in Swift,
-  `GitEngine.commitGraph(worktree:limit:)`, is process execution and is not
-  ported — a future wave that ports `GitRunner`/`GitEngine` would need to
-  add a thin `git log` invocation wrapper around `commit_graph::build`.
+- `FileWatcher` remains unported and out of scope. `GitRunner`/`GitEngine`
+  (process execution + orchestration) were ported in wave 4a (including the
+  thin `git log` wrapper `GitEngine::commit_graph` around
+  `commit_graph::build`), the `AgentStatusBus`/`AgentEventTransport`
+  socket-transport layer in wave 4b, and persistence (`LaboLaboStore`) in
+  wave 4c (`store`) — see the corresponding sections above. The
+  settings.local.json hooks-injection app-layer logic
+  (`app/Sources/AgentSessionModel.swift`) that creates `/tmp/labolabo` and
+  merges/restores the worktree's `.claude/settings.local.json` is still
+  unported (app-layer, not engine-layer, same split as the Swift source).
 - Golden coverage exists for `porcelain`, `unified_diff`, `worktree`,
-  `transcript_usage`, `agent_event_parser`, and `tiling` (the last via its
-  own `tests/tiling_golden.rs`, not `tests/golden.rs`). `commit_graph`,
-  `cross_session_conflicts`, and `release_version` are covered by ported
-  unit tests only (no golden fixtures), by design — see "Wave 2" above.
+  `transcript_usage`, `agent_event_parser`, `tiling`, and `store` (`tiling`
+  via its own `tests/tiling_golden.rs`, `store` via its own
+  `tests/store_golden.rs` against a real-GRDB-written fixture database —
+  neither is `tests/golden.rs`). `commit_graph`, `cross_session_conflicts`,
+  and `release_version` are covered by ported unit tests only (no golden
+  fixtures), by design — see "Wave 2" above.
 - `tiling::PaneTilingActions` is a trait with no production implementation
   yet (no Rust UI layer exists to implement it against) — only a
-  test-only mock (`tiling::tests::MockCoordinator`).
+  test-only mock (`tiling::tests::MockCoordinator`). Likewise
+  `store::SessionPersisting` has one conformer (`store::SessionDatabase`)
+  and no production call site yet (no Rust UI layer exists to drive it).
+- `store` opens a database file directly (`SessionDatabase::open`/
+  `open_in_memory`); it does not yet replicate GRDB's `DatabaseQueue`
+  single-writer-serialization guarantees under concurrent access from
+  multiple threads/processes — not a concern for the single-threaded Rust
+  call sites that exist today (there are none yet), but worth revisiting
+  once a Rust UI layer actually drives this concurrently.
+
+## Wave 4c (session persistence)
+
+| Swift source | Rust module |
+|---|---|
+| `Sources/LaboLaboStore/SessionRecord.swift` | `store/record.rs` |
+| `Sources/LaboLaboStore/SessionDatabase.swift` | `store/database.rs` (+ `store/datetime.rs` for the `Date` compatibility contract) |
+| `Sources/LaboLaboStore/SessionPersisting.swift` | `store/persisting.rs` |
+| `Sources/LaboLaboStore/AppDataDirectory.swift` | `store/data_dir.rs` |
+
+This wave ports session/appState SQLite persistence, via `rusqlite`
+(`bundled` feature — SQLite is compiled in, no system library dependency)
+instead of GRDB. It lives as a `store` module inside `labolabo-core` per the
+porting brief, not a new crate.
+
+### GRDB on-disk compatibility
+
+An existing user's `~/Library/Application Support/LaboLabo/labolabo.db` was
+created and is still read/written by Swift's GRDB `DatabaseMigrator`, which
+tracks applied migrations in a `grdb_migrations(identifier TEXT NOT NULL
+PRIMARY KEY)` table. This port never reads or writes `grdb_migrations` — it
+stays exclusively under the Swift side's management, verified in
+`tests/store_golden.rs`'s `never_touches_grdb_migrations_across_a_full_read_write_delete_cycle`
+test (byte-identical `grdb_migrations` contents before/after a full
+read+write+delete cycle through the Rust port).
+
+Instead of its own migration ledger, `store::database::SessionDatabase::ensure_schema`
+reconciles the `session`/`appState` tables to the v3 shape (the final state
+of Swift's three migrations: `v1`, `v2-agentSession`, `v3-adapter`) via
+idempotent, existence-checked DDL: it creates each table outright with its
+full v3 definition if the table doesn't exist yet (a brand-new database),
+or — if it already exists, at *any* prior GRDB migration level (v1 through
+v3) — adds only whatever columns `PRAGMA table_info` shows are missing. One
+code path handles a fresh database, a v1-only database, a v2 database, and
+an already-v3 database (a no-op) uniformly. Column types/constraints are
+copied from `SessionDatabase.swift`'s migrator verbatim, cross-checked
+against GRDB's own `TableDefinition.primaryKey`/`column` source (a
+non-`.integer` `primaryKey(_:_:)` column gets an explicit `NOT NULL`, which
+GRDB itself adds to route around a SQLite quirk — see
+`TableDefinition.swift`'s doc comment).
+
+### `Date` columns — the trickiest part of this port
+
+GRDB's `Date: DatabaseValueConvertible` extension always *writes*
+`"yyyy-MM-dd HH:mm:ss.SSS"` in UTC (fixed `DateFormatter`, always 3
+fractional digits, never a zone suffix) but is considerably more lenient
+when *reading*: it accepts `YYYY-MM-DD[ T]HH:MM[:SS[.SSS]]` with an optional
+trailing `Z`/`+HH:MM`/`-HH:MM`, or — if the column's SQLite storage class is
+numeric rather than TEXT — falls back to interpreting the value as
+`timeIntervalSince1970` **seconds**. `store::datetime` (`format_grdb_datetime`
+/ `parse_grdb_datetime`) reimplements both directions; `store::database`
+handles the numeric-storage-class fallback directly against
+`rusqlite::types::ValueRef` (see `store::datetime`'s module doc comment for
+the full contract, cross-checked line-by-line against GRDB's
+`Date`/`DatabaseDateComponents`/`SQLiteDateParser` sources, and for why the
+parser's "greedy, single trailing check" structure is a deliberate
+restructuring of `SQLiteDateParser`'s "strict incremental" one that is
+behaviorally equivalent for every input).
+
+One genuine, documented divergence: out-of-range calendar components (e.g.
+month `13`) are rejected (`chrono::NaiveDate::from_ymd_opt` returns `None`),
+where Swift's `Calendar(identifier: .gregorian).date(from:)` would instead
+*roll over* into a different, valid date. Every real `addedAt` value in
+production was itself written by the format-side counterpart of this same
+parser, so it's always in-range; this only matters for hand-edited/corrupted
+data, and rejecting outright is the safer failure mode for a persistence
+layer than silently reinterpreting a corrupt date as a different one.
+
+`SessionRecord.added_at` is `chrono::DateTime<Utc>` rather than a bespoke
+type — GRDB's storage format never needs better than millisecond precision,
+which `DateTime<Utc>` carries faithfully without forcing a timezone-naive
+representation on future callers.
+
+### Other faithfully-carried-over quirks
+
+- **`upsert`** is one `INSERT ... ON CONFLICT(id) DO UPDATE` statement, not
+  a literal transliteration of `record.save(db)` — GRDB's
+  `PersistableRecord.save` is documented as "update if a matching primary
+  key row exists, insert otherwise," which is exactly what the `ON
+  CONFLICT` clause expresses in a single round-trip.
+- **`app_state_entries`'s NULL-drop**: the Swift source binds each row with
+  `if let key: String = row["key"], let value: String = row["value"]` —
+  conditional binding through `Optional<String>: DatabaseValueConvertible`.
+  A row whose `value` is SQL NULL fails that binding and is **silently
+  dropped from the result** (not included with an empty string). The Rust
+  port reproduces this by skipping `NULL`-valued rows rather than mapping
+  them to `""`. See the `null_value_row_is_dropped`/
+  `app_state_entries_drops_the_real_grdb_written_null_row` tests (the latter
+  against a row a real GRDB run actually wrote as NULL, not a hand-authored
+  one).
+- **`app_state`/`selected_session_id` NULL-collapsing**: GRDB's
+  `fetchOne` is documented to return `nil` both when the query returns no
+  row *and* when the first row's value is NULL — so a key that exists with
+  an explicit NULL value reads back identically to a key that was never
+  set. The Rust port matches this (see
+  `app_state_on_a_real_null_valued_key_is_none_not_the_key_missing`).
+
+### Golden fixture (`fixtures/store/fixture.db`)
+
+Unlike waves 1/2 (canonical-JSON comparison against a Swift-produced
+`fixtures/expected/**` file) or wave 3 (its own JSON-based oracle), this
+wave's oracle output *is* a SQLite database file: `fixtures/store/fixture.db`
+was produced by a disposable Swift package (not checked into this repo, per
+the "leave no trace" convention `fixtures/generate.swift` and the wave 3
+tiling driver already established) that depends on this repo's real
+`LaboLaboStore` product via a local SwiftPM path dependency and drives the
+real `SessionDatabase.init(url:)` / `.upsert` / `.setSelectedSessionID` /
+`.setAppState` — the exact code path a running LaboLabo app uses. See
+`tests/store_golden.rs`'s module doc comment for the exact regeneration
+recipe and for the fixture's full contents (4 session rows — one fully
+populated with Japanese text, one with every optional column NULL, one with
+quotes/backslash/newline/tab/emoji content to exercise parameter binding
+rather than string interpolation, one with an exact-midnight `addedAt` —
+plus `appState` rows covering `selectedSession`, a prefix-filtered group
+with one NULL-valued and one empty-string-valued entry, and an
+outside-the-prefix key).
+
+`cargo test` opens a fresh copy of the fixture (never mutating the checked-in
+file) and asserts: `all_sessions`/`selected_session_id`/`app_state`/
+`app_state_entries` match hand-verified expected values (transcribed from a
+`sqlite3 fixture.db` dump, documented in the test file); a subsequent
+`upsert` writes a raw `addedAt` TEXT value that is byte-identical to what
+GRDB's own `DateFormatter` would produce; and `grdb_migrations` is
+byte-identical before and after a full read+write+delete cycle. All 8
+`SessionPersisting` operations are additionally exercised through the trait
+object (not just the inherent methods) in
+`all_8_operations_are_reachable_through_the_session_persisting_trait`.
