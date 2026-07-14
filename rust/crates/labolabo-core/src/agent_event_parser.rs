@@ -1,0 +1,120 @@
+//! Faithful port of `Sources/LaboLaboEngine/Agent/AgentEventParser.swift`.
+//!
+//! Interprets one message (raw JSON bytes) from the hook forwarder into an
+//! `AgentStatusEvent`. Transport-independent by design (mirrors the Swift
+//! split between `AgentEventParser` — this file — and the `AgentEventTransport`
+//! trait implemented by AF_UNIX on macOS/Linux and, eventually, something
+//! else on Windows): cross-platform work only needs to swap the transport;
+//! this interpretation layer and the wire spec (`docs/hooks-protocol.md`)
+//! are shared across all platforms. The `AgentEventTransport`/`AgentStatusBus`
+//! socket-transport layer itself (`AgentStatusBus.swift`) is process/socket
+//! infrastructure, not pure logic, and is out of scope for this crate.
+//!
+//! Verified against `docs/hooks-protocol.md` §5 (field table + "破棄規則")
+//! directly: field names, the drop-on-unknown-event rule, and the
+//! empty/malformed-payload drop rule all match this port with no divergence
+//! found.
+
+use serde_json::Value;
+
+use crate::agent_status::{AgentStatus, AgentStatusEvent};
+
+/// Interprets one raw hook-event payload. Invalid JSON, a non-object top
+/// level, or an unknown/missing `hook_event_name` all silently return
+/// `None` (mirrors the Swift `guard ... else { return nil }` chain — the
+/// caller drops the event with no error, no log).
+pub fn parse(data: &[u8]) -> Option<AgentStatusEvent> {
+    if data.is_empty() {
+        return None;
+    }
+    let value: Value = serde_json::from_slice(data).ok()?;
+    let object = value.as_object()?;
+    let hook_event = object
+        .get("hook_event_name")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let status = AgentStatus::from_hook_event(&hook_event)?;
+    Some(AgentStatusEvent {
+        hook_event,
+        status,
+        session_id: object
+            .get("session_id")
+            .and_then(Value::as_str)
+            .map(String::from),
+        transcript_path: object
+            .get("transcript_path")
+            .and_then(Value::as_str)
+            .map(String::from),
+        cwd: object.get("cwd").and_then(Value::as_str).map(String::from),
+        pane_id: object
+            .get("labolabo_pane_id")
+            .and_then(Value::as_str)
+            .map(String::from),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Ported 1:1 from Tests/LaboLaboEngineTests/AgentEventParserTests.swift.
+    // (AgentStatusBusTransportInjectionTests, the socket round-trip test in
+    // the same Swift file, exercises AgentStatusBus/AgentEventTransport —
+    // out of scope here, see module doc comment.)
+
+    fn parse_str(json: &str) -> Option<AgentStatusEvent> {
+        parse(json.as_bytes())
+    }
+
+    #[test]
+    fn parses_full_event() {
+        let event = parse_str(
+            r#"{"hook_event_name":"SessionStart","session_id":"s1","transcript_path":"/t.jsonl","cwd":"/w","labolabo_pane_id":"P1"}"#,
+        )
+        .expect("event");
+        assert_eq!(event.status, AgentStatus::Starting);
+        assert_eq!(event.hook_event, "SessionStart");
+        assert_eq!(event.session_id.as_deref(), Some("s1"));
+        assert_eq!(event.transcript_path.as_deref(), Some("/t.jsonl"));
+        assert_eq!(event.cwd.as_deref(), Some("/w"));
+        assert_eq!(event.pane_id.as_deref(), Some("P1"));
+    }
+
+    #[test]
+    fn optional_fields_may_be_absent() {
+        let event = parse_str(r#"{"hook_event_name":"Stop"}"#).expect("event");
+        assert_eq!(event.status, AgentStatus::Idle);
+        assert_eq!(event.session_id, None);
+        assert_eq!(event.transcript_path, None);
+        assert_eq!(event.cwd, None);
+        assert_eq!(event.pane_id, None);
+    }
+
+    #[test]
+    fn unknown_hook_event_is_dropped() {
+        assert_eq!(parse_str(r#"{"hook_event_name":"Mystery"}"#), None);
+    }
+
+    #[test]
+    fn malformed_or_empty_payload_is_dropped() {
+        assert_eq!(parse_str("{ broken"), None);
+        assert_eq!(parse(&[]), None);
+    }
+
+    /// 未知フィールドは無視される（仕様書の前方互換方針: フィールド追加は互換）。
+    #[test]
+    fn unknown_fields_are_ignored() {
+        let event =
+            parse_str(r#"{"hook_event_name":"Notification","future_field":123}"#).expect("event");
+        assert_eq!(event.status, AgentStatus::WaitingForInput);
+    }
+
+    /// Not part of the ported Swift suite: documents that a top-level JSON
+    /// value that isn't an object (matching Swift's `as? [String: Any]`
+    /// failing for a non-dictionary top level) is dropped too.
+    #[test]
+    fn non_object_top_level_is_dropped() {
+        assert_eq!(parse_str("[1,2,3]"), None);
+    }
+}

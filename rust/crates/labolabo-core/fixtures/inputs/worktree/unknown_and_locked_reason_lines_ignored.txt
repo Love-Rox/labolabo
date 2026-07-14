@@ -1,0 +1,5 @@
+worktree /repo/prunable-example
+HEAD dddddddd
+branch refs/heads/gone
+prunable gitdir file points to non-existent location
+locked reason: manual hold

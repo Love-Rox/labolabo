@@ -1,18 +1,21 @@
-// Golden-fixture generator for the Rust port of PorcelainStatusParser / UnifiedDiffParser.
+// Golden-fixture generator for the Rust port of LaboLaboEngine's pure parsers.
 //
 // This script is the "Swift oracle": it feeds every file under
-// fixtures/inputs/{porcelain,diff}/ through the real Swift parsers
-// (Sources/LaboLaboEngine/Git/{PorcelainStatusParser,UnifiedDiffParser}.swift)
+// fixtures/inputs/{porcelain,diff,worktree,transcript_usage,agent_event}/
+// through the real Swift parsers (Sources/LaboLaboEngine/{Git,Agent}/*.swift)
 // and writes a canonical JSON representation of the result to
-// fixtures/expected/{porcelain,diff}/<same-stem>.json.
+// fixtures/expected/<same-subdir>/<same-stem>.json.
 //
 // It is NOT part of the SwiftPM package graph (no executable target was added
 // to Package.swift, per the porting brief) and is not built by `swift build`
-// or `swift test`. It links directly against the three already-compiled
-// object files for GitModels/PorcelainStatusParser/UnifiedDiffParser (which
-// depend on nothing outside Foundation), so it can run as an ordinary
-// `swiftc`-compiled one-off binary. See ../README.md for the exact commands
-// to regenerate.
+// or `swift test`. It links directly against the already-compiled object
+// files for the ported Swift sources (which depend on nothing outside
+// Foundation — verified with `nm -g` before wiring each one in; notably
+// CommitGraph.swift's `GitEngine.commitGraph` extension pulls in `GitRunner`
+// and is NOT linkable this way, which is why the commit-graph pure-algorithm
+// port has no golden fixtures — see ../README.md), so it can run as an
+// ordinary `swiftc`-compiled one-off binary. See ../README.md for the exact
+// commands to regenerate.
 //
 // Canonical JSON rules (must match the Rust side's `tests/golden.rs`
 // serde_json canonicalization exactly, byte for byte):
@@ -23,6 +26,14 @@
 //   - Strings escaped with the minimal JSON escapes: " \ and control chars
 //     (\n \r \t \b \f, everything else < 0x20 as \u00XX). Everything else
 //     (including all non-ASCII UTF-8) passes through unescaped.
+//   - A value that is entirely absent at the top level (e.g. AgentEventParser
+//     dropping an event) renders as the literal `null` (this is the one place
+//     `null` is used deliberately, since there is no "key" to omit).
+//   - Floating-point values (e.g. estimated cost) are intentionally NOT part
+//     of any golden fixture -- Swift's and Rust's default Double/f64 string
+//     formatting are not guaranteed byte-identical, so cost estimation is
+//     instead covered by the ported-1:1 unit tests (with a numeric
+//     tolerance), not golden fixtures.
 
 import Foundation
 import LaboLaboEngine
@@ -33,6 +44,7 @@ indirect enum JSONValue {
     case string(String)
     case int(Int)
     case bool(Bool)
+    case null
     case array([JSONValue])
     case object([(String, JSONValue)])
 }
@@ -68,6 +80,8 @@ func render(_ value: JSONValue) -> String {
         return String(i)
     case .bool(let b):
         return b ? "true" : "false"
+    case .null:
+        return "null"
     case .array(let items):
         return "[" + items.map(render).joined(separator: ",") + "]"
     case .object(let pairs):
@@ -151,6 +165,60 @@ func jsonHunk(_ h: DiffHunk) -> JSONValue {
     ])
 }
 
+// MARK: - Wave 2: Worktree
+
+func jsonWorktree(_ w: Worktree) -> JSONValue {
+    var fields: [(String, JSONValue)] = [
+        ("path", .string(w.path)),
+        ("isDetached", .bool(w.isDetached)),
+        ("isLocked", .bool(w.isLocked)),
+        ("isBare", .bool(w.isBare)),
+    ]
+    if let head = w.head { fields.append(("head", .string(head))) }
+    if let branch = w.branch { fields.append(("branch", .string(branch))) }
+    if let shortBranch = w.shortBranch { fields.append(("shortBranch", .string(shortBranch))) }
+    return .object(fields)
+}
+
+// MARK: - Wave 2: TranscriptUsage
+//
+// estimatedCostUSD is intentionally excluded -- see the module doc comment
+// at the top of this file for why (float-formatting is not guaranteed
+// byte-identical between Swift and Rust; cost estimation is covered by
+// ported unit tests with a numeric tolerance instead).
+
+func jsonAgentUsage(_ u: AgentUsage) -> JSONValue {
+    var fields: [(String, JSONValue)] = [
+        ("inputTokens", .int(u.inputTokens)),
+        ("outputTokens", .int(u.outputTokens)),
+        ("cacheCreationTokens", .int(u.cacheCreationTokens)),
+        ("cacheReadTokens", .int(u.cacheReadTokens)),
+        ("turns", .int(u.turns)),
+        ("totalTokens", .int(u.totalTokens)),
+        ("isEmpty", .bool(u.isEmpty)),
+    ]
+    if let model = u.model { fields.append(("model", .string(model))) }
+    return .object(fields)
+}
+
+// MARK: - Wave 2: AgentEventParser
+//
+// `nil` (event dropped) renders as the JSON literal `null`; see the module
+// doc comment for why this is the one place `null` is used deliberately.
+
+func jsonAgentStatusEvent(_ event: AgentStatusEvent?) -> JSONValue {
+    guard let event = event else { return .null }
+    var fields: [(String, JSONValue)] = [
+        ("hookEvent", .string(event.hookEvent)),
+        ("status", .string(event.status.rawValue)),
+    ]
+    if let sessionID = event.sessionID { fields.append(("sessionID", .string(sessionID))) }
+    if let transcriptPath = event.transcriptPath { fields.append(("transcriptPath", .string(transcriptPath))) }
+    if let cwd = event.cwd { fields.append(("cwd", .string(cwd))) }
+    if let paneID = event.paneID { fields.append(("paneID", .string(paneID))) }
+    return .object(fields)
+}
+
 func jsonFileDiff(_ f: FileDiff) -> JSONValue {
     var fields: [(String, JSONValue)] = [
         ("additions", .int(f.additions)),
@@ -206,7 +274,19 @@ do {
     let diffCount = try processDirectory("diff") { raw in
         .array(UnifiedDiffParser.parse(raw).map(jsonFileDiff))
     }
-    print("generated \(porcelainCount) porcelain expected fixtures, \(diffCount) diff expected fixtures")
+    let worktreeCount = try processDirectory("worktree") { raw in
+        .array(WorktreeListParser.parse(raw).map(jsonWorktree))
+    }
+    let transcriptUsageCount = try processDirectory("transcript_usage") { raw in
+        jsonAgentUsage(TranscriptUsage.parse(jsonl: raw))
+    }
+    let agentEventCount = try processDirectory("agent_event") { raw in
+        jsonAgentStatusEvent(AgentEventParser.parse(Data(raw.utf8)))
+    }
+    print("""
+    generated \(porcelainCount) porcelain, \(diffCount) diff, \(worktreeCount) worktree, \
+    \(transcriptUsageCount) transcript_usage, \(agentEventCount) agent_event expected fixtures
+    """)
 } catch {
     FileHandle.standardError.write("golden fixture generation failed: \(error)\n".data(using: .utf8)!)
     exit(1)

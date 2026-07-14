@@ -1,0 +1,12 @@
+worktree /repo
+HEAD aaaaaaa
+branch refs/heads/main
+
+worktree /repo/.worktrees/x
+HEAD bbbbbbb
+branch refs/heads/feature/x
+
+worktree /repo/locked-detached
+HEAD ccccccc
+detached
+locked
