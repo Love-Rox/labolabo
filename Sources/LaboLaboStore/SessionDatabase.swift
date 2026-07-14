@@ -18,8 +18,7 @@ public final class SessionDatabase {
 
     /// `~/Library/Application Support/LaboLabo/labolabo.db`
     public static func defaultURL() -> URL {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        return base.appendingPathComponent("LaboLabo/labolabo.db")
+        AppDataDirectory.url().appendingPathComponent("labolabo.db")
     }
 
     private static var migrator: DatabaseMigrator {
