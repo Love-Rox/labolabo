@@ -1,0 +1,8 @@
+diff --git a/quirk.txt b/quirk.txt
+index 1111111..2222222 100644
+--- a/quirk.txt
++++ b/quirk.txt
+@@ -1,3 +1,2 @@
+ keep
+--- looks like a header but is really a deleted line
+ tail

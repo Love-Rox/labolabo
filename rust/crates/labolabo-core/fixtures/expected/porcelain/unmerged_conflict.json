@@ -1,0 +1,1 @@
+{"ahead":0,"behind":0,"branch":"main","conflicted":["conflict.txt"],"entries":[{"index":"U","kind":"unmerged","path":"conflict.txt","worktree":"U"}],"isDetached":false,"isDirty":true,"staged":[],"unstaged":["conflict.txt"],"untracked":[]}

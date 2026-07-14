@@ -1,0 +1,1 @@
+[{"additions":2,"deletions":0,"displayPath":"new.txt","hunks":[{"header":"@@ -0,0 +1,2 @@","lines":[{"kind":"addition","newLineNumber":1,"text":"hello"},{"kind":"addition","newLineNumber":2,"text":"world"}],"newCount":2,"newStart":1,"oldCount":0,"oldStart":0}],"isBinary":false,"isDeleted":false,"isNew":true,"isRename":false,"newPath":"new.txt"}]

@@ -1,0 +1,30 @@
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..517fcda
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1 @@
++tmp_ignored/
+diff --git a/assets/image.png b/assets/image.png
+index aff718a..49d1468 100644
+Binary files a/assets/image.png and b/assets/image.png differ
+diff --git a/src/bar.txt b/src/bar.txt
+index 85c3040..4620eb5 100644
+--- a/src/bar.txt
++++ b/src/bar.txt
+@@ -1,3 +1,3 @@
+ alpha
+-beta
++beta CHANGED
+ gamma
+diff --git a/src/doomed.txt b/src/doomed.txt
+deleted file mode 100644
+index 528557a..0000000
+--- a/src/doomed.txt
++++ /dev/null
+@@ -1 +0,0 @@
+-will be deleted
+diff --git a/src/old_name.txt b/src/new_name.txt
+similarity index 100%
+rename from src/old_name.txt
+rename to src/new_name.txt

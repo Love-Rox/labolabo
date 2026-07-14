@@ -1,0 +1,12 @@
+diff --git a/multi.txt b/multi.txt
+index 1111111..2222222 100644
+--- a/multi.txt
++++ b/multi.txt
+@@ -1,2 +1,2 @@
+ top
+-first
++first changed
+@@ -10,2 +10,3 @@
+ bottom
++extra
+ end

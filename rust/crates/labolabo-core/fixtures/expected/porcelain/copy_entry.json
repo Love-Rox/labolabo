@@ -1,0 +1,1 @@
+{"ahead":0,"behind":0,"branch":"main","conflicted":[],"entries":[{"index":"C","kind":"renamedOrCopied","originalPath":"source/name.swift","path":"copied/name.swift","score":75,"worktree":"."}],"isDetached":false,"isDirty":true,"staged":["copied/name.swift"],"unstaged":[],"untracked":[]}
