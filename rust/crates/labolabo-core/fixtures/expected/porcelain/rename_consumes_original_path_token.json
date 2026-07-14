@@ -1,0 +1,1 @@
+{"ahead":0,"behind":0,"branch":"main","conflicted":[],"entries":[{"index":"R","kind":"renamedOrCopied","originalPath":"old/name.swift","path":"new/name.swift","score":100,"worktree":"."},{"index":".","kind":"untracked","path":"untracked.txt","worktree":"."}],"isDetached":false,"isDirty":true,"staged":["new/name.swift"],"unstaged":[],"untracked":["untracked.txt"]}
