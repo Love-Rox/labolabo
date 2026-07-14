@@ -1,0 +1,3 @@
+not-json
+{"type":"user","message":{"usage":{"input_tokens":999}}}
+{"type":"assistant","message":{"model":"claude-sonnet-5","usage":{"input_tokens":10,"output_tokens":2}}}

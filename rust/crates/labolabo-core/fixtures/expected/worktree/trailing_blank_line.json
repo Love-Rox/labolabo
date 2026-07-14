@@ -1,0 +1,1 @@
+[{"branch":"refs/heads/main","head":"aaaaaaa","isBare":false,"isDetached":false,"isLocked":false,"path":"/repo","shortBranch":"main"},{"branch":"refs/heads/dev","head":"bbbbbbb","isBare":false,"isDetached":false,"isLocked":false,"path":"/repo/second","shortBranch":"dev"}]

@@ -21,7 +21,7 @@
 //!     Swift's synthesized `encodeIfPresent` behavior for `Optional` stored
 //!     properties).
 
-use labolabo_core::{porcelain, unified_diff};
+use labolabo_core::{agent_event_parser, porcelain, transcript_usage, unified_diff, worktree};
 use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -204,6 +204,119 @@ fn file_diff_view(f: &labolabo_core::FileDiff) -> FileDiffView {
     }
 }
 
+// MARK: - Wave 2: Worktree
+//
+// Field order: branch, head, isBare, isDetached, isLocked, path, shortBranch.
+
+#[derive(Serialize)]
+struct WorktreeView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    head: Option<String>,
+    #[serde(rename = "isBare")]
+    is_bare: bool,
+    #[serde(rename = "isDetached")]
+    is_detached: bool,
+    #[serde(rename = "isLocked")]
+    is_locked: bool,
+    path: String,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "shortBranch")]
+    short_branch: Option<String>,
+}
+
+fn worktree_view(w: &labolabo_core::Worktree) -> WorktreeView {
+    WorktreeView {
+        branch: w.branch.clone(),
+        head: w.head.clone(),
+        is_bare: w.is_bare,
+        is_detached: w.is_detached,
+        is_locked: w.is_locked,
+        path: w.path.clone(),
+        short_branch: w.short_branch().map(String::from),
+    }
+}
+
+// MARK: - Wave 2: TranscriptUsage
+//
+// Field order: cacheCreationTokens, cacheReadTokens, inputTokens, isEmpty,
+// model, outputTokens, totalTokens, turns. `estimatedCostUSD` is
+// intentionally excluded -- see `fixtures/generate.swift`'s module doc
+// comment for why (float formatting isn't guaranteed byte-identical between
+// Swift and Rust; cost estimation is instead covered by the ported unit
+// tests in `transcript_usage.rs`, which compare with a numeric tolerance).
+
+#[derive(Serialize)]
+struct AgentUsageView {
+    #[serde(rename = "cacheCreationTokens")]
+    cache_creation_tokens: i64,
+    #[serde(rename = "cacheReadTokens")]
+    cache_read_tokens: i64,
+    #[serde(rename = "inputTokens")]
+    input_tokens: i64,
+    #[serde(rename = "isEmpty")]
+    is_empty: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
+    #[serde(rename = "outputTokens")]
+    output_tokens: i64,
+    #[serde(rename = "totalTokens")]
+    total_tokens: i64,
+    turns: i64,
+}
+
+fn agent_usage_view(u: &labolabo_core::AgentUsage) -> AgentUsageView {
+    AgentUsageView {
+        cache_creation_tokens: u.cache_creation_tokens,
+        cache_read_tokens: u.cache_read_tokens,
+        input_tokens: u.input_tokens,
+        is_empty: u.is_empty(),
+        model: u.model.clone(),
+        output_tokens: u.output_tokens,
+        total_tokens: u.total_tokens(),
+        turns: u.turns,
+    }
+}
+
+// MARK: - Wave 2: AgentEventParser
+//
+// Field order: cwd, hookEvent, paneID, sessionID, status, transcriptPath.
+// A dropped event (`parse` returns `None`) renders as the JSON literal
+// `null` -- the one deliberate use of `null` in these fixtures, since there
+// is no "key" to omit at the top level.
+
+#[derive(Serialize)]
+struct AgentStatusEventView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cwd: Option<String>,
+    #[serde(rename = "hookEvent")]
+    hook_event: String,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "paneID")]
+    pane_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "sessionID")]
+    session_id: Option<String>,
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "transcriptPath")]
+    transcript_path: Option<String>,
+}
+
+fn agent_status_event_json(data: &[u8]) -> String {
+    match agent_event_parser::parse(data) {
+        Some(event) => {
+            let view = AgentStatusEventView {
+                cwd: event.cwd,
+                hook_event: event.hook_event,
+                pane_id: event.pane_id,
+                session_id: event.session_id,
+                status: event.status.raw_value().to_string(),
+                transcript_path: event.transcript_path,
+            };
+            serde_json::to_string(&view).expect("serialize AgentStatusEventView")
+        }
+        None => "null".to_string(),
+    }
+}
+
 // MARK: - Driver
 
 fn fixtures_root() -> PathBuf {
@@ -270,4 +383,31 @@ fn unified_diff_matches_swift_oracle() {
         serde_json::to_string(&views).expect("serialize FileDiffView list")
     });
     eprintln!("golden: {n} diff fixtures matched byte-for-byte");
+}
+
+#[test]
+fn worktree_list_matches_swift_oracle() {
+    let n = assert_matches_golden("worktree", "worktree", |raw| {
+        let worktrees = worktree::parse(raw);
+        let views: Vec<WorktreeView> = worktrees.iter().map(worktree_view).collect();
+        serde_json::to_string(&views).expect("serialize WorktreeView list")
+    });
+    eprintln!("golden: {n} worktree fixtures matched byte-for-byte");
+}
+
+#[test]
+fn transcript_usage_matches_swift_oracle() {
+    let n = assert_matches_golden("transcript_usage", "transcript_usage", |raw| {
+        let usage = transcript_usage::parse(raw);
+        serde_json::to_string(&agent_usage_view(&usage)).expect("serialize AgentUsageView")
+    });
+    eprintln!("golden: {n} transcript_usage fixtures matched byte-for-byte");
+}
+
+#[test]
+fn agent_event_parser_matches_swift_oracle() {
+    let n = assert_matches_golden("agent_event", "agent_event", |raw| {
+        agent_status_event_json(raw.as_bytes())
+    });
+    eprintln!("golden: {n} agent_event fixtures matched byte-for-byte");
 }

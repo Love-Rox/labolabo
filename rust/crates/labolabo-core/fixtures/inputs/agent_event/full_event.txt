@@ -1,0 +1,1 @@
+{"hook_event_name":"SessionStart","session_id":"s1","transcript_path":"/t.jsonl","cwd":"/w","labolabo_pane_id":"P1"}
