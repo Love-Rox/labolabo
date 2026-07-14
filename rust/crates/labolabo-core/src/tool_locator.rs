@@ -15,8 +15,13 @@
 //! - Linux: fixed candidates -> PATH only (no login-shell fallback).
 //! - Other targets (Windows, ...): unimplemented stub -- see `locate` below.
 
+// ログインシェル解決（locate_via_login_shell）が macOS 限定のため、これらの import は
+// Linux ビルドでは未使用になる。clippy -D warnings（CI の ubuntu ジョブ）を通すために
+// 同じ cfg でゲートする。
+#[cfg(target_os = "macos")]
 use crate::process;
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
 use std::time::Duration;
 
 /// Abstraction over tool-name -> absolute-path resolution, so tests (and a
