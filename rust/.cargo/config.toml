@@ -1,0 +1,20 @@
+# Cargo config for the `rust/` workspace.
+#
+# `LIBGHOSTTY_VT_SYS_OPTIMIZE = "ReleaseFast"` makes the single nastiest
+# `backend-ghostty-vt` build trap impossible to hit by accident (see
+# `crates/labolabo-term/README.md` "Build traps carried over from the spike"):
+#
+#   libghostty-vt-sys's build.rs picks the *Zig* optimization mode for the
+#   vendored `libghostty-vt.a` from cargo's `DEBUG` env var when this var is
+#   unset -- defaulting to Zig `Debug` whenever `DEBUG=true`. Cargo reports
+#   `DEBUG=true` to build scripts for any profile with debug symbols, so the
+#   native VT parser can silently build completely *unoptimized* even under
+#   `--release`. In the spike that showed up as a ~20000x throughput cliff
+#   (`yes | pv` at ~4KiB/s vs. ~90MiB/s) -- a broken build, not a slow one.
+#
+# `[env]` (without `force = true`) only applies this as a *default*: an
+# explicit `LIBGHOSTTY_VT_SYS_OPTIMIZE=...` in the environment still wins.
+# The default (alacritty) backend never compiles libghostty-vt-sys, so this
+# var is simply unread there -- zero effect on the always-green `rust` CI job.
+[env]
+LIBGHOSTTY_VT_SYS_OPTIMIZE = "ReleaseFast"
