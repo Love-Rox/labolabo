@@ -40,6 +40,25 @@
 //! see `transcript_usage::as_int`'s doc comment for the specific quirk this
 //! preserves.
 //!
+//! ## Wave 3 (tiling/tab tree model)
+//!
+//! - `tiling`: the pane tiling/tab tree model (`TileNode`/`PaneItem`/
+//!   `PaneTilingModel`) and its persisted-JSON shape (`TileLayout`/
+//!   `PanePayload`/`LayoutPreset`), ported from the app target's
+//!   `app/Sources/PaneTilingModel.swift` (not part of `LaboLaboEngine` —
+//!   this is the first ported module that lives in the app, not the
+//!   library). `TileLayout`/`PanePayload` are real `Codable` DTOs the app
+//!   round-trips through `JSONEncoder`/`JSONDecoder` for persistence (GRDB
+//!   `appState.paneLayout`), so `tiling`'s `#[derive(Serialize,
+//!   Deserialize)]` types are production code, not a test-only view —
+//!   unlike every module above, whose JSON views exist only in
+//!   `tests/golden.rs`. See the `tiling` module doc comment for how its
+//!   golden fixtures were produced (a separate small oracle script, since
+//!   `PaneTilingModel.swift` isn't reachable through the
+//!   `LaboLaboEngine`-linking trick `fixtures/generate.swift` uses) and for
+//!   the JSON-compatibility caveats (key order, float formatting, `/`
+//!   escaping) that come with matching a real `JSONEncoder` byte-for-byte.
+//!
 //! Correctness is anchored to the Swift implementation as the "golden
 //! oracle": `tests/golden.rs` runs this crate's parsers over the same input
 //! corpus the Swift parsers were run over (see `fixtures/`) and asserts
@@ -48,7 +67,9 @@
 //! algorithm modules (commit_graph, cross_session_conflicts, release_version)
 //! are covered by unit tests ported 1:1 from the corresponding Swift XCTest
 //! suites instead — see `README.md` for why (and for how the golden fixtures
-//! were generated / how to regenerate them).
+//! were generated / how to regenerate them). `tiling` has its own golden
+//! test (`tests/tiling_golden.rs`) plus ported-1:1 unit tests in the module
+//! itself — see its doc comment.
 
 pub mod agent_event_parser;
 pub mod agent_status;
@@ -57,6 +78,7 @@ pub mod cross_session_conflicts;
 pub mod git_models;
 pub mod porcelain;
 pub mod release_version;
+pub mod tiling;
 pub mod transcript_usage;
 pub mod unified_diff;
 mod util;
@@ -64,6 +86,10 @@ pub mod worktree;
 
 pub use agent_status::{AgentStatus, AgentStatusEvent};
 pub use git_models::{Change, GitFileEntry, GitStatus, Kind};
+pub use tiling::{
+    DropEdge, LayoutPreset, NodeId, PaneId, PaneItem, PaneKind, PanePayload, PaneTilingActions,
+    PaneTilingModel, TileLayout, TileNode, TileOrientation,
+};
 pub use transcript_usage::AgentUsage;
 pub use unified_diff::{DiffHunk, DiffLine, FileDiff, LineKind};
 pub use worktree::Worktree;

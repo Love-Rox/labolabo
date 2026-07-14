@@ -51,6 +51,66 @@ Everything else in `LaboLaboEngine` (process execution, git plumbing that
 shells out, file watching, the `AgentStatusBus`/`AgentEventTransport`
 socket-transport layer, persistence, ...) remains out of scope.
 
+## Wave 3 (tiling/tab tree model)
+
+| Swift source | Rust module | Golden fixtures? |
+|---|---|---|
+| `app/Sources/PaneTilingModel.swift` | `tiling.rs` | yes (separate mechanism, see below) |
+
+This is the first ported module that lives in the **app target**
+(`app/Sources/`), not `LaboLaboEngine` — `PaneTilingModel` is the tile/tab
+tree (`TileNode`/`PaneItem`/`PaneTilingModel`) behind one session's
+terminal + changed-files + diff + commit-history layout, plus its
+persisted-JSON shape (`TileLayout`/`PanePayload`/`LayoutPreset`).
+
+Unlike every wave-1/2 module, `TileLayout`/`PanePayload` are not test-only
+JSON views: they are the app's actual `Codable` DTOs, round-tripped through
+`JSONEncoder`/`JSONDecoder` to persist a session's layout (GRDB
+`appState.paneLayout` column) and named layout presets, so `serde`'s
+`derive` feature becomes a **runtime** dependency starting this wave (wave
+2 only needed `serde_json` itself, for hand-rolled parsing).
+
+Because existing users already have layouts on disk in whatever shape
+Swift's `JSONEncoder` wrote them in, `tiling.rs` documents (and its golden
+test enforces) an unusually detailed JSON-compatibility contract: exact key
+spellings, the legacy-single-tab/`panes`-tab-group backward-compat split,
+the omitted-vs-`null` rule, `/`-escaping, and float formatting (no
+trailing `.0` for integral `ratio` values) — all verified empirically
+against a real `JSONEncoder`, not assumed. It also documents why object key
+**order** is deliberately *not* matched: empirically, `JSONEncoder`'s key
+order for a `Codable` struct is not stable even across repeated runs of the
+same Swift process (confirmed by encoding the same value four times in
+four separate `swift` invocations and getting four different orders), so
+"byte-identical to Swift's output" isn't a coherent target for order in the
+first place. See `src/tiling.rs`'s module doc comment for the full writeup.
+
+Its golden fixtures (`fixtures/tiling/*.json`) come from a **separate**
+oracle mechanism from `fixtures/generate.swift`: since `PaneTilingModel`
+lives in the app target, it isn't reachable through `generate.swift`'s
+`LaboLaboEngine`-object-file-linking trick. Instead, a disposable
+`swiftc`-compiled driver (`main.swift`, not checked in) is compiled
+*together* with the real `app/Sources/PaneTilingModel.swift` and calls the
+real `JSONEncoder().encode(_:)` directly — see `tests/tiling_golden.rs`'s
+module doc comment for the exact regeneration command. One fixture,
+`legacy_old_format.json`, is hand-authored instead (it represents
+genuinely pre-tab-feature persisted data that today's
+`PaneTilingModel.swift` can no longer produce, by construction).
+
+`tiling`'s ported-1:1 behavior unit tests (all 22 of
+`Tests/AppUnitTests/PaneTilingTests.swift`) live inside `src/tiling.rs`
+itself (`#[cfg(test)] mod tests`), same convention as wave 1/2's parser
+modules — only the JSON golden coverage gets its own top-level
+`tests/tiling_golden.rs`, per the module's `Formatter`-heavy
+compatibility contract needing more elaborate fixtures/assertions than fit
+comfortably inline.
+
+Design translations from the Swift source's `@MainActor @Observable`
+reference-type tree (`TileNode`/`PaneItem`/`PaneTilingModel` are classes
+mutated in place through live object references) to Rust's owned-tree
+struct model, plus the deliberate simplification of
+`recordAgentSession`'s `UUID`-from-`String` parsing, are documented in
+`src/tiling.rs`'s module doc comment.
+
 ## Porting principle: faithful port, not a rewrite
 
 The Swift implementation is the executable spec. Every observable behavior —
@@ -136,7 +196,7 @@ Wave 2 edge cases:
 rust/
   Cargo.toml                        # workspace, resolver = "2"
   crates/labolabo-core/
-    Cargo.toml                      # serde_json is a runtime dep (wave 2); serde is dev-only
+    Cargo.toml                      # serde_json is a runtime dep (wave 2); serde's derive feature too (wave 3)
     src/
       lib.rs
       git_models.rs                 # wave 1: port of GitModels.swift + unit tests ported from Swift XCTest
@@ -149,11 +209,14 @@ rust/
       agent_event_parser.rs         # wave 2: port of AgentEventParser.swift + unit tests + golden coverage
       cross_session_conflicts.rs    # wave 2: port of CrossSessionConflicts.swift + unit tests
       release_version.rs            # wave 2: port of ReleaseVersion.swift + unit tests
+      tiling.rs                     # wave 3: port of app/Sources/PaneTilingModel.swift + unit tests
       util.rs                       # small string helpers shared by the parsers
     tests/
-      golden.rs                     # golden-oracle test (see below)
+      golden.rs                     # golden-oracle test (see below; wave 1/2 modules only)
+      tiling_golden.rs               # wave 3: tiling's own golden test (separate oracle mechanism, see below)
     fixtures/
-      generate.swift                # the Swift-side "oracle" generator (see below)
+      generate.swift                # the Swift-side "oracle" generator (see below; wave 1/2 modules only)
+      tiling/*.json                 # wave 3: real JSONEncoder output for TileLayout (separate oracle, see below)
       inputs/
         porcelain/*.txt, *.raw      # git status --porcelain=v2 -z inputs
         diff/*.diff                 # git diff inputs
@@ -324,6 +387,10 @@ commands on both `ubuntu-latest` and `macos-15`.
   ported — a future wave that ports `GitRunner`/`GitEngine` would need to
   add a thin `git log` invocation wrapper around `commit_graph::build`.
 - Golden coverage exists for `porcelain`, `unified_diff`, `worktree`,
-  `transcript_usage`, and `agent_event_parser`. `commit_graph`,
+  `transcript_usage`, `agent_event_parser`, and `tiling` (the last via its
+  own `tests/tiling_golden.rs`, not `tests/golden.rs`). `commit_graph`,
   `cross_session_conflicts`, and `release_version` are covered by ported
   unit tests only (no golden fixtures), by design — see "Wave 2" above.
+- `tiling::PaneTilingActions` is a trait with no production implementation
+  yet (no Rust UI layer exists to implement it against) — only a
+  test-only mock (`tiling::tests::MockCoordinator`).

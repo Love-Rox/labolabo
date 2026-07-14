@@ -1,0 +1,1 @@
+{"children":[{"paneTitle":"端末","paneKind":"terminal"},{"children":[{"paneKind":"commits","paneTitle":"履歴"},{"ratio":0.3333333333333333,"children":[{"paneKind":"files","paneTitle":"変更ファイル"},{"paneKind":"diff","paneTitle":"Diff"}],"orientation":"horizontal"}],"ratio":0.25,"orientation":"horizontal"}],"orientation":"vertical","ratio":0.55}
