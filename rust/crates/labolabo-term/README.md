@@ -59,6 +59,14 @@ running the **same** integration tests as ghostty (`tests/backend_common.rs`).
 - **`env` injection is first-class** in `spawn_with_command(cols, rows,
   command, env)` — the mechanism LaboLabo's hooks protocol uses to tag a pane
   (`LABOLABO_PANE`, `LABOLABO_TASK`, …) for the spawned agent.
+- **Explicit teardown via `shutdown()`** (added for the gpui shell's
+  close-tab action): signals the child through `portable-pty`'s
+  `ChildKiller` (SIGHUP on Unix — what a real terminal sends on window
+  close). There is no separate teardown state machine: the dying child
+  closes the PTY slave, the reader sees EOF, and the session ends through
+  the same final-snapshot + `TermEvent::Exit` path as a natural exit.
+  Idempotent; see the method docs for the (inherited) stale-pid caveat and
+  the fact that only the direct child is signalled, not its descendants.
 
 ### PTY unification (design decision)
 
