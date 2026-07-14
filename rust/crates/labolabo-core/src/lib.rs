@@ -93,3 +93,29 @@ pub use tiling::{
 pub use transcript_usage::AgentUsage;
 pub use unified_diff::{DiffHunk, DiffLine, FileDiff, LineKind};
 pub use worktree::Worktree;
+
+// Wave 4a (process execution + git execution). Appended at the end of this
+// file rather than interleaved with the wave 1-3 declarations above to
+// minimize merge conflicts with parallel in-flight ports touching the same
+// file (w4b/w4c); see `rust/README.md` for the wave breakdown.
+//
+// - `process`: port of the *observable contract* of
+//   `Sources/LaboLaboEngine/Process/ProcessRunner.swift` (executable + args +
+//   cwd + env -> `{status, stdout, stderr}`), collapsed into one synchronous
+//   `std::process::Command`-based implementation (no async runtime
+//   dependency -- see the module doc comment for why).
+// - `tool_locator`: port of
+//   `Sources/LaboLaboEngine/Process/{ToolLocating,ToolLocator}.swift`.
+// - `git_runner`: port of `Sources/LaboLaboEngine/Git/GitRunner.swift`.
+// - `git_engine`: port of `Sources/LaboLaboEngine/Git/GitEngine.swift`,
+//   wiring the wave 1/2 parsers (`porcelain`/`unified_diff`/`commit_graph`/
+//   `worktree`) to real `git` invocations via `git_runner`.
+pub mod git_engine;
+pub mod git_runner;
+pub mod process;
+pub mod tool_locator;
+
+pub use git_engine::{GitEngine, NumstatEntry, RepoInfo};
+pub use git_runner::{GitCommandError, GitRunError};
+pub use process::Output as ProcessOutput;
+pub use tool_locator::{ToolLocating, ToolLocator};
