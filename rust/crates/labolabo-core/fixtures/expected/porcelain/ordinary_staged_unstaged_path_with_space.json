@@ -1,0 +1,1 @@
+{"ahead":0,"behind":0,"branch":"main","conflicted":[],"entries":[{"index":".","kind":"ordinary","path":"src/foo.swift","worktree":"M"},{"index":"M","kind":"ordinary","path":"src/bar baz.swift","worktree":"."}],"isDetached":false,"isDirty":true,"staged":["src/bar baz.swift"],"unstaged":["src/foo.swift"],"untracked":[]}

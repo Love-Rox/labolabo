@@ -1,0 +1,1 @@
+{"ahead":0,"behind":0,"branch":"main","conflicted":["shared.txt"],"entries":[{"index":"U","kind":"unmerged","path":"shared.txt","worktree":"U"}],"headSha":"1cdcb8fc87a6ad5025e5270267162795ae3d691c","isDetached":false,"isDirty":true,"staged":[],"unstaged":["shared.txt"],"untracked":[]}

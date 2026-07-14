@@ -3,6 +3,9 @@
 .swiftpm/
 Package.resolved
 
+# Cargo (rust/ workspace)
+rust/target/
+
 # Xcode
 *.xcodeproj/xcuserdata/
 *.xcworkspace/xcuserdata/

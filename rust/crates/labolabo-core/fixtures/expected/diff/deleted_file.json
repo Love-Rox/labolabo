@@ -1,0 +1,1 @@
+[{"additions":0,"deletions":2,"displayPath":"gone.txt","hunks":[{"header":"@@ -1,2 +0,0 @@","lines":[{"kind":"deletion","oldLineNumber":1,"text":"bye"},{"kind":"deletion","oldLineNumber":2,"text":"cruel world"}],"newCount":0,"newStart":0,"oldCount":2,"oldStart":1}],"isBinary":false,"isDeleted":true,"isNew":false,"isRename":false,"oldPath":"gone.txt"}]
