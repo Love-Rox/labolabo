@@ -20,3 +20,11 @@ description = "Pure-logic core (git porcelain v2 / unified diff parsers, commit 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# Wave 4b: `hooks::UnixSocketEventTransport::stop()` needs `shutdown(2)` on a
+# raw fd (to unblock the accept-loop thread's blocking `accept()` call from
+# another thread) -- std's `UnixListener` exposes no such method. Unix-only
+# target dependency since the AF_UNIX transport itself is `#[cfg(unix)]`
+# (Windows gets its own transport in a future wave, see `hooks.rs`).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
