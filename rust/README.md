@@ -111,6 +111,66 @@ struct model, plus the deliberate simplification of
 `recordAgentSession`'s `UUID`-from-`String` parsing, are documented in
 `src/tiling.rs`'s module doc comment.
 
+## Wave 4b (hooks bus + forwarder)
+
+| Swift source | Rust module |
+|---|---|
+| `Sources/LaboLaboEngine/Agent/AgentStatusBus.swift` (`AgentEventTransport`, `UnixSocketEventTransport`, `AgentStatusBus`) | `src/hooks.rs` |
+| `app/Sources/HookForwarder.swift` | `src/hooks.rs` (`forward_hook`) + `src/bin/labolabo-hook.rs` |
+
+Cross-checked directly against `docs/hooks-protocol.md` (the canonical wire
+spec, checked in at the repo root) and both Swift sources above — no
+divergence found, same as wave 2's `agent_event_parser`.
+
+Unlike every prior wave, this one ports **process/socket infrastructure**,
+not pure logic — it was explicitly out of scope through waves 1-3 (see
+`agent_event_parser.rs`'s module doc comment). The port is faithful to
+observable behavior (1 connection = 1 event framing, bind/chmod/unlink
+sequencing, the `LABOLABO_PANE` -> `labolabo_pane_id` annotation rule) while
+taking small, deliberately-documented liberties with non-load-bearing
+implementation details (e.g. avoiding the double `close(2)` the Swift
+`stop()`/`runServer()` pair does on the listening fd) — see `src/hooks.rs`'s
+module doc comment and the `UnixSocketEventTransport` struct doc comment for
+the specifics.
+
+`AgentStatusBus` here does **not** hop to a main-thread dispatch queue the
+way the Swift version does (`DispatchQueue.main.async`) — that's a UI-layer
+concern with no analog in this OS/UI-independent core yet; the registered
+`on_event` callback runs directly on whatever thread the transport's
+`on_message` fires on, and marshaling to a UI thread (if one exists) is left
+to the caller, documented explicitly on `AgentStatusBus::start`.
+
+The AF_UNIX transport (`UnixSocketEventTransport`) and the forwarder
+(`forward_hook`, `src/bin/labolabo-hook.rs`) are `#[cfg(unix)]` — a Windows
+transport (Named Pipe, per docs/hooks-protocol.md §4) is future work with no
+stub yet, just a comment. This introduces the crate's first genuinely
+platform-specific code and its first target-specific dependency: `libc`
+(unix-only, `[target.'cfg(unix)'.dependencies]`), needed for `shutdown(2)`
+on a raw fd to unblock a blocked `accept()` call from another thread when
+`stop()` is called — `std::os::unix::net::UnixListener` exposes no such
+method.
+
+Tests:
+
+- `src/hooks.rs`'s `#[cfg(test)] mod tests`: `annotate_pane`'s three
+  scenarios (LABOLABO_PANE present/absent, non-JSON stdin) as pure unit
+  tests, plus a from-scratch "transport injection contract" test (a
+  hand-rolled mock `AgentEventTransport`, no real socket) proving
+  `AgentStatusBus::with_transport` correctly wires `onMessage` through
+  `agent_event_parser::parse` to `on_event` and calls `start`/`stop`
+  exactly once each — not ported from Swift (the Swift suite always uses
+  the real `UnixSocketEventTransport`), added because the DI seam is a
+  genuine design point of this port.
+- `src/hooks.rs`'s `#[cfg(all(test, unix))] mod unix_bus_tests`: the real
+  AF_UNIX round-trip, ported 1:1 from all 6 tests in
+  `Tests/LaboLaboEngineTests/AgentStatusBusTests.swift` (a real POSIX
+  client connects and sends one payload per connection; `on_event`
+  fires/doesn't fire with the right `AgentStatusEvent`).
+- `tests/labolabo_hook_bin.rs`: one end-to-end test that spawns the actual
+  compiled `labolabo-hook` binary (via Cargo's `CARGO_BIN_EXE_labolabo-hook`)
+  with `LABOLABO_PANE` set and JSON piped to stdin, and asserts a real
+  `UnixListener` receives the pane-id-annotated payload.
+
 ## Porting principle: faithful port, not a rewrite
 
 The Swift implementation is the executable spec. Every observable behavior —
@@ -196,7 +256,7 @@ Wave 2 edge cases:
 rust/
   Cargo.toml                        # workspace, resolver = "2"
   crates/labolabo-core/
-    Cargo.toml                      # serde_json is a runtime dep (wave 2); serde's derive feature too (wave 3)
+    Cargo.toml                      # serde_json is a runtime dep (wave 2); serde's derive feature too (wave 3); libc (unix-only) too (wave 4b)
     src/
       lib.rs
       git_models.rs                 # wave 1: port of GitModels.swift + unit tests ported from Swift XCTest
@@ -211,9 +271,13 @@ rust/
       release_version.rs            # wave 2: port of ReleaseVersion.swift + unit tests
       tiling.rs                     # wave 3: port of app/Sources/PaneTilingModel.swift + unit tests
       util.rs                       # small string helpers shared by the parsers
+      hooks.rs                      # wave 4b: port of AgentStatusBus.swift + HookForwarder.swift + unit tests
+      bin/
+        labolabo-hook.rs             # wave 4b: thin `labolabo-hook <socket>` forwarder binary
     tests/
       golden.rs                     # golden-oracle test (see below; wave 1/2 modules only)
       tiling_golden.rs               # wave 3: tiling's own golden test (separate oracle mechanism, see below)
+      labolabo_hook_bin.rs           # wave 4b: end-to-end test spawning the real labolabo-hook binary
     fixtures/
       generate.swift                # the Swift-side "oracle" generator (see below; wave 1/2 modules only)
       tiling/*.json                 # wave 3: real JSONEncoder output for TileLayout (separate oracle, see below)
@@ -380,8 +444,13 @@ commands on both `ubuntu-latest` and `macos-15`.
 ## Known scope limits / what's next
 
 - `GitRunner`/`GitEngine` (process execution + orchestration), `FileWatcher`,
-  the `AgentStatusBus`/`AgentEventTransport` socket-transport layer, and
-  persistence (`LaboLaboStore`) remain unported and out of scope.
+  and persistence (`LaboLaboStore`) remain unported and out of scope. The
+  `AgentStatusBus`/`AgentEventTransport` socket-transport layer was ported in
+  wave 4b (see above) -- the settings.local.json hooks-injection app-layer
+  logic (`app/Sources/AgentSessionModel.swift`) that creates
+  `/tmp/labolabo` and merges/restores the worktree's `.claude/settings.local.json`
+  is still unported (app-layer, not engine-layer, same split as the Swift
+  source).
 - `commit_graph::build`'s only consumer in Swift,
   `GitEngine.commitGraph(worktree:limit:)`, is process execution and is not
   ported — a future wave that ports `GitRunner`/`GitEngine` would need to
