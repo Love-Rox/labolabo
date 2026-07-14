@@ -113,6 +113,10 @@ jobs:
         run: cargo build -p labolabo-app
       - name: cargo clippy -p labolabo-app
         run: cargo clippy -p labolabo-app --all-targets -- -D warnings
+      # ユニットテストは grid/keys の純関数のみ（ウィンドウ生成なし）なので
+      # ヘッドレスな CI ランナーでもそのまま走る。
+      - name: cargo test -p labolabo-app
+        run: cargo test -p labolabo-app
 
   # labolabo-term の ghostty-vt バックエンド（本命の VT コア＝実 libghostty-vt）を、
   # 実際に Zig 0.16 でベンダビルドしてテストするジョブ。既定バックエンド（alacritty,
