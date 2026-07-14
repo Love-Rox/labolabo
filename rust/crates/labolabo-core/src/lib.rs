@@ -70,6 +70,20 @@
 //! were generated / how to regenerate them). `tiling` has its own golden
 //! test (`tests/tiling_golden.rs`) plus ported-1:1 unit tests in the module
 //! itself — see its doc comment.
+//!
+//! ## Wave 4b (hooks bus + forwarder)
+//!
+//! - `hooks`: the `AgentEventTransport` trait, its AF_UNIX implementation
+//!   (`UnixSocketEventTransport`, `#[cfg(unix)]`), the `AgentStatusBus` that
+//!   composes a transport with `agent_event_parser`, and the
+//!   `forward_hook`/`labolabo-hook` forwarder logic -- ported from
+//!   `Sources/LaboLaboEngine/Agent/AgentStatusBus.swift` and
+//!   `app/Sources/HookForwarder.swift`. `docs/hooks-protocol.md` (repo root)
+//!   is the canonical wire-protocol spec this was cross-checked against
+//!   directly; no divergence found. See the module doc comment for the
+//!   deliberate (non-observable-behavior) differences from the Swift socket
+//!   plumbing, and `src/bin/labolabo-hook.rs` for the thin binary that calls
+//!   `forward_hook`.
 
 pub mod agent_event_parser;
 pub mod agent_status;
@@ -83,6 +97,10 @@ pub mod transcript_usage;
 pub mod unified_diff;
 mod util;
 pub mod worktree;
+// Appended at the tail (rather than sorted alphabetically into the list
+// above) to minimize merge conflicts with other in-flight porting-wave
+// branches editing this same file.
+pub mod hooks;
 
 pub use agent_status::{AgentStatus, AgentStatusEvent};
 pub use git_models::{Change, GitFileEntry, GitStatus, Kind};
@@ -119,3 +137,9 @@ pub use git_engine::{GitEngine, NumstatEntry, RepoInfo};
 pub use git_runner::{GitCommandError, GitRunError};
 pub use process::Output as ProcessOutput;
 pub use tool_locator::{ToolLocating, ToolLocator};
+
+// Wave 4b (hooks bus + forwarder). Appended at the tail, same reasoning as
+// the wave 4a block above.
+#[cfg(unix)]
+pub use hooks::{forward_hook, UnixSocketEventTransport};
+pub use hooks::{AgentEventTransport, AgentStatusBus, OnEvent, OnMessage};
