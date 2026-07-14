@@ -1,4 +1,5 @@
 import Foundation
+#if canImport(CoreServices)
 import CoreServices
 
 /// Recursively watches a directory via FSEvents and invokes `onChange` (on a
@@ -79,3 +80,4 @@ public final class FileWatcher {
         stop()
     }
 }
+#endif

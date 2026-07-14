@@ -140,14 +140,18 @@ final class AgentStatusBusTests: XCTestCase {
         let addrSize = socklen_t(MemoryLayout<sockaddr_un>.size)
 
         for _ in 0 ..< maxAttempts {
+            #if canImport(Darwin)
             let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+            #else
+            let fd = socket(AF_UNIX, Int32(SOCK_STREAM.rawValue), 0)
+            #endif
             guard fd >= 0 else { return false }
             let rc = withUnsafePointer(to: &addr) { p -> Int32 in
                 p.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, addrSize) }
             }
             if rc == 0 {
                 let ok = writeAll(fd: fd, bytes: Array(payload.utf8))
-                shutdown(fd, SHUT_WR)
+                shutdown(fd, Int32(SHUT_WR))
                 close(fd)
                 return ok
             }
