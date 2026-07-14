@@ -1,6 +1,22 @@
 import XCTest
 @testable import LaboLaboEngine
 
+/// `git` を偽の実行ファイルへすり替えるロケータ。GitRunner がロケータ解決パスを
+/// 実際に使っていること（ハードコードされた `/usr/bin/env git` に戻っていないこと）
+/// を確認するためのテスト用フェイク。
+private enum FakeGitLocator: ToolLocating {
+    static func locate(_ name: String) -> URL? {
+        guard name == "git" else { return nil }
+        return URL(fileURLWithPath: "/bin/echo")
+    }
+}
+
+/// 何を渡しても解決に失敗するロケータ。「PATH に無い」場合のフォールバック
+/// （`/usr/bin/env git`）が維持されていることを確認する。
+private enum NeverResolvingLocator: ToolLocating {
+    static func locate(_ name: String) -> URL? { nil }
+}
+
 final class GitRunnerTests: XCTestCase {
 
     private var dir: URL!
@@ -17,6 +33,21 @@ final class GitRunnerTests: XCTestCase {
 
     func testRunReturnsStdout() async throws {
         let out = try await GitRunner.run(["--version"], in: dir)
+        XCTAssertTrue(out.hasPrefix("git version"))
+    }
+
+    /// ロケータが解決した絶対パスを実際に起動していることを確認する。
+    /// `git` を `/bin/echo` にすり替えると、渡した引数がそのまま echo される
+    /// （`/usr/bin/env git` へフォールバックしていれば git のエラーになるはず）。
+    func testRunUsesLocatorResolvedExecutable() async throws {
+        let out = try await GitRunner.run(["hello-seam"], in: dir, locator: FakeGitLocator.self)
+        XCTAssertEqual(out, "hello-seam\n")
+    }
+
+    /// ロケータが解決できない場合は、これまで通り `/usr/bin/env git` にフォールバック
+    /// し、通常の git 呼び出しと同じ挙動を保つ。
+    func testRunFallsBackToEnvGitWhenLocatorFails() async throws {
+        let out = try await GitRunner.run(["--version"], in: dir, locator: NeverResolvingLocator.self)
         XCTAssertTrue(out.hasPrefix("git version"))
     }
 
