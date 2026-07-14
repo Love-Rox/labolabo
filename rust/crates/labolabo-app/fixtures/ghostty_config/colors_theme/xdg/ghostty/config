@@ -1,0 +1,6 @@
+theme = mytheme
+
+# Only foreground and palette index 1 are overridden here -- background and
+# cursor-color should come from the theme untouched.
+foreground = #cccccc
+palette = 1=#00ff00

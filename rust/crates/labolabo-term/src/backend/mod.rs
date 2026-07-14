@@ -13,6 +13,7 @@
 //! Only one backend is selected at a time (see `crate::ActiveBackend`), so
 //! this is compile-time monomorphization, not runtime dispatch.
 
+use crate::color::ColorScheme;
 use crate::session::SharedWriter;
 use crate::snapshot::GridSnapshot;
 
@@ -38,7 +39,18 @@ pub trait VtBackend: 'static {
     /// replies that full-screen programs (vim, tmux, htop) block on at
     /// startup. Both backends wire this up at construction: alacritty via its
     /// `EventListener::PtyWrite`, ghostty via `Terminal::on_pty_write`.
-    fn new(cols: u16, rows: u16, pty_writer: SharedWriter) -> anyhow::Result<Self>
+    ///
+    /// `colors` seeds the VT core's default fg/bg/cursor/palette from the
+    /// caller's configured [`ColorScheme`] (e.g. the user's own Ghostty
+    /// config, as read by `labolabo-app`). Fields left unset in `colors`
+    /// keep the backend's own built-in default -- a `ColorScheme::default()`
+    /// session renders identically to before this parameter existed.
+    fn new(
+        cols: u16,
+        rows: u16,
+        pty_writer: SharedWriter,
+        colors: &ColorScheme,
+    ) -> anyhow::Result<Self>
     where
         Self: Sized;
 

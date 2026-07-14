@@ -130,7 +130,14 @@ impl RenderSpec {
 }
 
 fn to_hsla(color: Rgb) -> Hsla {
-    gpui::rgb(((color.r as u32) << 16) | ((color.g as u32) << 8) | (color.b as u32)).into()
+    to_hsla_with_alpha(color, 1.0)
+}
+
+fn to_hsla_with_alpha(color: Rgb, alpha: f32) -> Hsla {
+    let mut hsla: Hsla =
+        gpui::rgb(((color.r as u32) << 16) | ((color.g as u32) << 8) | (color.b as u32)).into();
+    hsla.a = alpha;
+    hsla
 }
 
 /// Paint `snapshot`'s grid within `bounds`: the base background first, then
@@ -196,9 +203,13 @@ pub fn paint_grid(
     paint_cursor(&snapshot.cursor, spec, bounds, window);
 }
 
-/// A translucent block-cursor overlay. TODO(W5a): no caret-style selection
-/// (block vs. bar vs. underline) or blink -- future work once a real
-/// UI/config layer exists to drive it.
+/// A translucent block-cursor overlay, tinted by the session's configured
+/// cursor color (`ColorScheme::cursor` -- see `CursorSnapshot::color`'s doc
+/// comment) when one is set, at the same alpha as the original hardcoded
+/// white so an unconfigured cursor renders exactly as it did before color
+/// configuration existed. TODO(W5a): no caret-style selection (block vs.
+/// bar vs. underline) or blink -- future work once a real UI/config layer
+/// exists to drive it.
 fn paint_cursor(
     cursor: &CursorSnapshot,
     spec: &RenderSpec,
@@ -210,8 +221,13 @@ fn paint_cursor(
     }
     let x = bounds.origin.x + px(cursor.col as f32 * spec.cell_width);
     let y = bounds.origin.y + px(cursor.row as f32 * spec.cell_height);
+    const CURSOR_ALPHA: f32 = 0.35;
+    let color = cursor
+        .color
+        .map(|c| to_hsla_with_alpha(c, CURSOR_ALPHA))
+        .unwrap_or_else(|| gpui::hsla(0.0, 0.0, 1.0, CURSOR_ALPHA));
     window.paint_quad(fill(
         Bounds::new(point(x, y), size(px(spec.cell_width), px(spec.cell_height))),
-        gpui::hsla(0.0, 0.0, 1.0, 0.35),
+        color,
     ));
 }

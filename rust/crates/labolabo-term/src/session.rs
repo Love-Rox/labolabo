@@ -33,6 +33,7 @@ use std::time::{Duration, Instant};
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 
 use crate::backend::VtBackend;
+use crate::color::ColorScheme;
 use crate::snapshot::GridSnapshot;
 
 /// Shared, mutex-guarded PTY writer. Both the caller's [`TermSession::
@@ -105,11 +106,32 @@ impl<B: VtBackend> TermSession<B> {
     ///   of* `TERM=xterm-256color`. First-class because LaboLabo's hooks
     ///   protocol identifies a pane/task by env (`LABOLABO_PANE`,
     ///   `LABOLABO_TASK`, ...) handed to the spawned agent.
+    ///
+    /// Equivalent to [`Self::spawn_with_options`] with
+    /// `ColorScheme::default()` (every backend's own built-in colors,
+    /// unchanged) -- kept as a separate, narrower entry point so existing
+    /// call sites that don't care about color configuration aren't forced to
+    /// thread a `ColorScheme` through.
     pub fn spawn_with_command(
         cols: u16,
         rows: u16,
         command: Option<&str>,
         env: &[(String, String)],
+    ) -> anyhow::Result<Self> {
+        Self::spawn_with_options(cols, rows, command, env, &ColorScheme::default())
+    }
+
+    /// Like [`Self::spawn_with_command`], with an additional [`ColorScheme`]
+    /// seeding the VT core's default foreground/background/cursor/palette
+    /// colors (see [`crate::backend::VtBackend::new`]). Pass
+    /// `&ColorScheme::default()` for the same behavior as
+    /// `spawn_with_command`.
+    pub fn spawn_with_options(
+        cols: u16,
+        rows: u16,
+        command: Option<&str>,
+        env: &[(String, String)],
+        colors: &ColorScheme,
     ) -> anyhow::Result<Self> {
         let mut cmd = match command {
             Some(c) => {
@@ -183,8 +205,11 @@ impl<B: VtBackend> TermSession<B> {
         {
             let writer = writer.clone();
             let latest = latest.clone();
+            let colors = colors.clone();
             thread::spawn(move || {
-                run_worker::<B>(cols, rows, writer, latest, worker_rx, event_tx, child);
+                run_worker::<B>(
+                    cols, rows, writer, latest, worker_rx, event_tx, child, colors,
+                );
             });
         }
 
@@ -315,6 +340,7 @@ fn publish_snapshot<B: VtBackend>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_worker<B: VtBackend>(
     cols: u16,
     rows: u16,
@@ -323,8 +349,9 @@ fn run_worker<B: VtBackend>(
     rx: Receiver<WorkerMsg>,
     event_tx: Sender<TermEvent>,
     mut child: Box<dyn portable_pty::Child + Send + Sync>,
+    colors: ColorScheme,
 ) {
-    let mut backend = match B::new(cols, rows, writer) {
+    let mut backend = match B::new(cols, rows, writer, &colors) {
         Ok(b) => b,
         Err(_) => return,
     };

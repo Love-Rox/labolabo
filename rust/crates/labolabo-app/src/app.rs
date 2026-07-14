@@ -40,7 +40,7 @@ use gpui::{
     Render, SharedString, Task, Timer, Window,
 };
 
-use labolabo_term::{TermEvent, Terminal};
+use labolabo_term::{ColorScheme, TermEvent, Terminal};
 
 use crate::ghostty_config::FontConfig;
 use crate::grid::{grid_size_for_window, TAB_BAR_HEIGHT};
@@ -89,10 +89,19 @@ pub struct TerminalApp {
     focus_handle: FocusHandle,
     next_id: u64,
     spec: RenderSpec,
+    /// The user's Ghostty color configuration, applied to every tab's
+    /// `TermSession` at spawn time (see `open_tab`) -- stored so a later
+    /// tab (opened via "+", not just the initial one) gets it too.
+    colors: ColorScheme,
 }
 
 impl TerminalApp {
-    pub fn new(font_config: &FontConfig, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        font_config: &FontConfig,
+        color_config: &ColorScheme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let spec = RenderSpec::resolve(
             &font_config.families,
             font_config
@@ -110,6 +119,7 @@ impl TerminalApp {
             focus_handle,
             next_id: 0,
             spec,
+            colors: color_config.clone(),
         };
         this.open_tab(window, cx);
 
@@ -142,7 +152,7 @@ impl TerminalApp {
         let id = self.next_id;
         self.next_id += 1;
 
-        let session = match Terminal::spawn(cols, rows) {
+        let session = match Terminal::spawn_with_options(cols, rows, None, &[], &self.colors) {
             Ok(session) => Arc::new(session),
             Err(err) => {
                 // TODO(W5a): surface spawn failures in the UI (e.g. a

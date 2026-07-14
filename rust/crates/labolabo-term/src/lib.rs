@@ -35,9 +35,11 @@
 //! threading model and `backend/mod.rs` for the split.
 
 pub mod backend;
+pub mod color;
 pub mod session;
 pub mod snapshot;
 
+pub use color::ColorScheme;
 pub use session::{SharedWriter, TermEvent, TermSession};
 pub use snapshot::{CellSnapshot, CursorSnapshot, GridSnapshot, Rgb};
 

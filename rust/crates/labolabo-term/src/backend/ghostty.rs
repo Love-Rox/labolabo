@@ -29,6 +29,7 @@ use libghostty_vt::style::{RgbColor, Underline};
 use libghostty_vt::{Terminal, TerminalOptions};
 
 use crate::backend::VtBackend;
+use crate::color::ColorScheme;
 use crate::session::SharedWriter;
 use crate::snapshot::{CellSnapshot, CursorSnapshot, GridSnapshot, Rgb};
 
@@ -46,7 +47,12 @@ pub struct GhosttyBackend {
 }
 
 impl VtBackend for GhosttyBackend {
-    fn new(cols: u16, rows: u16, pty_writer: SharedWriter) -> anyhow::Result<Self> {
+    fn new(
+        cols: u16,
+        rows: u16,
+        pty_writer: SharedWriter,
+        colors: &ColorScheme,
+    ) -> anyhow::Result<Self> {
         let mut terminal = Terminal::new(TerminalOptions {
             cols,
             rows,
@@ -63,6 +69,71 @@ impl VtBackend for GhosttyBackend {
                 }
             })
             .map_err(|e| anyhow!("libghostty-vt on_pty_write failed: {e:?}"))?;
+
+        // Seed the VT core's default colors from `colors`.
+        //
+        // Foreground and background are always set *together*, never as
+        // `None` -- libghostty-vt's own `RenderState.update` (`terminal/
+        // render.zig`) only resolves the effective bg/fg pair when *both*
+        // are set at the Terminal level:
+        //
+        //     bg_fg: {
+        //         // Background/foreground can be unset initially which
+        //         // would depend on "default" background/foreground. The
+        //         // expected use case of Terminal is that the caller set
+        //         // their own configured defaults on load so this doesn't
+        //         // happen.
+        //         const bg = t.colors.background.get() orelse break :bg_fg;
+        //         const fg = t.colors.foreground.get() orelse break :bg_fg;
+        //         ...
+        //     }
+        //
+        // Leaving either one `None` makes that block bail *before updating
+        // either color*, so a `ColorScheme` that only configures one of the
+        // two would otherwise silently apply neither (caught by this crate's
+        // own `backend_common` integration tests). We satisfy the "caller
+        // sets both" contract by always passing concrete values, falling
+        // back to this crate's own default constants -- the same ones the
+        // alacritty backend falls back to -- for whichever side is
+        // unconfigured, so both backends resolve to an identical default
+        // fg/bg regardless of what `colors` does or doesn't set.
+        terminal
+            .set_default_fg_color(Some(to_rgb_color(
+                colors.foreground.unwrap_or(Rgb::DEFAULT_FG),
+            )))
+            .map_err(|e| anyhow!("libghostty-vt set_default_fg_color failed: {e:?}"))?;
+        terminal
+            .set_default_bg_color(Some(to_rgb_color(colors.background.unwrap_or(Rgb::BLACK))))
+            .map_err(|e| anyhow!("libghostty-vt set_default_bg_color failed: {e:?}"))?;
+        // Cursor color has no such pairing requirement (`RenderState.update`
+        // reads it unconditionally: `self.colors.cursor = t.colors.cursor.
+        // get();`), so `None` is passed straight through and simply leaves
+        // it unset, matching libghostty-vt's own documented behavior
+        // ("Passing None clears the default, leaving the color unset").
+        terminal
+            .set_default_cursor_color(colors.cursor.map(to_rgb_color))
+            .map_err(|e| anyhow!("libghostty-vt set_default_cursor_color failed: {e:?}"))?;
+        if !colors.palette.is_empty() {
+            // Start from libghostty-vt's own built-in default (its doc
+            // comment recommends exactly this pattern) so unconfigured
+            // indices keep their real Ghostty-default color rather than
+            // this crate's own approximation of it.
+            let base = terminal
+                .default_color_palette()
+                .map_err(|e| anyhow!("libghostty-vt default_color_palette failed: {e:?}"))?;
+            let mut base_rgb = [Rgb::BLACK; 256];
+            for (slot, color) in base_rgb.iter_mut().zip(base.iter()) {
+                *slot = rgb(*color);
+            }
+            let resolved = colors.apply_palette(base_rgb);
+            let mut resolved_ffi = [RgbColor::default(); 256];
+            for (slot, color) in resolved_ffi.iter_mut().zip(resolved.iter()) {
+                *slot = to_rgb_color(*color);
+            }
+            terminal
+                .set_default_color_palette(Some(resolved_ffi))
+                .map_err(|e| anyhow!("libghostty-vt set_default_color_palette failed: {e:?}"))?;
+        }
 
         let render_state =
             RenderState::new().map_err(|e| anyhow!("RenderState::new failed: {e:?}"))?;
@@ -103,7 +174,17 @@ impl VtBackend for GhosttyBackend {
                 Ok(Some(cv)) => (cv.x, cv.y),
                 _ => (0, 0),
             };
-            CursorSnapshot { col, row, visible }
+            // The *effective* cursor color -- our configured default, or a
+            // live OSC-12 override if the running program set one -- unlike
+            // the alacritty backend, which has no OSC-12 tracking and so
+            // always reports the configured default verbatim.
+            let color = snapshot.cursor_color().ok().flatten().map(rgb);
+            CursorSnapshot {
+                col,
+                row,
+                visible,
+                color,
+            }
         };
 
         let mut cells = Vec::with_capacity(cols as usize * rows as usize);
@@ -183,4 +264,12 @@ impl VtBackend for GhosttyBackend {
 
 fn rgb(c: RgbColor) -> Rgb {
     Rgb::new(c.r, c.g, c.b)
+}
+
+fn to_rgb_color(c: Rgb) -> RgbColor {
+    RgbColor {
+        r: c.r,
+        g: c.g,
+        b: c.b,
+    }
 }

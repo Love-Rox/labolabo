@@ -19,6 +19,7 @@ use alacritty_terminal::vte::ansi::{
 };
 
 use crate::backend::VtBackend;
+use crate::color::ColorScheme;
 use crate::session::SharedWriter;
 use crate::snapshot::{CellSnapshot, CursorSnapshot, GridSnapshot, Rgb};
 
@@ -69,10 +70,34 @@ pub struct AlacrittyBackend {
     // always exactly what we asked for.
     cols: u16,
     rows: u16,
+    // Resolved coloring: the built-in ANSI_16 + xterm cube/grayscale table
+    // with any `ColorScheme::palette` overrides already applied (see
+    // `base_palette`/`ColorScheme::apply_palette`), plus the configured
+    // default fg/bg/cursor (falling back to the previous hardcoded
+    // defaults when unset). Alacritty's `Term` has no notion of a
+    // caller-supplied default-color theme -- unlike libghostty-vt, which
+    // tracks this natively -- so this backend resolves every `AnsiColor`
+    // through these fields itself, replacing what used to be free
+    // functions over hardcoded constants.
+    palette: [Rgb; 256],
+    default_fg: Rgb,
+    default_bg: Rgb,
+    // `None` (the default) preserves the pre-ColorScheme behavior: the
+    // `NamedColor::Cursor` VT color and `CursorSnapshot::color` both fall
+    // back to `default_fg`, and no color is reported for the rendered
+    // cursor overlay either. Alacritty's `Term` doesn't track a live OSC-12
+    // cursor-color override, so unlike fg/bg this is always exactly the
+    // configured default, never a per-session override.
+    default_cursor: Option<Rgb>,
 }
 
 impl VtBackend for AlacrittyBackend {
-    fn new(cols: u16, rows: u16, pty_writer: SharedWriter) -> anyhow::Result<Self> {
+    fn new(
+        cols: u16,
+        rows: u16,
+        pty_writer: SharedWriter,
+        colors: &ColorScheme,
+    ) -> anyhow::Result<Self> {
         // `scrolling_history: 1000` mirrors the spike's M3 finding (alacritty's
         // 10_000 default measurably hurt steady-state throughput; we don't
         // render scrollback here anyway).
@@ -85,11 +110,16 @@ impl VtBackend for AlacrittyBackend {
             screen_lines: rows as usize,
         };
         let term = Term::new(config, &size, PtyResponder { writer: pty_writer });
+        let palette = colors.apply_palette(base_palette());
         Ok(Self {
             term,
             parser: Processor::new(),
             cols,
             rows,
+            palette,
+            default_fg: colors.foreground.unwrap_or(Rgb::DEFAULT_FG),
+            default_bg: colors.background.unwrap_or(Rgb::BLACK),
+            default_cursor: colors.cursor,
         })
     }
 
@@ -109,7 +139,7 @@ impl VtBackend for AlacrittyBackend {
     fn build_snapshot(&mut self) -> Option<GridSnapshot> {
         let cols = self.cols;
         let rows = self.rows;
-        let background = ansi_to_rgb(AnsiColor::Named(NamedColor::Background), false);
+        let background = self.ansi_to_rgb(AnsiColor::Named(NamedColor::Background), false);
 
         let mut cells = vec![CellSnapshot::blank(); cols as usize * rows as usize];
         let content = self.term.renderable_content();
@@ -120,6 +150,7 @@ impl VtBackend for AlacrittyBackend {
                 col: c.point.column.0 as u16,
                 row: c.point.line.0.max(0) as u16,
                 visible: !matches!(c.shape, CursorShape::Hidden),
+                color: self.default_cursor,
             }
         };
 
@@ -138,8 +169,8 @@ impl VtBackend for AlacrittyBackend {
             let idx = row * cols as usize + col;
 
             let inverse = cell.flags.contains(Flags::INVERSE);
-            let mut fg = ansi_to_rgb(cell.fg, true);
-            let mut bg = ansi_to_rgb(cell.bg, false);
+            let mut fg = self.ansi_to_rgb(cell.fg, true);
+            let mut bg = self.ansi_to_rgb(cell.bg, false);
             let mut has_bg = bg != background;
             if inverse {
                 std::mem::swap(&mut fg, &mut bg);
@@ -174,11 +205,41 @@ impl VtBackend for AlacrittyBackend {
     }
 }
 
+impl AlacrittyBackend {
+    fn ansi_to_rgb(&self, color: AnsiColor, is_foreground: bool) -> Rgb {
+        match color {
+            AnsiColor::Spec(rgb) => rgb_to_rgb(rgb),
+            AnsiColor::Indexed(index) => self.palette[index as usize],
+            AnsiColor::Named(named) => self.named_to_rgb(named, is_foreground),
+        }
+    }
+
+    fn named_to_rgb(&self, named: NamedColor, is_foreground: bool) -> Rgb {
+        match named {
+            NamedColor::Foreground | NamedColor::BrightForeground => self.default_fg,
+            NamedColor::Background => self.default_bg,
+            NamedColor::Cursor => self.default_cursor.unwrap_or(self.default_fg),
+            _ => {
+                let code = named as usize;
+                if code < 16 {
+                    self.palette[code]
+                } else if is_foreground {
+                    self.default_fg
+                } else {
+                    self.default_bg
+                }
+            }
+        }
+    }
+}
+
 // --- palette: ANSI color -> Rgb -------------------------------------------
 //
 // A plain 16-color ANSI table plus the standard xterm 6x6x6 cube and grayscale
 // ramp for 256-color mode -- ported from the spike's `palette.rs`. It doesn't
-// track any particular terminal theme, but is close enough for `ls --color`.
+// track any particular terminal theme (that's `ColorScheme::apply_palette`'s
+// job, layered on top in `AlacrittyBackend::new`), but is close enough for
+// `ls --color` on its own.
 
 const ANSI_16: [(u8, u8, u8); 16] = [
     (0x00, 0x00, 0x00),
@@ -199,55 +260,32 @@ const ANSI_16: [(u8, u8, u8); 16] = [
     (0xff, 0xff, 0xff),
 ];
 
-fn ansi_to_rgb(color: AnsiColor, is_foreground: bool) -> Rgb {
-    match color {
-        AnsiColor::Spec(rgb) => rgb_to_rgb(rgb),
-        AnsiColor::Indexed(index) => indexed_to_rgb(index),
-        AnsiColor::Named(named) => named_to_rgb(named, is_foreground),
-    }
-}
-
 fn rgb_to_rgb(rgb: AnsiRgb) -> Rgb {
     Rgb::new(rgb.r, rgb.g, rgb.b)
 }
 
-fn ansi16(index: usize) -> Rgb {
-    let (r, g, b) = ANSI_16[index];
-    Rgb::new(r, g, b)
-}
-
-fn named_to_rgb(named: NamedColor, is_foreground: bool) -> Rgb {
-    match named {
-        NamedColor::Foreground | NamedColor::BrightForeground => Rgb::DEFAULT_FG,
-        NamedColor::Background => Rgb::BLACK,
-        NamedColor::Cursor => Rgb::DEFAULT_FG,
-        _ => {
-            let code = named as usize;
-            if code < 16 {
-                ansi16(code)
-            } else if is_foreground {
-                Rgb::DEFAULT_FG
-            } else {
-                Rgb::BLACK
-            }
-        }
+/// The built-in 256-color table before any `ColorScheme::palette` overrides:
+/// `ANSI_16` for indices 0-15, then the standard xterm 6x6x6 color cube
+/// (16-231) and 24-step grayscale ramp (232-255) -- the same formula
+/// Ghostty's own built-in default palette uses
+/// (`terminal/color.zig`'s `default`), so overlaying a partial user
+/// `palette` (e.g. just the base 16) on top of this produces the same
+/// result as it would on Ghostty's own default.
+fn base_palette() -> [Rgb; 256] {
+    let mut table = [Rgb::BLACK; 256];
+    for (index, &(r, g, b)) in ANSI_16.iter().enumerate() {
+        table[index] = Rgb::new(r, g, b);
     }
-}
-
-fn indexed_to_rgb(index: u8) -> Rgb {
-    let index = index as usize;
-    if index < 16 {
-        return ansi16(index);
-    }
-    if index < 232 {
-        let cube = index - 16;
+    let scale = |v: usize| if v == 0 { 0 } else { (v * 40 + 55) as u8 };
+    for cube in 0..216usize {
         let r = cube / 36;
         let g = (cube / 6) % 6;
         let b = cube % 6;
-        let scale = |v: usize| if v == 0 { 0 } else { (v * 40 + 55) as u8 };
-        return Rgb::new(scale(r), scale(g), scale(b));
+        table[16 + cube] = Rgb::new(scale(r), scale(g), scale(b));
     }
-    let level = 8 + (index - 232) as u16 * 10;
-    let level = level.min(255) as u8;
-    Rgb::new(level, level, level)
+    for gray in 0..24usize {
+        let level = (8 + gray * 10).min(255) as u8;
+        table[232 + gray] = Rgb::new(level, level, level);
+    }
+    table
 }

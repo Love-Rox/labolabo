@@ -1,21 +1,25 @@
 //! Reads the user's Ghostty configuration -- just enough of it to style this
-//! app's terminal like the user's own Ghostty (`font-family`, `font-size`).
+//! app's terminal like the user's own Ghostty (`font-family`/`font-size`,
+//! and `background`/`foreground`/`cursor-color`/`palette`/`theme`).
 //!
 //! ## What this is (and is not)
 //!
 //! A minimal, faithful port of the slice of Ghostty's config loading that
-//! matters for font extraction, cross-checked against the actual Ghostty
-//! source (the `ghostty-zig016-src` checkout, upstream PR #12726 state):
+//! matters for font and color extraction, cross-checked against the actual
+//! Ghostty source (the `ghostty-zig016-src` checkout, upstream PR #12726
+//! state):
 //!
 //! - default file discovery: `src/config/file_load.zig` + `Config.loadDefaultFiles`
 //! - line syntax: `src/cli/args.zig` (`LineIterator`)
 //! - `config-file` includes: `Config.loadRecursiveFiles` + `src/config/path.zig`
+//! - color value syntax: `terminal/color.zig`'s `RGB.parse` (a supported
+//!   subset -- see "Color value syntax" below) and `parsePaletteEntry`
+//! - theme resolution: `src/config/theme.zig` + `Config.zig`'s `loadTheme`/
+//!   `finalize` (see "Theme resolution" below)
 //!
 //! It is **not** a general Ghostty config parser: keys other than
-//! `font-family`, `font-size`, and `config-file` are read and skipped.
-//! Colors (`background`/`foreground`/`palette`) are deliberately out of
-//! scope for this wave -- see the crate README's TODO for what supporting
-//! them needs from `labolabo-term`.
+//! `font-family`, `font-size`, `config-file`, `background`, `foreground`,
+//! `cursor-color`, `palette`, and `theme` are read and skipped.
 //!
 //! ## Canonical behavior ported (with source references)
 //!
@@ -66,17 +70,80 @@
 //! that includes itself genuinely gets loaded twice (double-appending any
 //! repeatable values) before the cycle check stops the third pass.
 //!
+//! **Color keys**: `background`/`foreground`/`cursor-color` are scalar --
+//! the last *parseable* value wins, same as `font-size` (an unparseable
+//! value is reported and the previous value, if any, is left alone;
+//! upstream: `Color.parseCLI`/`TerminalColor.parseCLI` return
+//! `error.InvalidValue`, which becomes a diagnostic, not a config change).
+//! `palette` is repeatable in the form `N=COLOR` (`N` = 0-255, decimal or
+//! `0x`/`0o`/`0b`-prefixed -- `terminal.color.parsePaletteEntry`); each
+//! occurrence sets exactly that one palette index, so setting the same
+//! index twice just overwrites it (there is no "reset the whole palette"
+//! form, unlike `font-family`'s empty-value reset).
+//!
+//! **Color value syntax** (`terminal.color.RGB.parse`, subset): `#rgb`,
+//! `#rrggbb`, and the same two forms without the leading `#` (Ghostty
+//! accepts bare hex for config/theme compatibility -- confirmed against a
+//! real user theme file, which used exactly this form). Upstream also
+//! accepts `rgb:h/hh/hhh/hhhh` device syntax, `rgbi:<float>/<float>/<float>`,
+//! the 12-/16-bit-per-channel `#rrrgggbbb`/`#rrrrggggbbbb` forms, and ~750
+//! X11 named colors (`terminal/x11_color.zig`) -- all deliberately
+//! unsupported here (reported and skipped, previous value untouched). A
+//! scan of all 463 themes bundled with a real Ghostty.app install found
+//! zero uses of any of these unsupported forms, so the supported subset
+//! covers every built-in theme and the overwhelming majority of
+//! hand-written configs.
+//!
+//! **Theme resolution** (`Config.zig`'s `loadTheme` + `finalize`, and
+//! `theme.zig`'s `Location`/`open`): `theme = NAME` loads `NAME` as a
+//! *baseline* that the user's own explicit `background`/`foreground`/
+//! `cursor-color`/`palette` settings then override on a per-field (and,
+//! for `palette`, per-index) basis -- upstream's own doc comment: "Any
+//! additional colors specified via background, foreground, palette, etc.
+//! will override the colors specified in the theme." This holds regardless
+//! of where in the user's files `theme = NAME` appears, because upstream
+//! loads the theme first and then *replays* the user's own already-parsed
+//! settings on top (`Config.loadTheme`) -- so this port applies the same
+//! "theme colors merged under -- not overwritten *by* line order to --  the
+//! user's own explicit colors" rule (see `merge_colors`) rather than
+//! treating `theme` as just another line in load order.
+//!
+//! `NAME` resolves (`theme.zig`'s `Location`/`open`) to an absolute path
+//! directly, or else is searched for (no path separators allowed) in: (1)
+//! `$XDG_CONFIG_HOME/ghostty/themes` (or `~/.config/ghostty/themes`), then
+//! (2) macOS only, best-effort: `/Applications/Ghostty.app/Contents/
+//! Resources/ghostty/themes` (a hardcoded guess at the install location --
+//! see "Known limitations" in the crate README -- rather than a real
+//! bundle/LaunchServices lookup). A theme file is just another Ghostty
+//! config file (verified against the real bundled themes, which are all
+//! plain `key = value` lines); this port reads only the same color keys it
+//! reads from the user's own files, silently ignoring `theme`/`config-file`
+//! if present, matching upstream's documented restriction that a theme file
+//! cannot set either.
+//!
+//! **Scope limitation (light/dark theme switching): out of scope.** Ghostty
+//! supports `theme = light:NAME,dark:NAME` to pick a different theme based
+//! on the desktop appearance (`Theme.parseCLI`). This port only ever uses
+//! the **light** side (`parse_theme_value` extracts it and discards `dark`)
+//! -- there is no appearance-switching logic here at all, so a config using
+//! only the light/dark form with a light-mode theme unsuited to a dark
+//! window will look wrong until this is revisited. TODO(follow-up wave):
+//! track the effective appearance and pick light vs. dark accordingly.
+//!
 //! ## Testability
 //!
-//! Everything below `load_user_font_config` is pure with respect to the
-//! environment: discovery takes `home`/`xdg_config_home` as parameters and
+//! Everything below `load_user_font_config`/`load_user_color_config` is pure
+//! with respect to the environment: discovery takes `home`/`xdg_config_home`
+//! (and, for colors, the theme resources directory) as parameters, and
 //! loading takes explicit root paths, so the unit tests run entirely on
-//! fixture trees under `fixtures/ghostty_config/` -- no test reads `$HOME`
-//! or the real user's config.
+//! fixture trees under `fixtures/ghostty_config/` -- no test reads `$HOME`,
+//! `/Applications`, or the real user's config.
 
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+use labolabo_term::{ColorScheme, Rgb};
 
 /// The font-relevant subset of a Ghostty configuration.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -192,6 +259,130 @@ fn resolve_include_path(path: &str, base_dir: &Path, home: &Path) -> PathBuf {
     }
 }
 
+/// Parse a color value: the supported subset of `terminal.color.RGB.parse`
+/// (see the module doc comment's "Color value syntax") -- `#rgb`/`#rrggbb`
+/// and the same two forms without the leading `#`. `None` means the value
+/// isn't in a supported form (or isn't valid hex); callers report this and
+/// leave any previous value untouched, mirroring how an unparseable
+/// `font-size` is handled.
+fn parse_color(value: &str) -> Option<Rgb> {
+    let input = value.trim_matches(WHITESPACE);
+    let hex = input.strip_prefix('#').unwrap_or(input);
+    match hex.len() {
+        // One hex digit per channel, scaled 4-bit -> 8-bit (`* 0xFF / 0xF`,
+        // i.e. `* 17`) -- `RGB.fromHex`'s `len == 1` case.
+        3 => {
+            let r = u8::from_str_radix(&hex[0..1], 16).ok()?;
+            let g = u8::from_str_radix(&hex[1..2], 16).ok()?;
+            let b = u8::from_str_radix(&hex[2..3], 16).ok()?;
+            Some(Rgb::new(r * 17, g * 17, b * 17))
+        }
+        // Two hex digits per channel -- the literal byte value.
+        6 => {
+            let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+            let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+            let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+            Some(Rgb::new(r, g, b))
+        }
+        _ => None,
+    }
+}
+
+/// Parse a `palette = N=COLOR` value's index per
+/// `terminal.color.parsePaletteEntry` (via Zig's base-0 `parseInt`, which
+/// Rust's `from_str_radix` doesn't auto-sniff): a bare decimal number, or
+/// one of the (lowercase) `0x`/`0o`/`0b` prefixes for hex/octal/binary.
+fn parse_palette_index(value: &str) -> Option<u8> {
+    let (radix, digits) = if let Some(d) = value.strip_prefix("0x") {
+        (16, d)
+    } else if let Some(d) = value.strip_prefix("0o") {
+        (8, d)
+    } else if let Some(d) = value.strip_prefix("0b") {
+        (2, d)
+    } else {
+        (10, value)
+    };
+    u8::from_str_radix(digits, radix).ok()
+}
+
+/// Parse a `palette = N=COLOR` value per
+/// `terminal.color.parsePaletteEntry`: split at the first `=`, then parse
+/// each side (whitespace around both is trimmed).
+fn parse_palette_entry(value: &str) -> Option<(u8, Rgb)> {
+    let (index, color) = value.split_once('=')?;
+    let index = parse_palette_index(index.trim_matches(WHITESPACE))?;
+    let color = parse_color(color.trim_matches(WHITESPACE))?;
+    Some((index, color))
+}
+
+/// Parse a `theme = ...` value into the theme name to resolve (see the
+/// module doc comment's "Scope limitation" -- only the *light* side of a
+/// `light:NAME,dark:NAME` pair is ever used). Mirrors `Theme.parseCLI`'s
+/// dispatch: no `,`/`=`/`:` at all means a bare name (used for both
+/// appearances upstream, so no special-casing is needed here); otherwise
+/// it's the light/dark form, and only the `light:` component is extracted.
+fn parse_theme_value(value: &str) -> Option<String> {
+    let trimmed = value.trim_matches(WHITESPACE);
+    if trimmed.is_empty() {
+        return None;
+    }
+    if !trimmed.contains(',') && !trimmed.contains('=') && !trimmed.contains(':') {
+        return Some(trimmed.to_string());
+    }
+    for part in trimmed.split(',') {
+        let part = part.trim_matches(WHITESPACE);
+        if let Some(name) = part.strip_prefix("light:") {
+            let name = name.trim_matches(WHITESPACE);
+            if !name.is_empty() {
+                return Some(name.to_string());
+            }
+        }
+    }
+    eprintln!(
+        "labolabo-app: ghostty theme {value:?} uses light/dark syntax without a usable \
+         \"light:\" side; ignoring (dark-mode theme selection is out of scope)"
+    );
+    None
+}
+
+/// Apply one config line to `colors` if its key is one of the four color
+/// keys (`background`/`foreground`/`cursor-color`/`palette`); a no-op for
+/// any other key. Shared between the main `Loader` (the user's own files)
+/// and `load_theme_colors` (a theme file) since both read exactly these
+/// keys the same way -- see the module doc comment's "Theme resolution".
+fn apply_color_line(colors: &mut ColorScheme, key: &str, value: Option<&str>) {
+    match key {
+        "background" => set_scalar_color(&mut colors.background, value, "background"),
+        "foreground" => set_scalar_color(&mut colors.foreground, value, "foreground"),
+        "cursor-color" => set_scalar_color(&mut colors.cursor, value, "cursor-color"),
+        "palette" => {
+            if let Some(v) = value {
+                match parse_palette_entry(v) {
+                    Some(entry) => colors.palette.push(entry),
+                    None => eprintln!(
+                        "labolabo-app: ignoring unparseable palette entry {v:?} in ghostty config"
+                    ),
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Parse-and-set one scalar color key's value, matching `font-size`'s
+/// "last valid value wins, unparseable is reported and ignored" handling
+/// (a line with no `=` is a no-op, same as any other key here).
+fn set_scalar_color(slot: &mut Option<Rgb>, value: Option<&str>, key: &str) {
+    if let Some(v) = value {
+        match parse_color(v) {
+            Some(c) => *slot = Some(c),
+            None => eprintln!(
+                "labolabo-app: ignoring unsupported color value {v:?} for {key} in ghostty config"
+            ),
+        }
+    }
+}
+
 /// Whether a *default* (root) config file would be loaded by upstream's
 /// `file_load.open`: exists, is a regular file, and is non-empty.
 fn is_loadable_root(path: &Path) -> bool {
@@ -239,13 +430,23 @@ fn read_config_text(path: &Path) -> Option<String> {
 #[derive(Default)]
 struct Loader {
     fonts: FontConfig,
+    /// The user's own explicit color settings (`background`/`foreground`/
+    /// `cursor-color`/`palette`) -- **not** merged with any theme yet; see
+    /// `extract_color_config`/`merge_colors` for that.
+    colors: ColorScheme,
+    /// The last `theme = ...` value's resolved name (scalar, last-wins --
+    /// same as `font-size`), if any. `extract_font_config` never reads this;
+    /// it's populated as a harmless byproduct of sharing one file-traversal
+    /// pass with `extract_color_config`.
+    theme: Option<String>,
     /// The `config-file` include queue, in declaration order. Grows while
     /// includes are being processed (recursive includes append here).
     includes: Vec<(PathBuf, bool)>,
 }
 
 impl Loader {
-    /// Parse one file's text: apply font keys, queue `config-file` values.
+    /// Parse one file's text: apply font/color keys, record `theme`, queue
+    /// `config-file` values.
     fn load_text(&mut self, text: &str, base_dir: &Path, home: &Path) {
         for raw in text.lines() {
             let Some(line) = parse_line(raw) else {
@@ -267,6 +468,16 @@ impl Loader {
                             _ => eprintln!(
                                 "labolabo-app: ignoring unparseable font-size {v:?} in ghostty config"
                             ),
+                        }
+                    }
+                }
+                "background" | "foreground" | "cursor-color" | "palette" => {
+                    apply_color_line(&mut self.colors, line.key, line.value)
+                }
+                "theme" => {
+                    if let Some(v) = line.value {
+                        if let Some(name) = parse_theme_value(v) {
+                            self.theme = Some(name);
                         }
                     }
                 }
@@ -299,8 +510,12 @@ impl Loader {
 
 /// Load the given root config files (in order) and then their `config-file`
 /// includes (upstream `loadDefaultFiles` + `loadRecursiveFiles` semantics
-/// -- see the module doc comment), returning the extracted font settings.
-pub fn extract_font_config(roots: &[PathBuf], home: &Path) -> FontConfig {
+/// -- see the module doc comment): the shared traversal both
+/// `extract_font_config` and `extract_color_config` build on, so file
+/// discovery/include semantics are implemented (and tested) exactly once.
+/// Returns the user's own fonts, explicit colors (not yet merged with any
+/// theme), and last-set `theme` name.
+fn extract_config(roots: &[PathBuf], home: &Path) -> (FontConfig, ColorScheme, Option<String>) {
     let mut loader = Loader::default();
 
     for root in roots {
@@ -349,7 +564,13 @@ pub fn extract_font_config(roots: &[PathBuf], home: &Path) -> FontConfig {
         loader.load_file(&path, home);
     }
 
-    loader.fonts
+    (loader.fonts, loader.colors, loader.theme)
+}
+
+/// Load the given root config files (in order) and then their `config-file`
+/// includes, returning the extracted font settings. See `extract_config`.
+pub fn extract_font_config(roots: &[PathBuf], home: &Path) -> FontConfig {
+    extract_config(roots, home).0
 }
 
 /// Read the real user's Ghostty font configuration: `$HOME` /
@@ -362,6 +583,162 @@ pub fn load_user_font_config() -> FontConfig {
     let xdg = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from);
     let roots = default_config_paths(&home, xdg.as_deref(), cfg!(target_os = "macos"));
     extract_font_config(&roots, &home)
+}
+
+// --- colors: theme resolution + merge --------------------------------------
+
+/// Theme search directories in priority order (`theme.zig`'s `Location`
+/// enum + `LocationIterator`): the user's own `themes` subdirectory first,
+/// then (optionally -- macOS only in real usage, see `load_user_color_
+/// config`) the Ghostty app bundle's own bundled themes.
+fn theme_search_dirs(
+    home: &Path,
+    xdg_config_home: Option<&Path>,
+    resources_themes_dir: Option<&Path>,
+) -> Vec<PathBuf> {
+    let xdg_base = match xdg_config_home {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => home.join(".config"),
+    };
+    let mut dirs = vec![xdg_base.join("ghostty/themes")];
+    if let Some(dir) = resources_themes_dir {
+        dirs.push(dir.to_path_buf());
+    }
+    dirs
+}
+
+/// Resolve a `theme` name to a file path per `theme.zig`'s `open`: an
+/// absolute path is used directly (existence is checked, matching upstream
+/// -- an absolute theme that doesn't exist is *not* searched for elsewhere);
+/// otherwise (no path separators allowed) each of `theme_search_dirs` is
+/// tried in order for the first `name` that exists as a regular file.
+fn resolve_theme_path(
+    name: &str,
+    home: &Path,
+    xdg_config_home: Option<&Path>,
+    resources_themes_dir: Option<&Path>,
+) -> Option<PathBuf> {
+    let candidate = Path::new(name);
+    if candidate.is_absolute() {
+        return is_regular_file(candidate)
+            .then(|| candidate.to_path_buf())
+            .or_else(|| {
+                eprintln!(
+                "labolabo-app: ghostty theme {name:?}: not reading because it is not a regular file"
+            );
+                None
+            });
+    }
+    if name.contains('/') || name.contains('\\') {
+        eprintln!(
+            "labolabo-app: ghostty theme {name:?} contains a path separator; only an absolute \
+             path may -- ignoring theme"
+        );
+        return None;
+    }
+    for dir in theme_search_dirs(home, xdg_config_home, resources_themes_dir) {
+        let path = dir.join(name);
+        if is_regular_file(&path) {
+            return Some(path);
+        }
+    }
+    eprintln!("labolabo-app: ghostty theme {name:?} not found in any theme directory; ignoring");
+    None
+}
+
+fn is_regular_file(path: &Path) -> bool {
+    fs::metadata(path).map(|m| m.is_file()).unwrap_or(false)
+}
+
+/// Read a theme file's color settings. A theme file is just another Ghostty
+/// config file (see the module doc comment's "Theme resolution"), but this
+/// reads only the same color keys `Loader` does -- `theme`/`config-file`
+/// (and anything else) are silently ignored if present, matching upstream's
+/// documented restriction that a theme file cannot set either.
+fn load_theme_colors(path: &Path) -> ColorScheme {
+    let mut colors = ColorScheme::default();
+    let Some(text) = read_config_text(path) else {
+        eprintln!(
+            "labolabo-app: failed to read ghostty theme file {}",
+            path.display()
+        );
+        return colors;
+    };
+    for raw in text.lines() {
+        let Some(line) = parse_line(raw) else {
+            continue;
+        };
+        if matches!(
+            line.key,
+            "background" | "foreground" | "cursor-color" | "palette"
+        ) {
+            apply_color_line(&mut colors, line.key, line.value);
+        }
+    }
+    colors
+}
+
+/// Merge a theme's colors under the user's own explicit settings: "Any
+/// additional colors specified via background, foreground, palette, etc.
+/// will override the colors specified in the theme" (`Config.zig`'s `theme`
+/// doc comment). Scalar fields: the user's value wins if set. Palette: the
+/// theme's entries are listed first, then the user's -- since a consumer
+/// applies `ColorScheme::palette` in order with a later same-index entry
+/// winning (`ColorScheme::apply_palette`), this reproduces per-index
+/// override without a separate merge step.
+fn merge_colors(theme: ColorScheme, user: ColorScheme) -> ColorScheme {
+    let mut palette = theme.palette;
+    palette.extend(user.palette);
+    ColorScheme {
+        foreground: user.foreground.or(theme.foreground),
+        background: user.background.or(theme.background),
+        cursor: user.cursor.or(theme.cursor),
+        palette,
+    }
+}
+
+/// Load the given root config files the same way `extract_font_config`
+/// does, then resolve+merge any `theme` (see `merge_colors`). `home`/
+/// `xdg_config_home` also drive theme search (see `theme_search_dirs`);
+/// `resources_themes_dir` is the Ghostty app bundle's bundled-themes
+/// directory, if any (real usage: macOS-only, see `load_user_color_config`;
+/// tests inject a fixture directory or `None`).
+pub fn extract_color_config(
+    roots: &[PathBuf],
+    home: &Path,
+    xdg_config_home: Option<&Path>,
+    resources_themes_dir: Option<&Path>,
+) -> ColorScheme {
+    let (_, user_colors, theme_name) = extract_config(roots, home);
+
+    let theme_colors = theme_name
+        .and_then(|name| resolve_theme_path(&name, home, xdg_config_home, resources_themes_dir))
+        .map(|path| load_theme_colors(&path))
+        .unwrap_or_default();
+
+    merge_colors(theme_colors, user_colors)
+}
+
+/// Read the real user's Ghostty color configuration (`background`/
+/// `foreground`/`cursor-color`/`palette`, plus `theme` resolution): same
+/// file discovery as `load_user_font_config`, plus a best-effort macOS
+/// resources-dir guess for themes (see the module doc comment's "Theme
+/// resolution"). Missing config/theme files (or no `$HOME` at all) just
+/// mean `ColorScheme::default()` -- every backend's own built-in colors.
+pub fn load_user_color_config() -> ColorScheme {
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return ColorScheme::default();
+    };
+    let xdg = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from);
+    let roots = default_config_paths(&home, xdg.as_deref(), cfg!(target_os = "macos"));
+    let resources_themes_dir = cfg!(target_os = "macos")
+        .then(|| PathBuf::from("/Applications/Ghostty.app/Contents/Resources/ghostty/themes"));
+    extract_color_config(
+        &roots,
+        &home,
+        xdg.as_deref(),
+        resources_themes_dir.as_deref(),
+    )
 }
 
 #[cfg(test)]
@@ -628,5 +1005,191 @@ mod tests {
         let root = fixture_root().join("empty_include/config");
         let cfg = extract_font_config(&[root], &fixture_root());
         assert_eq!(cfg.families, vec!["Before", "After"]);
+    }
+
+    // --- parse_color ---------------------------------------------------------
+
+    #[test]
+    fn parse_color_accepts_hashed_and_bare_hex_short_and_long_forms() {
+        assert_eq!(parse_color("#000000"), Some(Rgb::new(0, 0, 0)));
+        assert_eq!(parse_color("#0A0B0C"), Some(Rgb::new(10, 11, 12)));
+        assert_eq!(parse_color("0A0B0C"), Some(Rgb::new(10, 11, 12)));
+        assert_eq!(parse_color("FFFFFF"), Some(Rgb::new(255, 255, 255)));
+        // Real-world case: a user theme file observed in the wild uses bare
+        // (no `#`) hex, exactly this form.
+        assert_eq!(parse_color("1A202C"), Some(Rgb::new(0x1A, 0x20, 0x2C)));
+        // 3-digit short form: each nibble is scaled 4-bit -> 8-bit (`* 17`).
+        assert_eq!(parse_color("FFF"), Some(Rgb::new(255, 255, 255)));
+        assert_eq!(parse_color("#345"), Some(Rgb::new(0x33, 0x44, 0x55)));
+        // Leading/trailing whitespace is trimmed.
+        assert_eq!(
+            parse_color("  #AABBCC   "),
+            Some(Rgb::new(0xAA, 0xBB, 0xCC))
+        );
+    }
+
+    #[test]
+    fn parse_color_rejects_unsupported_forms() {
+        // X11 named colors: unsupported (out of scope for this wave).
+        assert_eq!(parse_color("black"), None);
+        // `rgb:`/`rgbi:` device syntax: unsupported.
+        assert_eq!(parse_color("rgb:12/34/56"), None);
+        assert_eq!(parse_color("rgbi:0.1/0.2/0.3"), None);
+        // 12-/16-bit-per-channel forms: unsupported.
+        assert_eq!(parse_color("#123456789"), None);
+        // Invalid hex digits, empty, and wrong lengths.
+        assert_eq!(parse_color("#GGGGGG"), None);
+        assert_eq!(parse_color(""), None);
+        assert_eq!(parse_color("#1234"), None);
+    }
+
+    // --- parse_palette_index / parse_palette_entry ----------------------------
+
+    #[test]
+    fn palette_index_parses_decimal_and_prefixed_radixes() {
+        assert_eq!(parse_palette_index("5"), Some(5));
+        assert_eq!(parse_palette_index("0x0F"), Some(15));
+        assert_eq!(parse_palette_index("0o17"), Some(15));
+        assert_eq!(parse_palette_index("0b1111"), Some(15));
+        // Out of u8 range -> None (reported and skipped by the caller).
+        assert_eq!(parse_palette_index("256"), None);
+        assert_eq!(parse_palette_index("not-a-number"), None);
+    }
+
+    #[test]
+    fn palette_entry_splits_at_first_equals_and_trims_whitespace() {
+        assert_eq!(
+            parse_palette_entry("0=#AABBCC"),
+            Some((0, Rgb::new(0xAA, 0xBB, 0xCC)))
+        );
+        assert_eq!(
+            parse_palette_entry(" 1 = #DDEEFF "),
+            Some((1, Rgb::new(0xDD, 0xEE, 0xFF)))
+        );
+        assert_eq!(parse_palette_entry("no-equals-sign"), None);
+        assert_eq!(parse_palette_entry("1=notacolor"), None);
+        assert_eq!(parse_palette_entry("999=#ffffff"), None);
+    }
+
+    // --- parse_theme_value -----------------------------------------------------
+
+    #[test]
+    fn theme_value_bare_name_is_used_for_both_appearances() {
+        assert_eq!(
+            parse_theme_value("catppuccin-mocha"),
+            Some("catppuccin-mocha".to_string())
+        );
+        assert_eq!(parse_theme_value("  spaced  "), Some("spaced".to_string()));
+        assert_eq!(parse_theme_value(""), None);
+    }
+
+    #[test]
+    fn theme_value_light_dark_pair_keeps_only_the_light_side() {
+        assert_eq!(
+            parse_theme_value("light:foo,dark:bar"),
+            Some("foo".to_string())
+        );
+        // Whitespace around parts, and dark-before-light order.
+        assert_eq!(
+            parse_theme_value(" dark : bar , light:foo "),
+            Some("foo".to_string())
+        );
+    }
+
+    // --- extract_color_config: basic parsing ------------------------------------
+
+    #[test]
+    fn colors_basic_fixture_parses_scalars_and_palette_with_warn_and_skip() {
+        let root = fixture_root().join("colors_basic/config");
+        // No theme resolves ("catppuccin-mocha" isn't in this fixture tree),
+        // so the result is exactly the user's own explicit colors.
+        let colors = extract_color_config(&[root], &fixture_root(), None, None);
+        assert_eq!(colors.background, Some(Rgb::new(0x10, 0x12, 0x14)));
+        assert_eq!(colors.foreground, Some(Rgb::new(0x1A, 0x2B, 0x3C)));
+        assert_eq!(colors.cursor, Some(Rgb::new(0xFF, 0x00, 0xFF)));
+        let resolved = colors.apply_palette([Rgb::BLACK; 256]);
+        assert_eq!(resolved[0], Rgb::new(0, 0, 0));
+        assert_eq!(resolved[1], Rgb::new(0xAA, 0xBB, 0xCC));
+        assert_eq!(resolved[2], Rgb::new(0x22, 0x33, 0x44));
+        // The invalid-index and invalid-color palette lines contributed
+        // nothing; every other index keeps the base table's color.
+        assert_eq!(resolved[3], Rgb::BLACK);
+    }
+
+    #[test]
+    fn nonexistent_and_empty_roots_yield_default_color_scheme() {
+        let missing = fixture_root().join("does-not-exist/config");
+        let empty = fixture_root().join("empty/config");
+        let colors = extract_color_config(&[missing, empty], &fixture_root(), None, None);
+        assert_eq!(colors, ColorScheme::default());
+    }
+
+    // --- extract_color_config: theme resolution + merge -------------------------
+
+    #[test]
+    fn theme_colors_are_merged_under_the_users_own_explicit_colors() {
+        let xdg = fixture_root().join("colors_theme/xdg");
+        let root = xdg.join("ghostty/config");
+        let colors = extract_color_config(&[root], &fixture_root(), Some(&xdg), None);
+
+        // background/cursor: not set by the user -> theme's value.
+        assert_eq!(colors.background, Some(Rgb::new(0x11, 0x11, 0x11)));
+        assert_eq!(colors.cursor, Some(Rgb::new(0xDD, 0xDD, 0xDD)));
+        // foreground: the user's own value wins over the theme's.
+        assert_eq!(colors.foreground, Some(Rgb::new(0xCC, 0xCC, 0xCC)));
+        // palette: index 1 is set by both -- the user's wins; index 2 is
+        // theme-only and comes through untouched.
+        let resolved = colors.apply_palette([Rgb::BLACK; 256]);
+        assert_eq!(resolved[1], Rgb::new(0x00, 0xFF, 0x00));
+        assert_eq!(resolved[2], Rgb::new(0x00, 0x00, 0xFF));
+    }
+
+    #[test]
+    fn unresolvable_theme_is_logged_and_falls_back_to_user_colors_only() {
+        let root = fixture_root().join("colors_theme_missing/config");
+        let colors = extract_color_config(&[root], &fixture_root(), None, None);
+        assert_eq!(colors.background, None);
+        assert_eq!(colors.foreground, Some(Rgb::new(0xAB, 0xCD, 0xEF)));
+    }
+
+    #[test]
+    fn light_dark_theme_syntax_uses_only_the_light_theme_file() {
+        // No "darktheme" file exists in this fixture tree at all -- if the
+        // implementation ever tried to resolve the dark side, this would
+        // fail loudly (a theme-not-found warning, and no colors set).
+        let xdg = fixture_root().join("colors_theme_light_dark/xdg");
+        let root = xdg.join("ghostty/config");
+        let colors = extract_color_config(&[root], &fixture_root(), Some(&xdg), None);
+        assert_eq!(colors.background, Some(Rgb::new(0xFF, 0xFF, 0xFF)));
+        assert_eq!(colors.foreground, Some(Rgb::new(0x00, 0x00, 0x00)));
+    }
+
+    #[test]
+    fn theme_falls_back_to_the_resources_directory_when_not_in_the_user_themes_dir() {
+        let xdg = fixture_root().join("colors_theme_resources/xdg");
+        let resources = fixture_root().join("colors_theme_resources/resources/themes");
+        let root = xdg.join("ghostty/config");
+        let colors = extract_color_config(&[root], &fixture_root(), Some(&xdg), Some(&resources));
+        assert_eq!(colors.background, Some(Rgb::new(0x20, 0x20, 0x20)));
+    }
+
+    // --- resolve_theme_path ------------------------------------------------------
+
+    #[test]
+    fn resolve_theme_path_accepts_an_existing_absolute_path_directly() {
+        let path = fixture_root().join("colors_theme_absolute/external_theme");
+        let resolved = resolve_theme_path(
+            path.to_str().unwrap(),
+            Path::new("/nonexistent"),
+            None,
+            None,
+        );
+        assert_eq!(resolved, Some(path));
+    }
+
+    #[test]
+    fn resolve_theme_path_rejects_relative_names_with_path_separators() {
+        let resolved = resolve_theme_path("sub/theme", &fixture_root(), None, None);
+        assert_eq!(resolved, None);
     }
 }
