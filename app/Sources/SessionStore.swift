@@ -74,7 +74,7 @@ final class SessionStore {
 
     private let git = GitEngine()
     private let github = GitHubEngine()
-    private let db: SessionDatabase?
+    private let db: SessionPersisting?
 
     /// 生存中セッションの現在レイアウト提供者（アプリ終了時の最終保存用）。
     /// SessionDetailView が weak 経由の closure を登録するので、閉じたセッションは
