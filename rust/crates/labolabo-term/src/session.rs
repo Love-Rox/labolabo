@@ -30,7 +30,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 
 use crate::backend::VtBackend;
 use crate::snapshot::GridSnapshot;
@@ -84,6 +84,10 @@ pub struct TermSession<B: VtBackend> {
     latest: Arc<Mutex<Arc<GridSnapshot>>>,
     events: Mutex<Receiver<TermEvent>>,
     worker_tx: Mutex<Sender<WorkerMsg>>,
+    /// A kill handle split off the child (`Child::clone_killer`) so
+    /// [`Self::shutdown`] can signal it even though the `Child` itself is
+    /// owned by (and reaped on) the worker thread.
+    killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
     // `fn() -> B` keeps `TermSession<B>: Send + Sync` even when `B` is neither
     // (the ghostty backend's VT core is `!Send`): `B` never actually lives in
     // this struct -- it lives on the worker thread.
@@ -130,6 +134,10 @@ impl<B: VtBackend> TermSession<B> {
         })?;
 
         let child = pair.slave.spawn_command(cmd)?;
+        // Split a kill handle off the child now -- the `Child` itself moves to
+        // the worker thread (which blocks in `wait()` to reap it), and
+        // `clone_killer` exists precisely to signal a child owned elsewhere.
+        let killer = child.clone_killer();
         // Drop our copy of the slave once the child has it -- otherwise our own
         // process keeps the slave fd open and the reader never sees EOF when
         // the child exits.
@@ -186,6 +194,7 @@ impl<B: VtBackend> TermSession<B> {
             latest,
             events: Mutex::new(event_rx),
             worker_tx: Mutex::new(worker_tx),
+            killer: Mutex::new(killer),
             _backend: PhantomData,
         })
     }
@@ -216,6 +225,35 @@ impl<B: VtBackend> TermSession<B> {
         }
         if let Ok(tx) = self.worker_tx.lock() {
             let _ = tx.send(WorkerMsg::Resize(cols, rows));
+        }
+    }
+
+    /// Terminate the session's child process.
+    ///
+    /// Signals the child via `portable-pty`'s `ChildKiller` -- on Unix that
+    /// is **SIGHUP** (the "terminal hung up" signal a real terminal emulator
+    /// delivers on window close; default disposition terminates a shell), on
+    /// Windows `TerminateProcess`. Everything else then follows the normal
+    /// exit path -- there is no special teardown state: the dying child
+    /// closes the PTY slave, the reader thread sees EOF, and the worker
+    /// publishes a final snapshot, emits [`TermEvent::Exit`], reaps the
+    /// child (`wait`), and both threads finish. Callers that care when
+    /// teardown completes should wait for the `Exit` event, same as for a
+    /// natural exit.
+    ///
+    /// Idempotent; calling it again (or after the child already exited) is
+    /// harmless in practice -- kill errors are ignored. Caveat, inherited
+    /// from `portable-pty`'s pid-based Unix killer: once the child has been
+    /// reaped (which only the worker thread's `wait` does, after EOF), a
+    /// subsequent `shutdown` signals a stale pid, with the usual theoretical
+    /// pid-reuse window every pid-signalling terminal emulator shares.
+    ///
+    /// Note this signals only the direct child process (the shell), not its
+    /// whole process group -- descendants that detach from the PTY and
+    /// ignore SIGHUP can outlive the session, same as in other terminals.
+    pub fn shutdown(&self) {
+        if let Ok(mut killer) = self.killer.lock() {
+            let _ = killer.kill();
         }
     }
 

@@ -1,0 +1,4 @@
+font-family = RootFont
+config-file = sub/extra.conf
+config-file = ?missing.conf
+font-size = 16

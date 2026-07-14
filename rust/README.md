@@ -18,7 +18,8 @@ algorithms — from Swift to Rust.
 > **Sibling crate — `labolabo-app`.** This workspace also contains
 > [`crates/labolabo-app`](crates/labolabo-app/README.md): the wave-5a
 > bootable skeleton of the cross-platform UI — a [gpui](https://www.gpui.rs/)
-> binary that renders `labolabo-term`'s `GridSnapshot` in a window, routes
+> binary that renders `labolabo-term`'s `GridSnapshot` in a window (with
+> the user's own Ghostty `font-family`/`font-size` settings), routes
 > keyboard input to a `TermSession`, and drives a minimal tab bar. It is
 > **not** in `default-members` (gpui is a heavy desktop-UI dependency this
 > workspace's plain `cargo build`/`test`/`clippy` must not pull in), so build
