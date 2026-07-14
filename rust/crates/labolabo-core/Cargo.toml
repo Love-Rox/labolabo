@@ -3,9 +3,16 @@ name = "labolabo-core"
 version = "0.1.0"
 edition.workspace = true
 publish = false
-description = "Pure-logic core (git porcelain v2 / unified diff parsers) ported from LaboLaboEngine (Swift), verified against it via golden-file tests."
+description = "Pure-logic core (git porcelain v2 / unified diff parsers, commit graph layout, worktree list / transcript usage / agent hook-event parsers, cross-session conflicts, release version compare) ported from LaboLaboEngine (Swift), verified against it via golden-file tests."
 
+# serde_json is a *runtime* dependency starting wave 2: TranscriptUsage
+# (JSONL usage aggregation) and AgentEventParser (hook-event JSON) need real
+# JSON parsing to faithfully reproduce Foundation's `JSONSerialization` +
+# `as? T` bridging behavior (see `transcript_usage.rs`'s `as_int` doc comment
+# for the NSNumber-bridging quirk this preserves). Wave 1's parsers
+# (porcelain / unified diff) still need none of it themselves.
 [dependencies]
+serde_json = "1"
 
 [dev-dependencies]
 serde = { version = "1", features = ["derive"] }

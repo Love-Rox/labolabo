@@ -1,10 +1,10 @@
 # labolabo-core (Rust)
 
-Wave 1 of the Rust cross-platform migration: a faithful port of
-LaboLaboEngine's pure-logic core — the parsers with no process /
-filesystem / concurrency dependencies — from Swift to Rust.
+The Rust cross-platform migration's pure-logic core: a faithful port of
+LaboLaboEngine's OS/process/UI-independent logic — parsers and pure
+algorithms — from Swift to Rust.
 
-Ported so far (from `Sources/LaboLaboEngine/Git/` in the Swift package):
+## Wave 1 (`Sources/LaboLaboEngine/Git/`, no runtime deps)
 
 | Swift source | Rust module |
 |---|---|
@@ -12,9 +12,44 @@ Ported so far (from `Sources/LaboLaboEngine/Git/` in the Swift package):
 | `PorcelainStatusParser.swift` | `crates/labolabo-core/src/porcelain.rs` |
 | `UnifiedDiffParser.swift` | `crates/labolabo-core/src/unified_diff.rs` |
 
+## Wave 2 (commit graph, worktree list, agent status/usage)
+
+| Swift source | Rust module | Golden fixtures? |
+|---|---|---|
+| `Git/CommitGraph.swift` (pure `CommitGraphLayout.build` only) | `commit_graph.rs` | no — see below |
+| `Git/Worktree.swift` | `worktree.rs` | yes |
+| `Agent/TranscriptUsage.swift` | `transcript_usage.rs` | yes |
+| `Agent/AgentStatus.swift` | `agent_status.rs` | no — see below |
+| `Agent/AgentEventParser.swift` | `agent_event_parser.rs` | yes |
+| `Git/CrossSessionConflicts.swift` | `cross_session_conflicts.rs` | no — see below |
+| `Update/ReleaseVersion.swift` | `release_version.rs` | no — see below |
+
+Per the porting brief, the three **pure-algorithm** modules
+(`commit_graph`, `cross_session_conflicts`, `release_version`) carry only
+unit tests ported 1:1 from their Swift XCTest suites — no golden fixtures.
+`agent_status.rs` is a thin enum-mapping module folded into
+`agent_event_parser.rs`'s golden coverage (every `agent_event` fixture
+exercises `AgentStatus::from_hook_event` too) rather than getting its own
+fixture set.
+
+`commit_graph.rs` ports only the pure `CommitGraphLayout.build(_:)`
+function and its result types. The Swift file's
+`GitEngine.commitGraph(worktree:limit:)` extension shells out to `git log`
+via `GitRunner` — process execution, not pure logic, and out of scope here
+(confirmed unlinkable standalone: `nm -g` on `CommitGraph.swift.o` shows an
+undefined reference to `GitRunner.run`, whereas `Worktree.swift.o`,
+`TranscriptUsage.swift.o`, `AgentStatus.swift.o`, and
+`AgentEventParser.swift.o` only reference Foundation/stdlib symbols, which
+is why only those four could be wired into the golden-oracle script).
+
+`transcript_usage.rs` and `agent_event_parser.rs` need real JSON parsing to
+faithfully reproduce Foundation's `JSONSerialization` + `as? T` bridging
+behavior, so `serde_json` is a **runtime** dependency starting this wave
+(wave 1's parsers needed none).
+
 Everything else in `LaboLaboEngine` (process execution, git plumbing that
-shells out, file watching, hooks/agent status, persistence, ...) is out of
-scope for this wave.
+shells out, file watching, the `AgentStatusBus`/`AgentEventTransport`
+socket-transport layer, persistence, ...) remains out of scope.
 
 ## Porting principle: faithful port, not a rewrite
 
@@ -71,19 +106,50 @@ sites and the corresponding tests for detail):
   Swift, and the Rust port matches each individually (`raw.split('\n')` vs.
   `raw.split('\0').filter(|s| !s.is_empty())`).
 
+Wave 2 edge cases:
+
+- **`transcript_usage::as_int` NSNumber-bridging quirk**: Swift's
+  `(u["input_tokens"] as? Int) ?? 0` is not "parse a JSON integer" — it was
+  empirically verified (not assumed; see the doc comment on `as_int`) that
+  `JSONSerialization` + `as? Int` also bridges whole-number JSON floats
+  (`100.0` -> `100`, not the `0` fallback) *and* JSON booleans (`true` ->
+  `1`, `false` -> `0`). `serde_json::Number::as_i64()` does **not** do
+  either of these (`None` for anything parsed from a float literal, even a
+  whole one), so `as_int` reimplements the bridging by hand. See the
+  `quirk_*` tests in `transcript_usage.rs` and the
+  `whole_number_float_bridges_to_int` / `bool_bridges_to_int_quirk` /
+  `fractional_float_and_string_fall_back_to_zero` golden fixtures.
+- `TranscriptUsage.parse`'s line splitting (Swift: any `Character` where
+  `isNewline` is true, including a lone `\r` and Unicode line separators;
+  Rust: plain `\n`) is a deliberate, documented simplification — see the
+  doc comment on `transcript_usage::parse` for why it doesn't change
+  behavior for real (`\n`-terminated) transcripts.
+- `AgentEventParser`/`agent_event_parser::parse`: a non-object top-level
+  JSON value (e.g. a bare array) is dropped, matching Swift's
+  `try? JSONSerialization.jsonObject(with:) as? [String: Any]` failing the
+  cast. Unlike the `Int` bridging above, `as? String` has **no** bridging
+  quirks (verified empirically too) — only an actual JSON string matches.
+
 ## Workspace layout
 
 ```
 rust/
   Cargo.toml                        # workspace, resolver = "2"
   crates/labolabo-core/
-    Cargo.toml                      # no runtime deps; serde/serde_json are dev-dependencies only
+    Cargo.toml                      # serde_json is a runtime dep (wave 2); serde is dev-only
     src/
       lib.rs
-      git_models.rs                 # port of GitModels.swift + unit tests ported from Swift XCTest
-      porcelain.rs                  # port of PorcelainStatusParser.swift + unit tests
-      unified_diff.rs               # port of UnifiedDiffParser.swift + unit tests
-      util.rs                       # small string helpers shared by the two parsers
+      git_models.rs                 # wave 1: port of GitModels.swift + unit tests ported from Swift XCTest
+      porcelain.rs                  # wave 1: port of PorcelainStatusParser.swift + unit tests
+      unified_diff.rs               # wave 1: port of UnifiedDiffParser.swift + unit tests
+      commit_graph.rs              # wave 2: port of CommitGraph.swift's pure layout algorithm + unit tests
+      worktree.rs                   # wave 2: port of Worktree.swift + unit test + golden coverage
+      transcript_usage.rs           # wave 2: port of TranscriptUsage.swift + unit tests + golden coverage
+      agent_status.rs               # wave 2: port of AgentStatus.swift + unit tests
+      agent_event_parser.rs         # wave 2: port of AgentEventParser.swift + unit tests + golden coverage
+      cross_session_conflicts.rs    # wave 2: port of CrossSessionConflicts.swift + unit tests
+      release_version.rs            # wave 2: port of ReleaseVersion.swift + unit tests
+      util.rs                       # small string helpers shared by the parsers
     tests/
       golden.rs                     # golden-oracle test (see below)
     fixtures/
@@ -91,19 +157,36 @@ rust/
       inputs/
         porcelain/*.txt, *.raw      # git status --porcelain=v2 -z inputs
         diff/*.diff                 # git diff inputs
+        worktree/*.txt              # git worktree list --porcelain inputs
+        transcript_usage/*.jsonl    # agent transcript (JSONL) inputs
+        agent_event/*.txt           # hook-event JSON payloads (`.txt`, not `.json` -- see note below)
       expected/
         porcelain/*.json            # canonical JSON produced by the *Swift* parser
         diff/*.json
+        worktree/*.json
+        transcript_usage/*.json
+        agent_event/*.json
 ```
+
+`fixtures/inputs/agent_event/*` use a `.txt` extension even though their
+content is JSON: `generate.swift`'s `processDirectory` helper skips any
+input-directory file whose extension is `.json` (it assumes that's a
+leftover *expected*-output file accidentally sitting in `inputs/`), so a
+same-extension input file would silently be excluded from generation — hit
+this for real while authoring these fixtures (`0 agent_event` fixtures
+generated on the first attempt) and renamed them to `.txt` to fix it.
 
 ## Golden-oracle testing
 
 Correctness is anchored to the Swift implementation: `tests/golden.rs` reads
-every fixture under `fixtures/inputs/{porcelain,diff}/`, runs it through the
-Rust parsers, renders a canonical JSON view, and asserts it is
-**byte-identical** to the corresponding file under
-`fixtures/expected/{porcelain,diff}/` — which was produced by running the
-*same* fixture files through the real Swift parsers.
+every fixture under `fixtures/inputs/{porcelain,diff,worktree,transcript_usage,agent_event}/`,
+runs it through the Rust parsers, renders a canonical JSON view, and asserts
+it is **byte-identical** to the corresponding file under
+`fixtures/expected/{porcelain,diff,worktree,transcript_usage,agent_event}/`
+— which was produced by running the *same* fixture files through the real
+Swift parsers. `commit_graph`, `cross_session_conflicts`, and
+`release_version` (the pure-algorithm modules) are not part of this —
+see "Wave 2" above.
 
 Canonical JSON rules (must match on both sides):
 
@@ -148,21 +231,41 @@ Canonical JSON rules (must match on both sides):
    repository and are not part of it — only their captured `git` output is
    checked in as fixtures.
 
+`fixtures/inputs/worktree/` (5 fixtures) covers: the existing Swift test's
+three-block scenario (main branch, feature branch, locked+detached with no
+trailing separator, exercising end-of-input flush), empty input, a bare
+repository, an unknown key (`prunable ...`) interleaved with a `locked
+<reason>` line (value ignored, flag still set), and a trailing blank line
+after the last block (must not produce a phantom empty entry).
+
+`fixtures/inputs/transcript_usage/` (8 fixtures) covers: the existing
+Swift tests' two scenarios (multi-turn sum, non-assistant/malformed lines
+ignored), empty input, and five wave-2-specific cases exercising the
+`as_int` NSNumber-bridging quirk described above plus a missing-fields and
+an empty-model-does-not-overwrite case.
+
+`fixtures/inputs/agent_event/` (8 fixtures) covers: the existing Swift
+tests' scenarios (full event, optional fields absent, unknown hook event
+dropped, malformed/empty payload dropped, unknown fields ignored) plus two
+wave-2-specific cases (non-object top level dropped, a non-string field
+silently ignored rather than coerced).
+
 ### Regenerating `fixtures/expected/**`
 
 `fixtures/expected/**` must be regenerated any time a fixture is
 added/changed *or* the canonical JSON schema changes. It is produced by a
 disposable Swift "oracle" script, `fixtures/generate.swift`, that imports
-the real `LaboLaboEngine` module and runs the two Swift parsers over every
-file in `fixtures/inputs/`.
+the real `LaboLaboEngine` module and runs the Swift parsers over every file
+in `fixtures/inputs/`.
 
 `fixtures/generate.swift` is **not** part of the SwiftPM package graph — no
 executable target was added to `Package.swift` (the porting brief
 explicitly disallows that, to keep the Swift package's own structure
 untouched). Instead it links directly against the already-built object
-files for `GitModels`/`PorcelainStatusParser`/`UnifiedDiffParser` (which
-depend on nothing outside Foundation) and is compiled as an ordinary
-one-off `swiftc` binary. From the repo root:
+files for the ported Swift sources (which depend on nothing outside
+Foundation — see "Wave 2" above for how this was verified per-file with
+`nm -g`) and is compiled as an ordinary one-off `swiftc` binary. From the
+repo root:
 
 ```sh
 # 1. Make sure LaboLaboEngine is built (produces the .o files we link against).
@@ -174,10 +277,14 @@ swiftc -O -I "$BUILD/Modules" rust/crates/labolabo-core/fixtures/generate.swift 
   "$BUILD/LaboLaboEngine.build/GitModels.swift.o" \
   "$BUILD/LaboLaboEngine.build/PorcelainStatusParser.swift.o" \
   "$BUILD/LaboLaboEngine.build/UnifiedDiffParser.swift.o" \
+  "$BUILD/LaboLaboEngine.build/Worktree.swift.o" \
+  "$BUILD/LaboLaboEngine.build/TranscriptUsage.swift.o" \
+  "$BUILD/LaboLaboEngine.build/AgentStatus.swift.o" \
+  "$BUILD/LaboLaboEngine.build/AgentEventParser.swift.o" \
   -o /tmp/labolabo_golden_generate
 
 # 3. Run it, pointing at the fixtures directory. It (re)writes every file
-#    under fixtures/expected/{porcelain,diff}/*.json.
+#    under fixtures/expected/{porcelain,diff,worktree,transcript_usage,agent_event}/*.json.
 /tmp/labolabo_golden_generate rust/crates/labolabo-core/fixtures
 ```
 
@@ -188,11 +295,11 @@ future toolchain, the brief's documented fallback is to temporarily add a
 `swift test --filter`, then delete it before committing — the JSON-shape
 logic in `generate.swift` can be pasted in as-is.)
 
-After regenerating, run `cd rust && cargo test` — if the fixture or schema
-changed, the two golden tests in `tests/golden.rs` will fail with a
+After regenerating, run `cd rust && cargo test` — if a fixture or schema
+changed, the affected golden test in `tests/golden.rs` will fail with a
 byte-diff-style message naming the mismatched fixture.
 
-## Verification run for this wave
+## Verification run
 
 ```sh
 cd rust
@@ -204,11 +311,19 @@ cd ..
 swift test                    # confirms the Swift side is untouched and still green
 ```
 
+CI (`.github/workflows/ci.yml`, `rust` job) runs the same three `cargo`
+commands on both `ubuntu-latest` and `macos-15`.
+
 ## Known scope limits / what's next
 
-- No `rust` job exists in CI yet (`.github/workflows/ci.yml`) — that's
-  planned for a later wave, once more of the engine is ported. This crate
-  currently has to be built/tested manually as above.
-- Only the pure parsers are ported. `GitRunner`/`GitEngine` (process
-  execution + orchestration), `FileWatcher`, hooks/agent-status, and
-  persistence (`LaboLaboStore`) are unported and out of scope for this wave.
+- `GitRunner`/`GitEngine` (process execution + orchestration), `FileWatcher`,
+  the `AgentStatusBus`/`AgentEventTransport` socket-transport layer, and
+  persistence (`LaboLaboStore`) remain unported and out of scope.
+- `commit_graph::build`'s only consumer in Swift,
+  `GitEngine.commitGraph(worktree:limit:)`, is process execution and is not
+  ported — a future wave that ports `GitRunner`/`GitEngine` would need to
+  add a thin `git log` invocation wrapper around `commit_graph::build`.
+- Golden coverage exists for `porcelain`, `unified_diff`, `worktree`,
+  `transcript_usage`, and `agent_event_parser`. `commit_graph`,
+  `cross_session_conflicts`, and `release_version` are covered by ported
+  unit tests only (no golden fixtures), by design — see "Wave 2" above.

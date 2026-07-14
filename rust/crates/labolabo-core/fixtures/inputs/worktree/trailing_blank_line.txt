@@ -1,0 +1,8 @@
+worktree /repo
+HEAD aaaaaaa
+branch refs/heads/main
+
+worktree /repo/second
+HEAD bbbbbbb
+branch refs/heads/dev
+
