@@ -79,7 +79,7 @@ public final class UnixSocketEventTransport: AgentEventTransport, @unchecked Sen
         let fd = listenFD
         listenFD = -1
         if fd >= 0 {
-            shutdown(fd, SHUT_RDWR)
+            shutdown(fd, Int32(SHUT_RDWR))
             close(fd)
         }
         unlink(socketPath)
@@ -89,7 +89,11 @@ public final class UnixSocketEventTransport: AgentEventTransport, @unchecked Sen
 
     private func runServer() {
         unlink(socketPath) // 残骸を掃除
+        #if canImport(Darwin)
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        #else
+        let fd = socket(AF_UNIX, Int32(SOCK_STREAM.rawValue), 0)
+        #endif
         guard fd >= 0 else { return }
 
         guard var addr = Self.makeAddr(path: socketPath) else { close(fd); return }

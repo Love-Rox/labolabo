@@ -19,6 +19,7 @@ public protocol FileWatching: AnyObject {
     func stop()
 }
 
+#if canImport(CoreServices)
 extension FileWatcher: FileWatching {
     public static func watch(
         path: URL,
@@ -30,3 +31,4 @@ extension FileWatcher: FileWatching {
         return watcher
     }
 }
+#endif

@@ -64,6 +64,7 @@ public enum ProcessRunner {
     ///
     /// - Throws: 起動に失敗したときのみ。非ゼロ exit は `Output.status` で返す
     ///   （シグナル死はシェル慣習の 128+signo に写像する）。
+    #if os(macOS)
     public static func run(
         executable: URL,
         arguments: [String],
@@ -192,6 +193,69 @@ public enum ProcessRunner {
         fallback.setEventHandler(handler: reap)
         fallback.resume()
     }
+    #else
+    /// Linux 版: `posix_spawn`/`DispatchSource.makeProcessSource` は Glibc の
+    /// `posix_spawn_file_actions_t` が non-optional であること・
+    /// `POSIX_SPAWN_CLOEXEC_DEFAULT` が無いこと・libdispatch に process source が
+    /// 無いことから macOS 版をそのまま移植できない。代わりに Foundation の
+    /// `Process`（`runSync` と同じ drain 方式）をバックグラウンドキューで動かし、
+    /// `withCheckedContinuation` で async 化する。CI（swift test）専用経路であり
+    /// GUI アプリからは呼ばれないため、スレッド占有を避ける最適化は不要。
+    public static func run(
+        executable: URL,
+        arguments: [String],
+        in directory: URL? = nil,
+        environment: [String: String]? = nil
+    ) async throws -> Output {
+        let process = Process()
+        process.executableURL = executable
+        process.arguments = arguments
+        if let directory { process.currentDirectoryURL = directory }
+        process.environment = environment ?? ProcessInfo.processInfo.environment
+        process.standardInput = FileHandle.nullDevice
+
+        let outPipe = Pipe()
+        let errPipe = Pipe()
+        process.standardOutput = outPipe
+        process.standardError = errPipe
+
+        try process.run()
+
+        // 両パイプを並行 drain（片方だけ読むとバッファ満杯で相手が block しデッドロック）。
+        let outBox = DataBox()
+        let errBox = DataBox()
+        let drain = DispatchGroup()
+        drain.enter()
+        DispatchQueue.global().async {
+            outBox.fill(from: outPipe.fileHandleForReading)
+            drain.leave()
+        }
+        drain.enter()
+        DispatchQueue.global().async {
+            errBox.fill(from: errPipe.fileHandleForReading)
+            drain.leave()
+        }
+
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            DispatchQueue.global().async {
+                process.waitUntilExit()
+                drain.wait()
+                continuation.resume()
+            }
+        }
+
+        // シグナル死はシェル慣習の 128+signo に写像し、macOS 版と挙動を揃える。
+        let status: Int32 = process.terminationReason == .uncaughtSignal
+            ? 128 + process.terminationStatus
+            : process.terminationStatus
+
+        return Output(
+            status: status,
+            stdout: String(decoding: outBox.value, as: UTF8.self),
+            stderr: String(decoding: errBox.value, as: UTF8.self)
+        )
+    }
+    #endif
 
     /// - Returns: 起動に失敗、または `timeout` 超過なら `nil`。
     public static func runSync(
