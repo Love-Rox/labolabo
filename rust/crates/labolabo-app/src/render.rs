@@ -23,13 +23,22 @@ use labolabo_term::{CursorSnapshot, GridSnapshot, Rgb};
 
 use crate::ime;
 use crate::selection::Selection;
+use crate::theme;
 
 /// Selection highlight tint -- the same accent hue as the focused-pane
-/// border (`task_workspace::FOCUS_BORDER_COLOR`, `0x5e9eff`) so "this pane
-/// is focused" and "this is your selection" read as one visual family,
-/// alpha'd down so the glyph painted on top (see [`paint_grid`]) stays
-/// legible.
-const SELECTION_HIGHLIGHT_RGB: Rgb = Rgb::new(0x5e, 0x9e, 0xff);
+/// border (`task_workspace::FOCUS_BORDER_COLOR`, [`theme::ACCENT`]) so
+/// "this pane is focused" and "this is your selection" read as one visual
+/// family, alpha'd down so the glyph painted on top (see [`paint_grid`])
+/// stays legible. This is the one place `crate::theme` reaches into
+/// `render.rs`'s otherwise-out-of-scope terminal-cell painting (`plans/013`'s
+/// module doc comment calls this out as the deliberate exception) --
+/// everything else here (cell/cursor/preedit colors) stays exactly what the
+/// user's Ghostty config resolves to.
+const SELECTION_HIGHLIGHT_RGB: Rgb = Rgb::new(
+    ((theme::ACCENT >> 16) & 0xff) as u8,
+    ((theme::ACCENT >> 8) & 0xff) as u8,
+    (theme::ACCENT & 0xff) as u8,
+);
 const SELECTION_HIGHLIGHT_ALPHA: f32 = 0.35;
 
 /// The fallback font family when the user's `font-family` (or an empty

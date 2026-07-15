@@ -87,6 +87,8 @@ use labolabo_core::{
 };
 
 use crate::app::LaboLaboApp;
+use crate::render::RenderSpec;
+use crate::theme;
 
 /// Fixed width of the Git pane -- same "no resize handle yet" simplification
 /// `sidebar::SIDEBAR_WIDTH` already made for the Task sidebar.
@@ -122,13 +124,13 @@ impl FileSection {
     }
 
     /// Badge color per section -- amber/lime/rose semantics ported from
-    /// `ChangedFileRow.sectionColor` (`WorkPaneView.swift`), just plain
-    /// `rgb()` hex here since this crate has no `LaboTheme` token system.
+    /// `ChangedFileRow.sectionColor` (`WorkPaneView.swift`), now sourced
+    /// from `crate::theme` (`plans/013`) instead of ad hoc hex.
     fn badge_color(self) -> u32 {
         match self {
-            FileSection::Staged => 0x30d158,    // lime/green
-            FileSection::Unstaged => 0xffa500,  // amber
-            FileSection::Untracked => 0xff6b6b, // rose
+            FileSection::Staged => theme::diff::ADD,
+            FileSection::Unstaged => theme::status::STARTING,
+            FileSection::Untracked => theme::status::CONFLICT,
         }
     }
 }
@@ -502,15 +504,21 @@ impl GitPaneState {
 // Rendering
 // ============================================================================
 
-const PANEL_BG: u32 = 0x161616;
-const BORDER_COLOR: u32 = 0x1c1c1c;
-const HEADER_BG: u32 = 0x232323;
-const SELECTED_ROW_BG: u32 = 0x2f2f2f;
-const HUNK_HEADER_BG: u32 = 0x262626;
-const ADDITION_BG: u32 = 0x14251a;
-const ADDITION_FG: u32 = 0x4ade80;
-const DELETION_BG: u32 = 0x2a1616;
-const DELETION_FG: u32 = 0xff6b6b;
+const PANEL_BG: u32 = theme::surface::SUNKEN;
+const BORDER_COLOR: u32 = theme::surface::STROKE;
+const HEADER_BG: u32 = theme::surface::RAISED;
+/// A selected changed-file row: deliberately `ACTIVE` rather than the
+/// `RAISED` most other former-`0x2f2f2f` uses map to (`plans/013`'s own
+/// mapping table calls this `0x2f2f2f -> RAISED` in general) -- a selected
+/// row is a "selection" affordance like a selected tab chip, not a raised
+/// chrome surface, so `ACTIVE` is the semantically correct token here even
+/// though the literal hex value used to coincide with the `RAISED` group.
+const SELECTED_ROW_BG: u32 = theme::surface::ACTIVE;
+const HUNK_HEADER_BG: u32 = theme::surface::RAISED;
+const ADDITION_BG: u32 = theme::diff::ADD_BG;
+const ADDITION_FG: u32 = theme::diff::ADD;
+const DELETION_BG: u32 = theme::diff::DEL_BG;
+const DELETION_FG: u32 = theme::diff::DEL;
 
 /// Renders `task_id`'s Git pane -- branch/status bar, the changed-files
 /// list (staged/unstaged/untracked, per `build_changed_items`'s ordering),
@@ -524,6 +532,7 @@ const DELETION_FG: u32 = 0xff6b6b;
 pub fn render_git_pane(
     task_id: &str,
     state: &GitPaneState,
+    spec: &RenderSpec,
     cx: &mut Context<LaboLaboApp>,
 ) -> AnyElement {
     div()
@@ -543,7 +552,7 @@ pub fn render_git_pane(
                 .overflow_hidden()
                 .border_b_1()
                 .border_color(rgb(BORDER_COLOR))
-                .child(render_file_list(task_id, state, cx)),
+                .child(render_file_list(task_id, state, spec, cx)),
         )
         .child(
             div()
@@ -584,7 +593,7 @@ fn render_branch_bar(
         .flex_shrink_0()
         .bg(rgb(HEADER_BG))
         .text_size(px(11.0))
-        .text_color(rgb(0xcccccc))
+        .text_color(rgb(theme::text::PRIMARY))
         .child(SharedString::from("\u{2387}")) // branch glyph, matches sidebar::kind_marker
         .child(branch_text)
         .when(ahead > 0, |el| el.child(format!("\u{2191}{ahead}")))
@@ -592,7 +601,7 @@ fn render_branch_bar(
         .when(dirty, |el| {
             el.child(
                 div()
-                    .text_color(rgb(0xffa500))
+                    .text_color(rgb(theme::status::STARTING))
                     .child(SharedString::from("\u{25cf}")),
             )
         })
@@ -600,14 +609,14 @@ fn render_branch_bar(
         .when_some(state.load_error.as_ref(), |el, err| {
             el.child(
                 div()
-                    .text_color(rgb(0xff6b6b))
+                    .text_color(rgb(theme::status::CONFLICT))
                     .child(SharedString::from(err.clone())),
             )
         })
         .child(
             div()
                 .px_1()
-                .text_color(rgb(0x999999))
+                .text_color(rgb(theme::text::SECONDARY))
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _: &MouseDownEvent, _window, cx| {
@@ -621,13 +630,14 @@ fn render_branch_bar(
 fn render_file_list(
     task_id: &str,
     state: &GitPaneState,
+    spec: &RenderSpec,
     cx: &mut Context<LaboLaboApp>,
 ) -> impl IntoElement {
     if state.items.is_empty() {
         return div()
             .p_2()
             .text_size(px(11.0))
-            .text_color(rgb(0x777777))
+            .text_color(rgb(theme::text::MUTED))
             .child(SharedString::from("No changes"))
             .into_any_element();
     }
@@ -650,7 +660,7 @@ fn render_file_list(
             div()
                 .px_2()
                 .pt_1()
-                .text_size(px(10.0))
+                .text_size(px(theme::font_size::CAPTION))
                 .text_color(rgb(section.badge_color()))
                 .child(SharedString::from(format!(
                     "{} ({})",
@@ -659,7 +669,7 @@ fn render_file_list(
                 ))),
         );
         for item in rows {
-            list = list.child(render_file_row(task_id, state, item, cx));
+            list = list.child(render_file_row(task_id, state, item, spec, cx));
         }
     }
     list.into_any_element()
@@ -669,6 +679,7 @@ fn render_file_row(
     task_id: &str,
     state: &GitPaneState,
     item: &ChangedFileItem,
+    spec: &RenderSpec,
     cx: &mut Context<LaboLaboApp>,
 ) -> impl IntoElement {
     let is_selected = state.selected_path.as_deref() == Some(item.path.as_str());
@@ -690,24 +701,32 @@ fn render_file_row(
         .py_0p5()
         .text_size(px(11.0))
         .when(is_selected, |el| el.bg(rgb(SELECTED_ROW_BG)))
-        .text_color(rgb(0xd0d0d0))
+        .text_color(rgb(theme::text::PRIMARY))
         .child(
             div()
                 .flex_1()
                 .overflow_hidden()
                 .child(SharedString::from(file_name)),
         )
+        // `plans/013` §3: the +/- counts are set in the user's own
+        // terminal font (`spec.font`) at `CAPTION` size, same "numbers
+        // stay visually tied to the terminal" rationale as the tab chip's
+        // usage label (`task_workspace::render_pane_tab_bar`).
         .when_some(item.adds.filter(|a| *a > 0), |el, adds| {
             el.child(
                 div()
-                    .text_color(rgb(0x4ade80))
+                    .font(spec.font.clone())
+                    .text_size(px(theme::font_size::CAPTION))
+                    .text_color(rgb(theme::diff::ADD))
                     .child(SharedString::from(format!("+{adds}"))),
             )
         })
         .when_some(item.dels.filter(|d| *d > 0), |el, dels| {
             el.child(
                 div()
-                    .text_color(rgb(0xff6b6b))
+                    .font(spec.font.clone())
+                    .text_size(px(theme::font_size::CAPTION))
+                    .text_color(rgb(theme::diff::DEL))
                     .child(SharedString::from(format!("-{dels}"))),
             )
         })
@@ -724,7 +743,7 @@ fn render_detail(task_id: &str, state: &GitPaneState, cx: &mut Context<LaboLaboA
         return div()
             .p_2()
             .text_size(px(11.0))
-            .text_color(rgb(0x777777))
+            .text_color(rgb(theme::text::MUTED))
             .child(SharedString::from("Select a file"))
             .into_any_element();
     };
@@ -771,7 +790,7 @@ fn render_detail_header(
             div()
                 .flex_1()
                 .overflow_hidden()
-                .text_color(rgb(0xaaaaaa))
+                .text_color(rgb(theme::text::SECONDARY))
                 .child(SharedString::from(path.to_string())),
         )
         .child(render_mode_pill(
@@ -800,8 +819,17 @@ fn render_mode_pill(
         .py_0p5()
         .rounded_sm()
         .text_size(px(10.0))
-        .when(active, |el| el.bg(rgb(0x30d158)).text_color(rgb(0x0a0a0a)))
-        .when(!active, |el| el.text_color(rgb(0x999999)))
+        // `plans/013`: the active Diff/Whole toggle pill is a *selection*,
+        // not an "agent running" signal, so it uses `ACCENT` (shared with
+        // the focused-pane border/selection highlight) rather than the
+        // status green -- keeping the two greens from reading as the same
+        // thing this plan's background section calls out as a pre-existing
+        // problem ("緑が 2 系統混在").
+        .when(active, |el| {
+            el.bg(rgb(theme::ACCENT))
+                .text_color(rgb(theme::text::ON_ACCENT))
+        })
+        .when(!active, |el| el.text_color(rgb(theme::text::SECONDARY)))
         .on_mouse_down(MouseButton::Left, on_click)
         .child(SharedString::from(label))
 }
@@ -825,7 +853,7 @@ fn render_diff(diff: Option<&FileDiff>) -> AnyElement {
                 .py_0p5()
                 .bg(rgb(HUNK_HEADER_BG))
                 .text_size(px(10.0))
-                .text_color(rgb(0x999999))
+                .text_color(rgb(theme::text::SECONDARY))
                 .child(SharedString::from(hunk.header.clone())),
         );
         for line in &hunk.lines {
@@ -839,8 +867,8 @@ fn render_diff_line(line: &DiffLine) -> AnyElement {
     let (bg, fg, sign) = match line.kind {
         LineKind::Addition => (Some(ADDITION_BG), ADDITION_FG, "+"),
         LineKind::Deletion => (Some(DELETION_BG), DELETION_FG, "-"),
-        LineKind::NoNewline => (None, 0x666666, "\\"),
-        LineKind::Context => (None, 0xcccccc, " "),
+        LineKind::NoNewline => (None, theme::text::MUTED, "\\"),
+        LineKind::Context => (None, theme::text::PRIMARY, " "),
     };
 
     let mut row = div()
@@ -856,7 +884,7 @@ fn render_diff_line(line: &DiffLine) -> AnyElement {
         div()
             .w(px(28.0))
             .flex_shrink_0()
-            .text_color(rgb(0x666666))
+            .text_color(rgb(theme::text::MUTED))
             .child(SharedString::from(
                 line.old_line_number
                     .map(|n| n.to_string())
@@ -867,7 +895,7 @@ fn render_diff_line(line: &DiffLine) -> AnyElement {
         div()
             .w(px(28.0))
             .flex_shrink_0()
-            .text_color(rgb(0x666666))
+            .text_color(rgb(theme::text::MUTED))
             .child(SharedString::from(
                 line.new_line_number
                     .map(|n| n.to_string())
@@ -915,19 +943,16 @@ fn render_whole_text(text: Option<&str>) -> AnyElement {
                     div()
                         .w(px(32.0))
                         .flex_shrink_0()
-                        .text_color(rgb(0x666666))
+                        .text_color(rgb(theme::text::MUTED))
                         .child(SharedString::from((index + 1).to_string())),
                 )
-                .child(
-                    div()
-                        .flex_1()
-                        .text_color(rgb(0xcccccc))
-                        .child(SharedString::from(if line.is_empty() {
-                            " ".to_string()
-                        } else {
-                            line.to_string()
-                        })),
-                ),
+                .child(div().flex_1().text_color(rgb(theme::text::PRIMARY)).child(
+                    SharedString::from(if line.is_empty() {
+                        " ".to_string()
+                    } else {
+                        line.to_string()
+                    }),
+                )),
         );
     }
     col.into_any_element()
@@ -937,7 +962,7 @@ fn placeholder(text: &'static str) -> AnyElement {
     div()
         .p_2()
         .text_size(px(11.0))
-        .text_color(rgb(0x777777))
+        .text_color(rgb(theme::text::MUTED))
         .child(SharedString::from(text))
         .into_any_element()
 }
