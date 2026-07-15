@@ -1,0 +1,37 @@
+name: Rust app bundle (macOS)
+
+# Rust 版 labolabo-app（gpui）を macOS の .app にバンドルし、workflow の artifact として
+# アップロードする。**手動実行のみ**（自動トリガなし）— Rust 版はまだ配布物として正式リリース
+# していないため、release-please / release-build.yml（Swift 版）とは独立に置く。将来 Rust 版を
+# 正式リリースする際の統合方針は別途判断する。
+#
+# 署名は Swift 版の release-build.yml と同じ **アドホック**（`codesign -s -`）。
+# Developer ID / notarization は導入しない。
+on:
+  workflow_dispatch:
+
+jobs:
+  bundle:
+    name: bundle (macos-15)
+    runs-on: macos-15
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: Bundle (build + package + ad-hoc sign)
+        run: ./scripts/bundle-macos.sh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LaboLabo-rs-macos
+          path: rust/target/bundle/*.zip
+          if-no-files-found: error
