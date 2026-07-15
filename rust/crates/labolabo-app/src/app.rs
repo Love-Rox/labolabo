@@ -83,6 +83,7 @@ use crate::selection::{self, CellPos};
 use crate::settings::{self, AppSettings};
 use crate::sidebar;
 use crate::task_workspace::{self, PaneDragHover, PaneRuntime, TabDragPayload, TaskWorkspace};
+use crate::theme;
 
 /// Initial grid size for a pane created after startup with no viewport to
 /// measure yet (new tab / split within an already-rendered Task, or the
@@ -2787,10 +2788,12 @@ impl Render for LaboLaboApp {
                     cx,
                 )
             } else {
-                empty_state("Loading task...")
+                empty_state("タスクを読み込み中…")
             }
         } else {
-            empty_state("No task selected. Use \"+ Attached\" or \"+ Worktree\" to start one.")
+            empty_state(
+                "タスクが選択されていません。左上の + アイコンからフォルダまたは worktree で開始してください。",
+            )
         };
 
         // The selected Task's Git pane -- a fixed pane to the right of the
@@ -2798,11 +2801,14 @@ impl Render for LaboLaboApp {
         // comment). `None` whenever no Task is selected or its pane is
         // currently hidden, in which case `.children(..)` below simply adds
         // no third child.
+        let git_pane_spec = self.spec.clone();
         let git_pane_el = self.selected_task_id.clone().and_then(|task_id| {
             self.workspaces
                 .get(&task_id)
                 .filter(|workspace| workspace.git.visible)
-                .map(|workspace| git_pane::render_git_pane(&task_id, &workspace.git, cx))
+                .map(|workspace| {
+                    git_pane::render_git_pane(&task_id, &workspace.git, &git_pane_spec, cx)
+                })
         });
 
         // The Cmd+, settings overlay (`crate::settings`) -- `None` (no
@@ -2836,7 +2842,7 @@ impl Render for LaboLaboApp {
             .flex()
             .flex_row()
             .size_full()
-            .bg(rgb(0x000000))
+            .bg(rgb(theme::surface::ROOT))
             .child(sidebar_el)
             .child(workspace_el)
             .children(git_pane_el)
@@ -2863,7 +2869,7 @@ fn empty_state(message: &'static str) -> gpui::AnyElement {
         .flex()
         .items_center()
         .justify_center()
-        .text_color(rgb(0x8a8a8a))
+        .text_color(rgb(theme::text::SECONDARY))
         .child(message)
         .into_any_element()
 }

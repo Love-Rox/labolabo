@@ -16,7 +16,7 @@
 //! handle_sidebar_folder_drop`).
 
 use gpui::{
-    div, prelude::*, px, rgb, rgba, Context, ExternalPaths, IntoElement, MouseButton,
+    div, prelude::*, px, rgb, rgba, App, Context, ExternalPaths, IntoElement, MouseButton,
     MouseDownEvent, Render, SharedString, Window,
 };
 
@@ -24,6 +24,7 @@ use labolabo_core::{Task, TaskKind};
 
 use crate::app::LaboLaboApp;
 use crate::task_workspace::status_dot_color;
+use crate::theme;
 
 /// Background tint applied to a Task row while a same-repo row is being
 /// dragged over it (`.drag_over::<TaskDragPayload>`) -- "drop here" for
@@ -34,10 +35,10 @@ use crate::task_workspace::status_dot_color;
 /// different part of the UI -- there's no shared-meaning requirement
 /// across the two DnD systems the way §3.1 requires within the
 /// terminal-pane one.
-const TASK_ROW_DROP_HIGHLIGHT_COLOR: u32 = 0x30d1584d;
+const TASK_ROW_DROP_HIGHLIGHT_COLOR: u32 = theme::with_alpha(theme::dnd::REORDER, 0x4d);
 /// Background tint applied to the whole sidebar while an OS folder is
 /// being dragged over it (`.drag_over::<ExternalPaths>`).
-const SIDEBAR_FOLDER_DROP_HIGHLIGHT_COLOR: u32 = 0x30d1582a;
+const SIDEBAR_FOLDER_DROP_HIGHLIGHT_COLOR: u32 = theme::with_alpha(theme::dnd::REORDER, 0x2a);
 
 /// Payload of an in-progress Task-row drag (`render`'s per-row `.on_drag`):
 /// the dragged Task's id plus its repo key, so a drop target's `can_drop`
@@ -60,9 +61,37 @@ impl Render for TaskDragPreview {
             .px_2()
             .py_1()
             .rounded_sm()
-            .bg(rgb(0x3a3a3a))
-            .text_color(rgb(0xe5e5e5))
-            .text_size(px(11.0))
+            .bg(rgb(theme::surface::ACTIVE))
+            .text_color(rgb(theme::text::PRIMARY))
+            .text_size(px(theme::font_size::CAPTION))
+            .child(self.0.clone())
+    }
+}
+
+/// A minimal text-only tooltip content view. gpui 0.2's `Div::tooltip`
+/// (`elements/div.rs`) already provides the hover-delay (~500ms), auto
+/// positioning, and dismiss-on-scroll/click machinery for free -- it just
+/// needs a `Render`-implementing view to show, and ships no ready-made one,
+/// so this is the same small-`Render`-struct shape as [`TaskDragPreview`]/
+/// `task_workspace::TabDragPreview` above.
+///
+/// Used by [`icon_button`] (the sidebar's two "new Task" icon buttons --
+/// see that function's doc comment for why icons + tooltip replaced the
+/// previous two-text-button row) and the changed-file conflict badge below.
+struct IconTooltip(SharedString);
+
+impl Render for IconTooltip {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .bg(rgb(theme::surface::RAISED))
+            .border_1()
+            .border_color(rgb(theme::surface::STROKE))
+            .text_color(rgb(theme::text::PRIMARY))
+            .text_size(px(theme::font_size::CAPTION))
+            .max_w(px(240.0))
             .child(self.0.clone())
     }
 }
@@ -110,6 +139,53 @@ fn kind_marker(kind: &TaskKind) -> &'static str {
     }
 }
 
+/// A small square icon button + native tooltip -- the sidebar's "start a
+/// new Task" affordances (`plans/012` §1's "同じダイアログの選択肢").
+///
+/// Previously two text-labeled buttons side by side ("+ Attached"/
+/// "+ Worktree"); once translated to Japanese ("+ 既存フォルダ"/"+ 新規
+/// worktree") they no longer fit [`SIDEBAR_WIDTH`] at its minimum (reported
+/// on-device: the row overflowed the sidebar). Rather than a single
+/// full-width button opening a 2-choice overlay (`settings.rs`'s modal
+/// pattern, also considered), this keeps both actions a single click away
+/// as compact icon buttons, using glyphs already established elsewhere in
+/// this module ([`kind_marker`]'s "⎇" = worktree) plus a plain "+", with
+/// the full label carried by gpui 0.2's own `Div::tooltip` (a real API,
+/// not hand-rolled -- confirmed in `elements/div.rs`: ~500ms show delay,
+/// auto-positioning, dismiss-on-scroll/click, all built in) instead of
+/// squeezing text onto the button face. No emoji (project policy) -- both
+/// glyphs are plain Unicode the UI font already renders elsewhere in this
+/// same view.
+///
+/// Not implemented: the "2 個目以降は遅延なしで即表示" toolbar convention
+/// (hovering a second nearby tooltip skips the delay) -- gpui 0.2's
+/// `Div::tooltip` applies its ~500ms delay per element with no exposed hook
+/// to shortcut it based on a just-dismissed sibling tooltip, and building
+/// that ourselves (tracking "was *any* tooltip visible in the last N ms"
+/// app-wide) was judged not worth it for two adjacent buttons.
+fn icon_button(
+    id: &'static str,
+    glyph: &'static str,
+    tooltip_text: &'static str,
+    on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .w(px(28.0))
+        .h(px(28.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_sm()
+        .bg(rgb(theme::surface::RAISED))
+        .text_color(rgb(theme::text::PRIMARY))
+        .hover(|el| el.bg(rgb(theme::surface::ACTIVE)))
+        .active(|el| el.opacity(0.8))
+        .tooltip(move |_window, cx| cx.new(|_| IconTooltip(tooltip_text.into())).into())
+        .on_mouse_down(MouseButton::Left, on_click)
+        .child(glyph)
+}
+
 pub fn render(app: &LaboLaboApp, cx: &mut Context<LaboLaboApp>) -> impl IntoElement {
     let groups = group_tasks_by_repo(app.tasks());
     let selected = app.selected_task_id().map(str::to_string);
@@ -118,8 +194,8 @@ pub fn render(app: &LaboLaboApp, cx: &mut Context<LaboLaboApp>) -> impl IntoElem
     for group in groups {
         let mut group_el = div().flex().flex_col().gap_1().child(
             div()
-                .text_color(rgb(0x8a8a8a))
-                .text_size(px(11.0))
+                .text_color(rgb(theme::text::SECONDARY))
+                .text_size(px(theme::font_size::CAPTION))
                 .px_2()
                 .child(SharedString::from(group.repo_name.to_string())),
         );
@@ -131,7 +207,19 @@ pub fn render(app: &LaboLaboApp, cx: &mut Context<LaboLaboApp>) -> impl IntoElem
             // whatever Git status each has cached so far -- see
             // `LaboLaboApp::task_conflicts`'s doc comment for the "only
             // status-fetched Tasks participate" limitation.
-            let has_conflict = !app.task_conflicts(&task.id).is_empty();
+            let conflicts = app.task_conflicts(&task.id);
+            let has_conflict = !conflicts.is_empty();
+            let conflict_tooltip: SharedString = format!(
+                "{} 件のファイルが競合: {}",
+                conflicts.len(),
+                conflicts
+                    .iter()
+                    .map(|c| c.path.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+            .into();
+            let conflict_badge_id: SharedString = format!("conflict-badge-{}", task.id).into();
             let row_id: SharedString = format!("task-row-{}", task.id).into();
             let drag_task_id = task.id.clone();
             let drag_repo_key = task.repo_key.clone();
@@ -147,18 +235,23 @@ pub fn render(app: &LaboLaboApp, cx: &mut Context<LaboLaboApp>) -> impl IntoElem
                 .px_2()
                 .py_1()
                 .rounded_sm()
-                .when(is_selected, |el| el.bg(rgb(0x3a3a3a)))
-                .text_color(rgb(0xe5e5e5))
+                .when(is_selected, |el| el.bg(rgb(theme::surface::ACTIVE)))
+                .text_color(rgb(theme::text::PRIMARY))
+                .text_size(px(theme::font_size::LABEL))
                 .child(kind_marker(&task.kind))
                 .child(SharedString::from(task.title.clone()))
                 .when_some(status_color, |el, color| {
                     el.child(div().w(px(6.0)).h(px(6.0)).rounded_full().bg(rgb(color)))
                 })
-                .when(has_conflict, |el| {
+                .when(has_conflict, move |el| {
                     el.child(
                         div()
-                            .text_size(px(11.0))
-                            .text_color(rgb(0xffa500))
+                            .id(conflict_badge_id)
+                            .text_size(px(theme::font_size::CAPTION))
+                            .text_color(rgb(theme::status::CONFLICT))
+                            .tooltip(move |_window, cx| {
+                                cx.new(|_| IconTooltip(conflict_tooltip.clone())).into()
+                            })
                             .child("\u{26A0}"),
                     )
                 })
@@ -213,45 +306,31 @@ pub fn render(app: &LaboLaboApp, cx: &mut Context<LaboLaboApp>) -> impl IntoElem
         .gap_1()
         .px_2()
         .py_1()
-        .child(
-            div()
-                .px_2()
-                .py_1()
-                .rounded_sm()
-                .bg(rgb(0x2f2f2f))
-                .text_color(rgb(0xe5e5e5))
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _: &MouseDownEvent, window, cx| {
-                        this.start_new_attached_task(window, cx);
-                    }),
-                )
-                .child("+ Attached"),
-        )
-        .child(
-            div()
-                .px_2()
-                .py_1()
-                .rounded_sm()
-                .bg(rgb(0x2f2f2f))
-                .text_color(rgb(0xe5e5e5))
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _: &MouseDownEvent, window, cx| {
-                        this.start_new_worktree_task(window, cx);
-                    }),
-                )
-                .child("+ Worktree"),
-        );
+        .child(icon_button(
+            "new-attached-task",
+            "+",
+            "既存のフォルダを開く…",
+            cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                this.start_new_attached_task(window, cx);
+            }),
+        ))
+        .child(icon_button(
+            "new-worktree-task",
+            "+\u{2387}",
+            "新規セッション（worktree を作成）…",
+            cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                this.start_new_worktree_task(window, cx);
+            }),
+        ));
 
     let mut sidebar = div()
         .flex()
         .flex_col()
         .w(px(SIDEBAR_WIDTH))
         .h_full()
-        .bg(rgb(0x1a1a1a))
+        .bg(rgb(theme::surface::SUNKEN))
         .border_1()
-        .border_color(rgb(0x1c1c1c))
+        .border_color(rgb(theme::surface::STROKE))
         // OS folder drop -> new attached Task (`plans/012` §3): any
         // `ExternalPaths` dropped anywhere on the sidebar (including on
         // top of a Task row -- rows have no `on_drop::<ExternalPaths>` of
@@ -271,8 +350,8 @@ pub fn render(app: &LaboLaboApp, cx: &mut Context<LaboLaboApp>) -> impl IntoElem
             div()
                 .px_2()
                 .py_1()
-                .text_color(rgb(0xff6b6b))
-                .text_size(px(11.0))
+                .text_color(rgb(theme::status::CONFLICT))
+                .text_size(px(theme::font_size::CAPTION))
                 .child(SharedString::from(error.to_string())),
         );
     }

@@ -31,6 +31,7 @@ mod selection;
 mod settings;
 mod sidebar;
 mod task_workspace;
+mod theme;
 
 use gpui::{
     prelude::*, px, size, App, Application, Bounds, KeyBinding, WindowBounds, WindowOptions,
