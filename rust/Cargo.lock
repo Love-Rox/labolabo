@@ -2999,6 +2999,7 @@ dependencies = [
  "labolabo-core",
  "labolabo-term",
  "serde_json",
+ "unicode-width",
  "uuid",
 ]
 

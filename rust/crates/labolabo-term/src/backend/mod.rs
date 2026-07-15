@@ -65,4 +65,15 @@ pub trait VtBackend: 'static {
     /// snapshot available this time" (a transient backend error) -- the
     /// worker simply skips publishing rather than tearing down the session.
     fn build_snapshot(&mut self) -> Option<GridSnapshot>;
+
+    /// Whether bracketed paste mode (DECSET `2004`) is currently enabled.
+    ///
+    /// Queried after every processed PTY byte batch and cached in a plain
+    /// `bool` the caller thread can read without blocking (see
+    /// `TermSession::bracketed_paste`) -- the same "publish a cheap plain-
+    /// data snapshot for the caller thread" shape as [`Self::build_snapshot`],
+    /// just for a single flag instead of the whole grid. A pasting caller
+    /// (`labolabo-app`'s Cmd+V handler) uses this to decide whether to wrap
+    /// the pasted text in `ESC[200~...ESC[201~`.
+    fn bracketed_paste(&self) -> bool;
 }

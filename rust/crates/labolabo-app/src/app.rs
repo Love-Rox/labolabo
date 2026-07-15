@@ -49,11 +49,13 @@
 //! `TaskWorkspace::new`'s doc comment).
 
 use std::collections::HashMap;
+use std::ops::Range;
 use std::path::Path;
 
 use gpui::{
-    actions, div, prelude::*, rgb, Context, FocusHandle, IntoElement, KeyDownEvent,
-    PathPromptOptions, Render, Task as GpuiTask, Window,
+    actions, div, point, prelude::*, px, rgb, size, Bounds, Context, EntityInputHandler,
+    FocusHandle, IntoElement, KeyDownEvent, PathPromptOptions, Pixels, Point, Render,
+    Task as GpuiTask, UTF16Selection, Window,
 };
 
 use labolabo_core::{
@@ -68,11 +70,13 @@ use crate::focus;
 use crate::ghostty_config::FontConfig;
 use crate::grid;
 use crate::hooks::{self, HookRuntime};
+use crate::ime;
 use crate::keys::keystroke_to_bytes;
 use crate::new_task;
+use crate::paste;
 use crate::render::RenderSpec;
 use crate::sidebar;
-use crate::task_workspace::{self, TaskWorkspace};
+use crate::task_workspace::{self, PaneRuntime, TaskWorkspace};
 
 /// Initial grid size for a pane created after startup with no viewport to
 /// measure yet (new tab / split within an already-rendered Task, or the
@@ -94,6 +98,7 @@ actions!(
         CloseTab,
         SplitRight,
         SplitDown,
+        Paste,
         FocusNextPane,
         FocusPrevPane,
         SelectTab1,
@@ -150,6 +155,29 @@ pub struct LaboLaboApp {
     /// delivery (every in-flight/future `labolabo` CLI request would time
     /// out instead of being answered).
     _control_bridge_task: GpuiTask<()>,
+    /// The focused pane's live IME composition (preedit/marked) text, if
+    /// any -- see this module's `EntityInputHandler` impl doc comment for
+    /// the full IME design. `None` whenever no composition is in progress
+    /// (the common case: plain typing never sets this).
+    active_preedit: Option<PreeditState>,
+}
+
+/// The focused pane's in-progress IME composition, tracked by
+/// `LaboLaboApp::active_preedit` and rendered inline by
+/// `task_workspace::render_leaf` (via `render::paint_preedit`).
+///
+/// Tagged with the `(task, pane)` it belongs to -- not just carried as a
+/// bare `String` -- so that if focus moves to a different pane mid-
+/// composition without the platform ever calling `unmark_text` (an edge
+/// case; the OS is expected to always clean up on focus loss, but this is
+/// cheap insurance against a stale overlay leaking onto the wrong pane),
+/// `task_workspace::render_leaf` simply stops rendering it for any pane
+/// other than the one it was recorded against.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PreeditState {
+    pub(crate) task_id: String,
+    pub(crate) pane_id: PaneId,
+    pub(crate) text: String,
 }
 
 impl LaboLaboApp {
@@ -242,6 +270,7 @@ impl LaboLaboApp {
             _agent_event_task: agent_event_task,
             control: control_runtime,
             _control_bridge_task: control_bridge_task,
+            active_preedit: None,
         };
 
         if let Some(id) = selected_task_id {
@@ -1209,20 +1238,48 @@ impl LaboLaboApp {
 
     // MARK: - input routing
 
-    fn key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, _cx: &mut Context<Self>) {
-        let Some(task_id) = self.selected_task_id.as_deref() else {
-            return;
-        };
-        let Some(workspace) = self.workspaces.get(task_id) else {
-            return;
-        };
-        let Some(runtime) = workspace.runtimes.get(&workspace.focused_pane) else {
-            return;
-        };
-        // TODO(W5a): IME composition is not wired up here -- see
-        // `keys::keystroke_to_bytes`'s module doc comment.
+    /// The currently focused pane's live runtime, if any -- shared by
+    /// [`Self::write_focused_pane_input`], [`Self::action_paste`], and the
+    /// `EntityInputHandler` impl below (`bounds_for_range` needs the
+    /// runtime's live cursor position; the others need `session` itself).
+    fn focused_pane_runtime(&self) -> Option<&PaneRuntime> {
+        let task_id = self.selected_task_id.as_deref()?;
+        let workspace = self.workspaces.get(task_id)?;
+        workspace.runtimes.get(&workspace.focused_pane)
+    }
+
+    /// Write `bytes` to the focused pane's PTY. Returns whether there was a
+    /// focused pane to write to (used by [`Self::key_down`] to decide
+    /// whether to claim the keystroke -- see that method's doc comment).
+    fn write_focused_pane_input(&self, bytes: &[u8]) -> bool {
+        if let Some(runtime) = self.focused_pane_runtime() {
+            runtime.session.write_input(bytes);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Handles every keystroke this app's root `div` sees. Only the keys
+    /// `keys::keystroke_to_bytes` recognizes (Enter/Backspace/Tab/Escape/
+    /// arrows, a bare Ctrl-<letter>) are written directly here -- plain
+    /// printable text (including space) is deliberately left unhandled so
+    /// it reaches the platform's IME/text-input machinery instead, arriving
+    /// via this struct's `EntityInputHandler` impl below (see `keys.rs`'s
+    /// module doc comment for the full reasoning).
+    ///
+    /// `cx.stop_propagation()` on a claimed keystroke is what prevents gpui
+    /// from *also* forwarding it to the input handler (macOS's
+    /// `NSTextInputContext`, or the X11/Wayland equivalent) once one is
+    /// registered -- without it, e.g. Ctrl-A would additionally reach
+    /// `doCommandBySelector:` on macOS (Cocoa's default Emacs-style text
+    /// key bindings map it to `moveToBeginningOfLine:`), re-dispatching this
+    /// same handler a second time for the one keystroke.
+    fn key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         if let Some(bytes) = keystroke_to_bytes(&event.keystroke) {
-            runtime.session.write_input(&bytes);
+            if self.write_focused_pane_input(&bytes) {
+                cx.stop_propagation();
+            }
         }
     }
 
@@ -1232,6 +1289,28 @@ impl LaboLaboApp {
         let task_id = self.selected_task_id.clone()?;
         let focused = self.workspaces.get(&task_id)?.focused_pane;
         Some((task_id, focused))
+    }
+
+    /// Cmd+V: writes the system clipboard's text to the focused pane's PTY,
+    /// newline-normalized and (when the pane's `Terminal::bracketed_paste()`
+    /// reports DECSET `2004` is enabled) wrapped in `ESC[200~...ESC[201~` --
+    /// see `paste::encode_paste`'s doc comment for the full contract. A
+    /// clipboard with no text (empty, or an image-only entry) or no
+    /// currently focused pane is a silent no-op. Copy (selection -> system
+    /// clipboard) is out of this wave's scope -- text selection itself
+    /// isn't implemented yet.
+    fn action_paste(&mut self, _: &Paste, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
+            return;
+        };
+        if text.is_empty() {
+            return;
+        }
+        let Some(runtime) = self.focused_pane_runtime() else {
+            return;
+        };
+        let bytes = paste::encode_paste(&text, runtime.session.bracketed_paste());
+        runtime.session.write_input(&bytes);
     }
 
     fn action_new_tab(&mut self, _: &NewTab, window: &mut Window, cx: &mut Context<Self>) {
@@ -1321,6 +1400,160 @@ impl LaboLaboApp {
     }
 }
 
+/// IME (input method) integration: gpui's platform-agnostic surface over
+/// macOS's `NSTextInputClient` (and the X11/Wayland IBus/fcitx equivalents).
+/// `task_workspace::render_leaf` registers an `ElementInputHandler<Self>`
+/// (via `Window::handle_input`) against the focused pane's canvas every
+/// frame; the platform then routes text input -- both plain typing and IME
+/// composition -- through the methods below instead of (or in addition to,
+/// see `keys.rs`'s module doc comment for how the two are kept from
+/// double-sending) raw `KeyDownEvent`s.
+///
+/// A terminal has no editable "document" of its own -- once text is
+/// written to the PTY it's the child program's problem, not ours -- so
+/// every method below treats the (nonexistent) document as always empty
+/// except for whatever the *current* IME composition contributes: there is
+/// no persistent selection, and `replace_text_in_range`/
+/// `replace_and_mark_text_in_range` both ignore whatever `range` the
+/// platform passes (there's nothing addressable to replace) and act purely
+/// on the given text.
+impl EntityInputHandler for LaboLaboApp {
+    /// Only ever asked about the live preedit string (there is no other
+    /// "document" -- see this impl's doc comment); `None` otherwise.
+    fn text_for_range(
+        &mut self,
+        range_utf16: Range<usize>,
+        adjusted_range: &mut Option<Range<usize>>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<String> {
+        let preedit = self.active_preedit.as_ref()?;
+        *adjusted_range = Some(range_utf16.clone());
+        Some(ime::utf16_slice(&preedit.text, range_utf16))
+    }
+
+    /// A terminal never has a persistent text selection to report; while
+    /// composing, the caret is always at the end of the preedit string (we
+    /// don't support moving it within an in-progress composition).
+    fn selected_text_range(
+        &mut self,
+        _ignore_disabled_input: bool,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<UTF16Selection> {
+        let preedit = self.active_preedit.as_ref()?;
+        let len = ime::utf16_len(&preedit.text);
+        Some(UTF16Selection {
+            range: len..len,
+            reversed: false,
+        })
+    }
+
+    /// `Some(0..len)` while an IME composition is in progress, `None`
+    /// otherwise -- this is what the platform (and `keys.rs`'s design,
+    /// via macOS's `is_composing` check) uses to decide whether a keystroke
+    /// belongs to the IME or to plain dispatch.
+    fn marked_text_range(
+        &self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Range<usize>> {
+        self.active_preedit
+            .as_ref()
+            .map(|preedit| 0..ime::utf16_len(&preedit.text))
+    }
+
+    /// IME composition cancelled (e.g. Escape while composing, or focus
+    /// loss) without committing -- clear the preedit and redraw. Never
+    /// writes to the PTY.
+    fn unmark_text(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.active_preedit.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// A commit: either a plain (non-composing) character/string being
+    /// typed, or an IME composition's final confirmed text. Either way, any
+    /// in-progress preedit is cleared and `text` is written verbatim to the
+    /// focused pane's PTY as UTF-8 bytes.
+    fn replace_text_in_range(
+        &mut self,
+        _range: Option<Range<usize>>,
+        text: &str,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.active_preedit = None;
+        if !text.is_empty() {
+            self.write_focused_pane_input(text.as_bytes());
+        }
+        cx.notify();
+    }
+
+    /// An IME composition update (`setMarkedText:`): `new_text` is the
+    /// current preedit string. Never written to the PTY -- only tracked, so
+    /// `task_workspace::render_leaf` can paint it inline over the focused
+    /// pane's cursor (`render::paint_preedit`) -- until a later
+    /// `replace_text_in_range` commits it or `unmark_text` cancels it.
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        _range: Option<Range<usize>>,
+        new_text: &str,
+        _new_selected_range: Option<Range<usize>>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.active_preedit = if new_text.is_empty() {
+            None
+        } else {
+            self.selected_task_and_focused_pane()
+                .map(|(task_id, pane_id)| PreeditState {
+                    task_id,
+                    pane_id,
+                    text: new_text.to_string(),
+                })
+        };
+        cx.notify();
+    }
+
+    /// The focused pane's current cursor cell, in the input-handling
+    /// canvas's own coordinate space (`element_bounds`, exactly as captured
+    /// when `task_workspace::render_leaf` constructed the
+    /// `ElementInputHandler` this frame) -- used by the platform to
+    /// position the IME candidate window right over the terminal cursor.
+    fn bounds_for_range(
+        &mut self,
+        _range_utf16: Range<usize>,
+        element_bounds: Bounds<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Bounds<Pixels>> {
+        let runtime = self.focused_pane_runtime()?;
+        let cursor = runtime.session.snapshot().cursor;
+        let origin = element_bounds.origin
+            + point(
+                px(cursor.col as f32 * self.spec.cell_width),
+                px(cursor.row as f32 * self.spec.cell_height),
+            );
+        Some(Bounds::new(
+            origin,
+            size(px(self.spec.cell_width), px(self.spec.cell_height)),
+        ))
+    }
+
+    /// The reverse of `bounds_for_range` (a screen point -> a document
+    /// offset) -- not supported, for the same "no addressable document"
+    /// reason `text_for_range` mostly isn't either.
+    fn character_index_for_point(
+        &mut self,
+        _point: Point<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<usize> {
+        None
+    }
+}
+
 /// A single fresh terminal pane's `TileLayout` -- the initial layout for
 /// every newly created Task (both kinds).
 fn single_terminal_layout() -> labolabo_core::TileLayout {
@@ -1348,6 +1581,8 @@ impl Render for LaboLaboApp {
         let workspace_el = if let Some(task_id) = self.selected_task_id.clone() {
             if let Some(workspace) = self.workspaces.get(&task_id) {
                 let spec = self.spec.clone();
+                let focus_handle = self.focus_handle.clone();
+                let active_preedit = self.active_preedit.clone();
                 let focused_pane = workspace.focused_pane;
                 task_workspace::render_tile(
                     &task_id,
@@ -1356,6 +1591,8 @@ impl Render for LaboLaboApp {
                     &workspace.pane_status,
                     focused_pane,
                     &spec,
+                    &focus_handle,
+                    active_preedit.as_ref(),
                     cx,
                 )
             } else {
@@ -1372,6 +1609,7 @@ impl Render for LaboLaboApp {
             .on_action(cx.listener(Self::action_close_tab))
             .on_action(cx.listener(Self::action_split_right))
             .on_action(cx.listener(Self::action_split_down))
+            .on_action(cx.listener(Self::action_paste))
             .on_action(cx.listener(Self::action_focus_next_pane))
             .on_action(cx.listener(Self::action_focus_prev_pane))
             .on_action(cx.listener(Self::action_select_tab_1))
