@@ -47,12 +47,14 @@
 //! is the same shape for Task layouts).
 
 use gpui::{
-    div, prelude::*, px, rgb, rgba, AnyElement, Context, IntoElement, MouseButton, MouseDownEvent,
+    div, prelude::*, px, rgb, rgba, Animation, AnimationExt, AnyElement, Context, IntoElement,
+    MouseButton, MouseDownEvent,
 };
 
 use labolabo_core::TaskDatabase;
 
 use crate::app::LaboLaboApp;
+use crate::motion;
 use crate::theme;
 
 /// Default scrollback-line-count -- re-exported from `labolabo_term` (the
@@ -141,6 +143,11 @@ const BORDER_COLOR: u32 = theme::surface::STROKE;
 const BUTTON_BG: u32 = theme::surface::RAISED;
 const TEXT_PRIMARY: u32 = theme::text::PRIMARY;
 const TEXT_SECONDARY: u32 = theme::text::SECONDARY;
+/// Panel width -- fixed, used both for layout and as the M4 entrance
+/// animation's "gather in" base (see [`render_settings_overlay`]'s doc
+/// comment on why this animates the panel's own width rather than a real
+/// 2D scale transform).
+const PANEL_WIDTH: f32 = 420.0;
 
 /// Renders the settings overlay (backdrop + centered panel) when
 /// `app.settings_open()` -- callers append this as the last child of the
@@ -156,6 +163,40 @@ const TEXT_SECONDARY: u32 = theme::text::SECONDARY;
 /// safer to ship an explicit "閉じる" button (and `Cmd+,` toggles the panel
 /// closed again) than to guess at bubbling behavior and risk clicks inside
 /// the panel closing it.
+///
+/// ## Entrance animation (`plans/014` M4)
+///
+/// Because this element only exists in the tree while `settings_open()`,
+/// every time it (re)appears is a fresh mount from gpui's point of view --
+/// exactly the "first frame this element id shows up" moment
+/// [`gpui::AnimationElement`] needs to start a brand new, correctly-timed
+/// oneshot, so no extra open/close bookkeeping is needed here beyond the
+/// existing `settings_open` flag.
+///
+/// The panel fades in (`opacity 0 -> 1`) over [`motion::OVERLAY_ENTER`] with
+/// [`motion::ease_out_strong`], and -- unless [`motion::reduce_motion`] is
+/// set -- also "gathers in" by animating its own width from ~97% to 100%
+/// of [`PANEL_WIDTH`]. gpui 0.2's `Styled` trait has no generic 2D
+/// scale/transform (only `svg` elements get a transformation matrix, per
+/// `elements/svg.rs`), so a literal `scale(0.97 -> 1.0)` centered transform
+/// -- what `plans/014` M4 asks for -- isn't directly expressible; animating
+/// the panel's own width is used as an approximation instead, since the
+/// parent's `.items_center().justify_center()` re-centers it every frame as
+/// its size changes, which reads as "growing from the center" for this
+/// rectangular panel without needing a true transform. This is a documented
+/// deviation from the plan's literal wording, not an omission: it satisfies
+/// the "feel チェック" note ("僅かに「寄ってくる」こと") while staying
+/// within gpui 0.2's public API. The backdrop fades in over the same
+/// duration, per the plan's "背景の薄暗幕も同時にフェード".
+///
+/// Exit is instant (no fade-out): implementing one would need the element
+/// to keep rendering for [`motion::OVERLAY_EXIT`] *after* `settings_open`
+/// flips false (a "closing" phase with its own timer, since this function
+/// simply returns `None` and the element vanishes from the tree the moment
+/// `settings_open` is false) -- a small state machine disproportionate to a
+/// settings panel's close action. `plans/014` M4 explicitly allows this
+/// trade-off ("コスト高なら即時クローズで可 -- 判断を PR に明記"); recorded
+/// here as that judgment call.
 pub fn render_settings_overlay(
     app: &LaboLaboApp,
     cx: &mut Context<LaboLaboApp>,
@@ -164,12 +205,13 @@ pub fn render_settings_overlay(
         return None;
     }
     let settings = *app.settings();
+    let reduce_motion = motion::reduce_motion();
 
     let panel = div()
         .flex()
         .flex_col()
         .gap_3()
-        .w(px(420.0))
+        .w(px(PANEL_WIDTH))
         .p_4()
         .rounded_md()
         .bg(rgb(PANEL_BG))
@@ -219,17 +261,45 @@ pub fn render_settings_overlay(
         )
         .child(scrollback_row(settings.scrollback_lines, cx));
 
-    Some(
-        div()
-            .absolute()
-            .inset_0()
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(rgba(OVERLAY_BG))
-            .child(panel)
-            .into_any_element(),
-    )
+    // The "gather in" width nudge lives on the panel alone (no `.opacity()`
+    // here) -- `opacity` composes multiplicatively with an ancestor's
+    // (`Window::with_element_opacity`), so animating it on both this panel
+    // *and* the backdrop below would fade the panel in as `t * t`, visibly
+    // lagging behind the backdrop instead of appearing "together". A single
+    // shared fade on the backdrop (which the panel is a child of) already
+    // satisfies "背景の薄暗幕も同時にフェード" -- they fade as one unit.
+    let panel = panel.with_animation(
+        "settings-panel-enter",
+        Animation::new(motion::OVERLAY_ENTER).with_easing(motion::ease_out_strong()),
+        move |el, t| {
+            if reduce_motion {
+                // Reduce Motion (`plans/014` principle 4): position/size
+                // movement is dropped, so the panel appears at its final
+                // width immediately -- only the shared backdrop-level
+                // opacity fade below still plays.
+                el
+            } else {
+                let width = PANEL_WIDTH * (0.97 + 0.03 * t);
+                el.w(px(width))
+            }
+        },
+    );
+
+    let backdrop = div()
+        .absolute()
+        .inset_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(rgba(OVERLAY_BG))
+        .child(panel)
+        .with_animation(
+            "settings-backdrop-enter",
+            Animation::new(motion::OVERLAY_ENTER).with_easing(motion::ease_out_strong()),
+            |el, t| el.opacity(t),
+        );
+
+    Some(backdrop.into_any_element())
 }
 
 fn close_button(cx: &mut Context<LaboLaboApp>) -> impl IntoElement {
@@ -240,6 +310,8 @@ fn close_button(cx: &mut Context<LaboLaboApp>) -> impl IntoElement {
         .rounded_sm()
         .bg(rgb(BUTTON_BG))
         .text_color(rgb(TEXT_PRIMARY))
+        .hover(|el| el.bg(rgb(theme::surface::ACTIVE)))
+        .active(|el| el.opacity(0.8))
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(|this, _: &MouseDownEvent, _window, cx| {
@@ -272,6 +344,8 @@ fn toggle_row(
         .p_2()
         .rounded_sm()
         .bg(rgb(BUTTON_BG))
+        .hover(|el| el.bg(rgb(theme::surface::ACTIVE)))
+        .active(|el| el.opacity(0.8))
         .child(
             div()
                 .flex()
@@ -338,6 +412,8 @@ fn stepper_button(
         .rounded_sm()
         .bg(rgb(theme::surface::ACTIVE))
         .text_color(rgb(TEXT_PRIMARY))
+        .hover(|el| el.opacity(0.85))
+        .active(|el| el.opacity(0.7))
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |this, _: &MouseDownEvent, _window, cx| {
