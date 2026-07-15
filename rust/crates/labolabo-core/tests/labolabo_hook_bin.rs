@@ -9,6 +9,12 @@
 //! in-process; the three LABOLABO_PANE present/absent/non-JSON scenarios
 //! are covered by `hooks.rs`'s in-process unit tests instead (see the wave
 //! 4b porting brief: "3 系統（純関数テスト）+ bin の end-to-end 1 件").
+//!
+//! Whole file is `#[cfg(unix)]`: both tests drive a real `std::os::unix::
+//! net::UnixListener` end to end, and `labolabo-hook`'s forwarding itself
+//! is `#[cfg(unix)]` (see `src/bin/labolabo-hook.rs`) -- there is nothing
+//! to exercise here on Windows yet.
+#![cfg(unix)]
 
 use std::io::{Read, Write};
 use std::os::unix::net::UnixListener;

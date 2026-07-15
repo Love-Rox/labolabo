@@ -165,7 +165,14 @@ fn resolve_git(locator: &dyn ToolLocating, arguments: &[String]) -> (PathBuf, Ve
     }
 }
 
-#[cfg(test)]
+// Every test below either resolves `git` through the real `ToolLocator`
+// (`#[cfg(not(unix))]` is an `unimplemented!()` stub -- see
+// `tool_locator.rs`'s module doc comment) or hardcodes a Unix executable
+// path (`/bin/echo`, the `/usr/bin/env git` fallback) that simply doesn't
+// exist on Windows. Windows `ToolLocator`/PATH support is future work, not
+// this crate's job today -- gate the whole module rather than work around
+// the stub.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};

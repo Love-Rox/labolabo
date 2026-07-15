@@ -1,0 +1,23 @@
+# Force LF line endings on checkout for every text file, regardless of the
+# checking-out machine's OS or local git config. Without this, GitHub's
+# `windows-latest` runners (default `core.autocrlf=true`) would silently
+# convert every text file to CRLF during `actions/checkout`, which matters
+# for two things in particular in `rust/` (see the windows CI job in
+# .github/workflows/ci.yml):
+#   - `cargo fmt --check`: rustfmt's default `newline_style = "Auto"`
+#     follows whatever line endings a file already has, so a CRLF-converted
+#     checkout wouldn't even fail loudly here -- it would just silently
+#     drift from the LF-normalized style every other platform uses.
+#   - `rust/crates/labolabo-core/fixtures/{inputs,expected}/**`: the golden
+#     tests (`tests/golden.rs`) do byte-for-byte comparisons between real
+#     `git`-command output (always LF-terminated, even on Windows) parsed by
+#     this crate and checked-in "expected" fixtures -- a CRLF-converted
+#     input fixture would desync the comparison in a confusing way.
+* text=auto eol=lf
+
+# SQLite fixture: never text-convert. Git's own binary-detection heuristic
+# already catches this (SQLite's file header has a NUL byte well within the
+# first-8000-bytes scan), so `text=auto` above should already do the right
+# thing here -- this line just makes that intent explicit rather than
+# relying on the heuristic.
+rust/crates/labolabo-core/fixtures/store/*.db binary
