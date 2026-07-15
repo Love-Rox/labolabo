@@ -1,109 +1,88 @@
-//! The gpui root view: window state, the tile/tab tree (`labolabo_core::
-//! tiling::PaneTilingModel`), key/click routing, and the recursive render
-//! tree (split panes, each with its own tab bar + active terminal canvas).
+//! The gpui root view: the Task sidebar, the selected Task's tile/tab tree
+//! (`labolabo_core::tiling::PaneTilingModel`, one per loaded Task), key/click
+//! routing, and Task persistence.
 //!
-//! ## Tile/tab tree (wave 5b-2)
+//! ## Wave 5b-3: one window, many Tasks (`plans/012-task-model-and-control-
+//! cli.md` §1)
 //!
-//! `TerminalApp` used to own a flat `Vec<Tab>` (one tab group for the whole
-//! window, no splits) -- a deliberate placeholder, per that type's own doc
-//! comment. This wave replaces it with `labolabo_core::tiling::
-//! PaneTilingModel`, the same tile/tab tree ported from the Swift app's
-//! `PaneTilingModel.swift` (see that crate's `tiling.rs` module doc comment
-//! for the full porting story). One window is one [`PaneTilingModel`]; a
-//! [`PaneRuntime`] (a real `labolabo_term::Terminal` session + its redraw
-//! bridge) is kept for every `terminal`-kind [`labolabo_core::PaneItem`] in
-//! the tree, keyed by its stable [`PaneId`] -- including hidden (non-selected
-//! tab) panes, so their pty/scrollback survive tab switches, splits, and
-//! closes elsewhere in the tree, matching the Swift app's `contentCache`
-//! behavior. Only `PaneKind::Terminal` panes are ever created this wave
-//! (Files/Diff/Commits panes -- the changed-files/diff/commit-history views
-//! -- are a future wave's concern; `PaneTilingModel::default_layout()` isn't
-//! used here for that reason, see `TerminalApp::new`).
+//! Wave 5b-2's `TerminalApp` owned exactly one [`PaneTilingModel`] + one
+//! `PaneRuntime` map for the whole window (see that wave's doc comment,
+//! still accurate for what it describes -- it's the shape this wave
+//! generalizes). This wave replaces that with the plan's Task model: **one
+//! Task owns one [`crate::task_workspace::TaskWorkspace`]** (the same
+//! `PaneTilingModel` + per-pane `Terminal` runtimes, just Task-scoped
+//! instead of window-scoped), a left sidebar lists every Task grouped by
+//! repo (`crate::sidebar`), and clicking a Task switches which
+//! `TaskWorkspace` is rendered/receives keyboard input -- exactly wave
+//! 5b-2's tab-switch semantics ("hidden" Tasks' ptys/scrollback stay alive
+//! in [`LaboLaboApp::workspaces`]), just one level up the hierarchy.
 //!
-//! Focus (which pane's tab receives keystrokes) is tracked as a single
-//! `PaneId`, not a `NodeId` -- see `crate::focus`'s module doc comment for
-//! why, and for the pure (gpui-independent, unit-tested) focus-resolution
-//! logic split/close/tab-cycle rely on.
+//! Tasks and their `TileLayout` are persisted to a new, Rust-only SQLite
+//! database (`labolabo_core::store::TaskDatabase` -- see its module doc
+//! comment for the on-disk location and why it's a separate file from the
+//! Swift app's `SessionDatabase`). On launch, every `Active` Task is
+//! restored (`ensure_workspace_loaded` for the previously selected one,
+//! others lazily on first selection); the layout (split/tab structure +
+//! each leaf's selected tab) is restored from `TileLayout`, and every
+//! `terminal`-kind pane in it gets a **fresh** shell spawned in the Task's
+//! working directory (`Task::working_directory`) -- restoring the
+//! *container*, not terminal scrollback/agent-session content (that's
+//! future hooks-integration work, same caveat wave 5b-2 already carried for
+//! the single-Task case).
 //!
-//! Each split pane's terminal grid is sized from its own laid-out on-screen
-//! area (not the whole window) -- see [`render_leaf`]'s doc comment for how
-//! that reacts to both window resizes and split-ratio changes without this
-//! module having to reimplement gpui's own flex layout math.
+//! **Persistence timing**: every action handler that can change a Task's
+//! layout (add tab / split / close / select tab) calls
+//! [`LaboLaboApp::persist_workspace`] synchronously afterward, which
+//! snapshots the Task's current `TileLayout` and upserts the Task row. This
+//! is simpler than the plan's parenthetical example ("revision 変化で
+//! debounce 保存") -- there's no separate dirty-flag/timer, every layout-
+//! affecting action just re-saves immediately (a single cheap SQLite
+//! upsert) -- but satisfies the same requirement ("変更時に随時"). Selecting
+//! a Task also re-saves (`selectedTask` app-state key) so a restart resumes
+//! on the same Task.
 //!
-//! ## Session lifecycle
-//!
-//! A tab closes three ways, all funneling through [`TerminalApp::remove_pane`]
-//! (removal is always by pane **id**, never by tree position -- positions
-//! shift as the tree changes):
-//!
-//! - **The shell exits** (`exit`, or the child dying): the session's redraw
-//!   bridge sees [`TermEvent::Exit`] and calls [`TerminalApp::handle_pane_exit`],
-//!   which removes the pane without signaling it (the child is already dead).
-//! - **The user clicks a tab's "x"**, or **presses Cmd+W** (closes the
-//!   focused pane's active tab): [`TerminalApp::close_pane_user`] calls
-//!   [`labolabo_term::Terminal::shutdown`] (SIGHUP to the child -- what a real
-//!   terminal sends on window close) before removing the pane.
-//!
-//! When the tree's last pane's last tab closes (either way), the app quits
-//! (`cx.quit()`), matching Ghostty's close-last-surface behavior -- same as
-//! wave 5a, just decided from `model.panes().len() == 1` instead of an empty
-//! `Vec<Tab>`.
+//! **Out of this wave's scope** (per `plans/012` §1, and this wave's
+//! brief): Task rename/done/archive, DnD reordering (plan §3), the control
+//! CLI (plan §2), and restoring *which* pane had keyboard focus (only the
+//! tile/tab structure round-trips -- a freshly restored Task's focus
+//! defaults to its tree's first leaf's selected tab, see
+//! `TaskWorkspace::new`'s doc comment).
 
-use std::cell::Cell;
 use std::collections::HashMap;
-use std::rc::Rc;
-use std::sync::Arc;
-use std::thread;
-use std::time::Duration;
+use std::path::Path;
 
-use futures::channel::mpsc;
-use futures::StreamExt;
 use gpui::{
-    actions, canvas, div, prelude::*, px, relative, rgb, AnyElement, Context, FocusHandle,
-    IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, Render, SharedString, Task, Timer,
-    Window,
+    actions, div, prelude::*, rgb, Context, FocusHandle, IntoElement, KeyDownEvent,
+    PathPromptOptions, Render, Window,
 };
 
-use labolabo_core::{PaneId, PaneItem, PaneKind, PaneTilingModel, TileNode, TileOrientation};
-use labolabo_term::{ColorScheme, TermEvent, Terminal};
+use labolabo_core::{
+    PaneId, PaneItem, PaneKind, PaneTilingModel, Task, TaskDatabase, TaskStatus, TileNode,
+    TileOrientation,
+};
+use labolabo_term::{ColorScheme, Terminal};
 
 use crate::focus;
 use crate::ghostty_config::FontConfig;
 use crate::grid;
 use crate::keys::keystroke_to_bytes;
-use crate::render::{self, RenderSpec};
+use crate::new_task;
+use crate::render::RenderSpec;
+use crate::sidebar;
+use crate::task_workspace::{self, TaskWorkspace};
 
-/// How long the redraw-bridge thread blocks on `recv_event` between checks
-/// of whether its gpui-side `Task` was dropped (pane closed). Real events
-/// (`TermEvent::Wakeup`/`Exit`) are delivered the instant they happen,
-/// regardless of this value -- it only bounds how quickly a *closed* pane's
-/// bridge thread notices there's no one left to notify and exits. This is
-/// not a redraw poll: `Render::render` only ever re-runs from an actual
-/// `cx.notify()` call, which only ever happens in response to a real
-/// `TermEvent`.
-const EVENT_POLL_TIMEOUT: Duration = Duration::from_millis(250);
-
-/// Minimum gap between two `cx.notify()` calls for the same pane, mirroring
-/// `labolabo_term::session`'s own ~60fps snapshot-construction throttle so
-/// this UI layer never asks gpui to redraw faster than the terminal core
-/// itself paces snapshots.
-const FRAME_INTERVAL: Duration = Duration::from_millis(16);
-
-/// Initial grid size for a pane created after startup (new tab via Cmd+T/"+",
-/// or a split via Cmd+D/Cmd+Shift+D): a conventional terminal default,
-/// immediately corrected by the pane's own canvas once gpui lays it out (see
-/// [`render_leaf`]) -- unlike the app's *first* pane (sized from the full
-/// window viewport in [`TerminalApp::new`]), a freshly split/tabbed pane's
-/// eventual on-screen area isn't known until that first layout pass, so
-/// there's no better estimate to start from.
+/// Initial grid size for a pane created after startup with no viewport to
+/// measure yet (new tab / split within an already-rendered Task, or the
+/// single terminal pane of a freshly created Task) -- a conventional
+/// terminal default, immediately corrected by the pane's own canvas once
+/// gpui lays it out (see `task_workspace::render_leaf`'s doc comment).
+/// Unlike wave 5b-2 (one Task, sized from the window viewport once at
+/// startup), a Task-switching app has many "first pane" moments -- every
+/// one of them except the very first (`LaboLaboApp::new`) and a lazy-load
+/// on selection (`select_task`, which *does* have a `Window` to measure)
+/// uses this default instead.
 const DEFAULT_PANE_COLS: u16 = 80;
 const DEFAULT_PANE_ROWS: u16 = 24;
-
-/// Accent color for the focused pane's frame border (a restrained highlight,
-/// per the wave's brief -- not a full glow/shadow treatment).
-const FOCUS_BORDER_COLOR: u32 = 0x5e9eff;
-/// Frame border color for every other (unfocused) pane.
-const IDLE_BORDER_COLOR: u32 = 0x1c1c1c;
 
 actions!(
     labolabo_app,
@@ -126,52 +105,32 @@ actions!(
     ]
 );
 
-/// What the per-pane bridge thread forwards to its gpui-side task.
-enum BridgeMsg {
-    /// A new snapshot is available -- repaint (coalesced + frame-paced).
-    Wakeup,
-    /// The session's child exited -- close the pane. Terminal: the bridge
-    /// thread stops after sending this.
-    Exit,
-}
-
-/// The live resources backing one `terminal`-kind [`PaneItem`]: its real
-/// `labolabo_term::Terminal` session and the redraw bridge that keeps gpui
-/// notified of it. Kept for every terminal pane in the tree -- including
-/// hidden ones -- so pty/scrollback survive tab switches and split/close
-/// elsewhere in the tree.
-struct PaneRuntime {
-    session: Arc<Terminal>,
-    /// Last (cols, rows) this pane's session was resized to. Shared
-    /// (`Rc<Cell<_>>`, not a plain field) because the canvas element's
-    /// `prepaint` closure -- the one place a pane's actual laid-out pixel
-    /// area is known, see [`render_leaf`] -- runs without a `&mut
-    /// TerminalApp` borrow available to it; this is the one piece of state
-    /// it needs to read and write across repaints without one.
-    last_size: Rc<Cell<(u16, u16)>>,
-    /// Keeps the redraw-bridge task alive for the pane's lifetime; dropping
-    /// it (on pane close) is the signal the bridge thread uses to stop.
-    _redraw_task: Task<()>,
-}
-
-pub struct TerminalApp {
-    model: PaneTilingModel,
-    runtimes: HashMap<PaneId, PaneRuntime>,
-    /// The tab with keyboard focus. Always resolvable via
-    /// `model.root.find_leaf(focused_pane)`, and always that leaf's
-    /// currently selected tab -- see `crate::focus`'s module doc comment for
-    /// why this invariant makes `PaneId` (not a leaf `NodeId`) the right
-    /// thing to track.
-    focused_pane: PaneId,
+pub struct LaboLaboApp {
+    db: TaskDatabase,
+    /// Every `Active` Task, ordered by `sort_order` -- the sidebar's source
+    /// order (`sidebar::group_tasks_by_repo` groups without re-sorting).
+    tasks: Vec<Task>,
+    /// Loaded workspaces, keyed by `Task::id`. A Task appears here once it
+    /// has ever been selected (or was the restored selection at launch);
+    /// entries are never removed for the app's lifetime, so switching away
+    /// from a Task keeps its ptys alive -- see this module's doc comment.
+    workspaces: HashMap<String, TaskWorkspace>,
+    selected_task_id: Option<String>,
     focus_handle: FocusHandle,
     spec: RenderSpec,
     /// The user's Ghostty color configuration, applied to every pane's
-    /// `Terminal` at spawn time (see `spawn_runtime`) -- stored so panes
-    /// created after startup (new tab, split) get it too.
+    /// `Terminal` at spawn time -- stored so panes created after startup
+    /// (new tab, split, new Task) get it too, same as wave 5b-2.
     colors: ColorScheme,
+    /// Last "new Task" flow's failure, if any (e.g. the picked directory
+    /// isn't a git repository for the worktree flow) -- shown as a small
+    /// banner under the sidebar's "+" row. Cleared at the start of the next
+    /// attempt. There is no success-path banner; a successful flow just
+    /// selects the new Task, which is feedback enough.
+    new_task_error: Option<String>,
 }
 
-impl TerminalApp {
+impl LaboLaboApp {
     pub fn new(
         font_config: &FontConfig,
         color_config: &ColorScheme,
@@ -189,31 +148,49 @@ impl TerminalApp {
         let focus_handle = cx.focus_handle();
         window.focus(&focus_handle);
 
-        // One terminal pane, filling the whole window -- this wave's initial
-        // layout. Deliberately not `PaneTilingModel::default_layout()`
-        // (terminal + commits/files/diff): those pane kinds have no
-        // rendering yet in this crate (see the module doc comment).
-        let pane = PaneItem::new(PaneKind::Terminal, PaneKind::Terminal.default_title());
-        let pane_id = pane.id;
-        let root = TileNode::leaf(pane);
+        let db = TaskDatabase::open(&TaskDatabase::default_path()).unwrap_or_else(|err| {
+            eprintln!(
+                "labolabo-app: failed to open the task database ({err}); \
+                 falling back to an in-memory database for this run (nothing will persist)"
+            );
+            TaskDatabase::open_in_memory().expect("in-memory sqlite must always succeed")
+        });
+        let tasks: Vec<Task> = db
+            .all_tasks()
+            .unwrap_or_else(|err| {
+                eprintln!(
+                    "labolabo-app: failed to load tasks ({err}); starting with an empty list"
+                );
+                Vec::new()
+            })
+            .into_iter()
+            .filter(|t| t.status == TaskStatus::Active)
+            .collect();
+
+        let selected_task_id = db
+            .selected_task_id()
+            .ok()
+            .flatten()
+            .filter(|id| tasks.iter().any(|t| &t.id == id))
+            .or_else(|| tasks.first().map(|t| t.id.clone()));
 
         let mut this = Self {
-            model: PaneTilingModel::new(root),
-            runtimes: HashMap::new(),
-            focused_pane: pane_id,
+            db,
+            tasks,
+            workspaces: HashMap::new(),
+            selected_task_id: selected_task_id.clone(),
             focus_handle,
             spec,
             colors: color_config.clone(),
+            new_task_error: None,
         };
 
-        let (cols, rows) = this.viewport_grid_size(window);
-        this.spawn_runtime(pane_id, cols, rows, cx);
+        if let Some(id) = selected_task_id {
+            let (cols, rows) = this.viewport_grid_size(window);
+            this.ensure_workspace_loaded(&id, cols, rows, cx);
+        }
 
         cx.observe_window_bounds(window, |_this, _window, cx| {
-            // The per-pane canvas elements (see `render_leaf`) read their
-            // own bounds and resize their own session directly at
-            // prepaint time; all a window resize needs to do here is force
-            // a fresh layout/paint pass so that runs again.
             cx.notify();
         })
         .detach();
@@ -221,155 +198,546 @@ impl TerminalApp {
         this
     }
 
+    // MARK: - read-only accessors (for `sidebar::render`)
+
+    pub(crate) fn tasks(&self) -> &[Task] {
+        &self.tasks
+    }
+
+    pub(crate) fn selected_task_id(&self) -> Option<&str> {
+        self.selected_task_id.as_deref()
+    }
+
+    pub(crate) fn new_task_error(&self) -> Option<&str> {
+        self.new_task_error.as_deref()
+    }
+
+    pub(crate) fn focus_handle(&self) -> &FocusHandle {
+        &self.focus_handle
+    }
+
     /// The terminal grid size for the window's current viewport (full
-    /// window). Used only for the very first pane (see `new`) -- every pane
-    /// created afterward (new tab / split) starts at [`DEFAULT_PANE_COLS`]/
-    /// [`DEFAULT_PANE_ROWS`] instead, since its eventual on-screen area is a
-    /// fraction of the window, not the whole thing.
+    /// window, minus the sidebar and the pane's own tab bar). Used only
+    /// where a `Window` is actually on hand (startup, and selecting a
+    /// not-yet-loaded Task) -- every other newly spawned pane (new tab,
+    /// split, a freshly created Task) uses [`DEFAULT_PANE_COLS`]/
+    /// [`DEFAULT_PANE_ROWS`] instead, same reasoning wave 5b-2 documented
+    /// for its single-Task case.
     fn viewport_grid_size(&self, window: &Window) -> (u16, u16) {
         let size = window.viewport_size();
+        let sidebar_adjusted_width = (f32::from(size.width) - sidebar::SIDEBAR_WIDTH).max(0.0);
         grid::grid_size_for_window(
-            size.width.into(),
+            sidebar_adjusted_width,
             size.height.into(),
             self.spec.cell_width,
             self.spec.cell_height,
         )
     }
 
-    /// Spawn a new `terminal`-kind pane's session (a fresh login-shell
-    /// `Terminal`) and register its redraw bridge. No-op (with a stderr
-    /// warning) if the spawn itself fails -- mirrors wave 5a's `open_tab`.
-    fn spawn_runtime(&mut self, pane_id: PaneId, cols: u16, rows: u16, cx: &mut Context<Self>) {
-        let session = match Terminal::spawn_with_options(cols, rows, None, &[], &self.colors) {
-            Ok(session) => Arc::new(session),
+    // MARK: - Task loading / persistence
+
+    /// Loads `task_id`'s [`TaskWorkspace`] into `self.workspaces` if it
+    /// isn't there already (a no-op otherwise -- switching back to an
+    /// already-loaded Task never re-spawns anything, matching the plan's
+    /// "表示中でない Task の...pty はメモリ上に温存" semantics): decodes its
+    /// persisted `TileLayout` (falling back to a single fresh terminal pane
+    /// if the layout is missing/corrupt), then spawns a real `Terminal`
+    /// session at `(cols, rows)` for every `terminal`-kind pane in the
+    /// restored tree, in the Task's working directory.
+    fn ensure_workspace_loaded(
+        &mut self,
+        task_id: &str,
+        cols: u16,
+        rows: u16,
+        cx: &mut Context<Self>,
+    ) {
+        if self.workspaces.contains_key(task_id) {
+            return;
+        }
+        let Some(task) = self.tasks.iter().find(|t| t.id == task_id) else {
+            return;
+        };
+
+        let model = PaneTilingModel::model_from(&task.layout).unwrap_or_else(|| {
+            let pane = PaneItem::new(PaneKind::Terminal, PaneKind::Terminal.default_title());
+            PaneTilingModel::new(TileNode::leaf(pane))
+        });
+        let pane_ids: Vec<PaneId> = model
+            .panes()
+            .iter()
+            .filter(|p| p.kind == PaneKind::Terminal)
+            .map(|p| p.id)
+            .collect();
+
+        self.workspaces
+            .insert(task_id.to_string(), TaskWorkspace::new(model));
+
+        for pane_id in pane_ids {
+            self.spawn_runtime_for_task(task_id, pane_id, cols, rows, cx);
+        }
+    }
+
+    /// Spawns a new `terminal`-kind pane's session (a fresh login-shell
+    /// `Terminal`, started in `task_id`'s working directory) and registers
+    /// its redraw bridge. No-op (with a stderr warning) if the spawn itself
+    /// fails, or if `task_id` has no loaded workspace to register into --
+    /// mirrors wave 5a/5b-2's `spawn_runtime`.
+    fn spawn_runtime_for_task(
+        &mut self,
+        task_id: &str,
+        pane_id: PaneId,
+        cols: u16,
+        rows: u16,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(task) = self.tasks.iter().find(|t| t.id == task_id) else {
+            return;
+        };
+        let cwd = task.working_directory().to_string();
+        let colors = self.colors.clone();
+
+        let session = match Terminal::spawn_with_cwd_options(
+            cols,
+            rows,
+            None,
+            &[],
+            &colors,
+            Some(Path::new(&cwd)),
+        ) {
+            Ok(session) => std::sync::Arc::new(session),
             Err(err) => {
-                eprintln!("labolabo-app: failed to spawn terminal session: {err:#}");
+                eprintln!(
+                    "labolabo-app: failed to spawn terminal session for task {task_id}: {err:#}"
+                );
                 return;
             }
         };
-        let redraw_task = spawn_redraw_bridge(session.clone(), pane_id, cx);
-        self.runtimes.insert(
-            pane_id,
-            PaneRuntime {
+
+        let redraw_task =
+            task_workspace::spawn_redraw_bridge(session.clone(), task_id.to_string(), pane_id, cx);
+        if let Some(workspace) = self.workspaces.get_mut(task_id) {
+            task_workspace::insert_runtime(
+                &mut workspace.runtimes,
+                pane_id,
                 session,
-                last_size: Rc::new(Cell::new((cols, rows))),
-                _redraw_task: redraw_task,
-            },
-        );
+                cols,
+                rows,
+                redraw_task,
+            );
+        }
     }
 
-    // MARK: - focus / selection
+    /// Snapshots `task_id`'s current `TileLayout` and upserts its Task row
+    /// -- see this module's doc comment for the "save on every layout-
+    /// affecting action" timing. A no-op if `task_id` has no loaded
+    /// workspace (shouldn't happen given callers only call this right after
+    /// mutating that workspace) or isn't a known Task.
+    fn persist_workspace(&mut self, task_id: &str) {
+        let Some(workspace) = self.workspaces.get(task_id) else {
+            return;
+        };
+        let layout = workspace.model.snapshot();
+        if let Some(task) = self.tasks.iter_mut().find(|t| t.id == task_id) {
+            task.layout = layout;
+            task.last_active_at = chrono::Utc::now();
+            if let Err(err) = self.db.upsert_task(task) {
+                eprintln!("labolabo-app: failed to persist task {task_id}: {err}");
+            }
+        }
+    }
 
-    /// Selects `pane_id`'s tab within its leaf and gives that pane keyboard
-    /// focus. Used by tab-chip clicks, clicking into a pane's terminal area,
-    /// and every action handler that lands on a specific pane.
-    fn select_pane(&mut self, pane_id: PaneId, window: &mut Window, cx: &mut Context<Self>) {
-        self.model.select_tab(pane_id);
-        self.focused_pane = pane_id;
+    // MARK: - Task selection
+
+    /// Switches the selected Task, loading its workspace first if this is
+    /// the first time it's been selected. Persists the selection
+    /// (`selectedTask` app-state key) so a restart resumes here.
+    pub(crate) fn select_task(
+        &mut self,
+        task_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_task_id.as_deref() == Some(task_id.as_str()) {
+            return;
+        }
+        let (cols, rows) = self.viewport_grid_size(window);
+        self.ensure_workspace_loaded(&task_id, cols, rows, cx);
+
+        self.selected_task_id = Some(task_id.clone());
+        if let Err(err) = self.db.set_selected_task_id(Some(&task_id)) {
+            eprintln!("labolabo-app: failed to persist selected task: {err}");
+        }
+        if let Some(task) = self.tasks.iter_mut().find(|t| t.id == task_id) {
+            task.last_active_at = chrono::Utc::now();
+            let _ = self.db.upsert_task(task);
+        }
+
         window.focus(&self.focus_handle);
         cx.notify();
     }
 
-    fn move_focus(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(next) = focus::adjacent_pane(&self.model, self.focused_pane, forward) {
-            self.focused_pane = next;
-            window.focus(&self.focus_handle);
-            cx.notify();
+    // MARK: - focus / selection (within the selected Task's workspace)
+
+    pub(crate) fn select_pane(
+        &mut self,
+        task_id: &str,
+        pane_id: PaneId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(workspace) = self.workspaces.get_mut(task_id) {
+            workspace.model.select_tab(pane_id);
+            workspace.focused_pane = pane_id;
+        }
+        window.focus(&self.focus_handle);
+        self.persist_workspace(task_id);
+        cx.notify();
+    }
+
+    fn move_focus(
+        &mut self,
+        task_id: &str,
+        forward: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workspace) = self.workspaces.get(task_id) else {
+            return;
+        };
+        let Some(next) = focus::adjacent_pane(&workspace.model, workspace.focused_pane, forward)
+        else {
+            return;
+        };
+        if let Some(workspace) = self.workspaces.get_mut(task_id) {
+            workspace.focused_pane = next;
+        }
+        window.focus(&self.focus_handle);
+        cx.notify();
+    }
+
+    fn select_tab_index(
+        &mut self,
+        task_id: &str,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workspace) = self.workspaces.get(task_id) else {
+            return;
+        };
+        if let Some(pane_id) = focus::nth_tab(&workspace.model, workspace.focused_pane, index) {
+            self.select_pane(task_id, pane_id, window, cx);
         }
     }
 
-    fn select_tab_index(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(pane_id) = focus::nth_tab(&self.model, self.focused_pane, index) {
-            self.select_pane(pane_id, window, cx);
-        }
-    }
+    // MARK: - mutations (within the selected Task's workspace)
 
-    // MARK: - mutations
-
-    /// Adds a new terminal tab to `anchor_pane_id`'s tab group and focuses
-    /// it. Used by Cmd+T (anchored on the focused pane) and a leaf's "+"
-    /// button (anchored on that leaf's own selected pane).
-    fn add_tab_to(&mut self, anchor_pane_id: PaneId, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn add_tab_to(
+        &mut self,
+        task_id: &str,
+        anchor_pane_id: PaneId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let pane = PaneItem::new(PaneKind::Terminal, PaneKind::Terminal.default_title());
         let new_id = pane.id;
-        if self.model.add_tab(anchor_pane_id, pane) {
-            self.spawn_runtime(new_id, DEFAULT_PANE_COLS, DEFAULT_PANE_ROWS, cx);
-            self.focused_pane = new_id;
-            window.focus(&self.focus_handle);
-            cx.notify();
+        let added = self
+            .workspaces
+            .get_mut(task_id)
+            .map(|workspace| workspace.model.add_tab(anchor_pane_id, pane))
+            .unwrap_or(false);
+        if !added {
+            return;
         }
+        self.spawn_runtime_for_task(task_id, new_id, DEFAULT_PANE_COLS, DEFAULT_PANE_ROWS, cx);
+        if let Some(workspace) = self.workspaces.get_mut(task_id) {
+            workspace.focused_pane = new_id;
+        }
+        window.focus(&self.focus_handle);
+        self.persist_workspace(task_id);
+        cx.notify();
     }
 
-    /// Splits the focused pane's leaf, opening a new terminal pane on the
-    /// `orientation` side and focusing it.
     fn split_focused(
         &mut self,
+        task_id: &str,
         orientation: TileOrientation,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.model.root.find_leaf(self.focused_pane).is_none() {
+        let Some(workspace) = self.workspaces.get(task_id) else {
+            return;
+        };
+        let focused = workspace.focused_pane;
+        if workspace.model.root.find_leaf(focused).is_none() {
             return;
         }
         let pane = PaneItem::new(PaneKind::Terminal, PaneKind::Terminal.default_title());
         let new_id = pane.id;
-        self.model.split(self.focused_pane, orientation, pane);
-        self.spawn_runtime(new_id, DEFAULT_PANE_COLS, DEFAULT_PANE_ROWS, cx);
-        self.focused_pane = new_id;
+        if let Some(workspace) = self.workspaces.get_mut(task_id) {
+            workspace.model.split(focused, orientation, pane);
+        }
+        self.spawn_runtime_for_task(task_id, new_id, DEFAULT_PANE_COLS, DEFAULT_PANE_ROWS, cx);
+        if let Some(workspace) = self.workspaces.get_mut(task_id) {
+            workspace.focused_pane = new_id;
+        }
         window.focus(&self.focus_handle);
+        self.persist_workspace(task_id);
         cx.notify();
     }
 
-    /// User-driven close (Cmd+W, or a tab chip's "x"): signals the child
-    /// (SIGHUP via `Terminal::shutdown`) before tearing the pane down.
-    fn close_pane_user(&mut self, pane_id: PaneId, cx: &mut Context<Self>) {
-        self.remove_pane(pane_id, true, cx);
+    pub(crate) fn close_pane_user(
+        &mut self,
+        task_id: &str,
+        pane_id: PaneId,
+        cx: &mut Context<Self>,
+    ) {
+        self.remove_pane(task_id, pane_id, true, cx);
     }
 
-    /// The pane's session exited on its own (`TermEvent::Exit`): the child
-    /// is already dead, so no shutdown signal is needed.
-    fn handle_pane_exit(&mut self, pane_id: PaneId, cx: &mut Context<Self>) {
-        self.remove_pane(pane_id, false, cx);
+    pub(crate) fn handle_pane_exit(
+        &mut self,
+        task_id: &str,
+        pane_id: PaneId,
+        cx: &mut Context<Self>,
+    ) {
+        self.remove_pane(task_id, pane_id, false, cx);
     }
 
-    /// Removes `pane_id` from the tree (no-op for an unknown id -- e.g. an
-    /// `Exit` arriving for a pane the user already closed). Quits the app
-    /// (Ghostty's close-last-surface behavior) if `pane_id` was the tree's
-    /// only remaining pane; otherwise closes it via the model and, if it had
-    /// focus, resolves a new focused pane via [`focus::resolve_close_focus`].
-    fn remove_pane(&mut self, pane_id: PaneId, shutdown_child: bool, cx: &mut Context<Self>) {
-        if self.model.root.find_leaf(pane_id).is_none() {
+    /// Removes `pane_id` from `task_id`'s tree.
+    ///
+    /// A Task's **last** pane is special -- Task lifecycle (done/archive/
+    /// delete) is out of this wave's scope (`plans/012` §1), so a Task must
+    /// never end up pane-less-and-unrecoverable:
+    ///
+    /// - If it's also the app's only Task, this mirrors wave 5b-2's
+    ///   pre-Task-model behavior and quits (Ghostty's close-last-surface
+    ///   convention).
+    /// - A **user** close (`shutdown_child: true` -- "x"/Cmd+W) is refused
+    ///   outright, *before* touching the runtime, so the shell keeps
+    ///   running untouched.
+    /// - A **natural exit** (the shell already died) can't be refused: the
+    ///   dead runtime is dropped but the pane stays in the tree (rendering
+    ///   an empty canvas). The Task stays recoverable -- the pane's id is
+    ///   still valid as an anchor, so its "+"/Cmd+T opens a fresh tab
+    ///   (spawned in the Task's cwd as usual), after which the dead tab can
+    ///   be closed normally. Auto-respawning a fresh shell into the dead
+    ///   pane was deliberately not done: an immediately-exiting shell (bad
+    ///   `$SHELL`, broken rc file) would respawn-loop with no way to stop.
+    fn remove_pane(
+        &mut self,
+        task_id: &str,
+        pane_id: PaneId,
+        shutdown_child: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workspace) = self.workspaces.get(task_id) else {
+            return;
+        };
+        if workspace.model.root.find_leaf(pane_id).is_none() {
             return;
         }
-        let is_last_pane = self.model.panes().len() == 1;
-        let was_focused = self.focused_pane == pane_id;
+        let is_last_pane_in_task = workspace.model.panes().len() == 1;
+        let was_focused = workspace.focused_pane == pane_id;
 
-        if let Some(runtime) = self.runtimes.remove(&pane_id) {
+        if is_last_pane_in_task {
+            if self.tasks.len() == 1 {
+                // Quit path: tear the runtime down (signaling the child on a
+                // user-driven close) and quit, like wave 5b-2.
+                if let Some(workspace) = self.workspaces.get_mut(task_id) {
+                    if let Some(runtime) = workspace.runtimes.remove(&pane_id) {
+                        if shutdown_child {
+                            runtime.session.shutdown();
+                        }
+                    }
+                }
+                cx.quit();
+                return;
+            }
             if shutdown_child {
-                runtime.session.shutdown();
+                // User close of a Task's last pane: refused (see doc
+                // comment). The shell was not signaled and keeps running.
+                return;
             }
-            // `runtime` (and its `_redraw_task`) drops here, ending the
-            // bridge thread.
-        }
-
-        if is_last_pane {
-            cx.quit();
+            // Natural exit of a Task's last pane's shell: drop the dead
+            // runtime, keep the pane as a recoverable anchor.
+            if let Some(workspace) = self.workspaces.get_mut(task_id) {
+                workspace.runtimes.remove(&pane_id);
+            }
+            cx.notify();
             return;
         }
 
-        let revealed = self.model.close(pane_id);
-        if was_focused {
-            if let Some(new_focus) = focus::resolve_close_focus(&self.model, revealed) {
-                self.focused_pane = new_focus;
+        if let Some(workspace) = self.workspaces.get_mut(task_id) {
+            if let Some(runtime) = workspace.runtimes.remove(&pane_id) {
+                if shutdown_child {
+                    runtime.session.shutdown();
+                }
+                // `runtime` (and its `_redraw_task`) drops here, ending the
+                // bridge thread.
             }
         }
+
+        let revealed = self
+            .workspaces
+            .get_mut(task_id)
+            .map(|workspace| workspace.model.close(pane_id))
+            .unwrap_or(None);
+        if was_focused {
+            if let Some(workspace) = self.workspaces.get(task_id) {
+                if let Some(new_focus) = focus::resolve_close_focus(&workspace.model, revealed) {
+                    if let Some(workspace) = self.workspaces.get_mut(task_id) {
+                        workspace.focused_pane = new_focus;
+                    }
+                }
+            }
+        }
+        self.persist_workspace(task_id);
+        cx.notify();
+    }
+
+    // MARK: - new Task flows (`plans/012` §1's "作業の開始（主 CTA）")
+
+    /// "+ Attached": picks a directory via gpui's native OS directory
+    /// picker (`cx.prompt_for_paths` -- this crate's `Path Prompt` gpui API
+    /// is the "gpui のネイティブパス選択" the plan asks for) and starts an
+    /// `attached`-kind Task there, no worktree created.
+    pub(crate) fn start_new_attached_task(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.new_task_error = None;
+        let options = PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Attach as a new task".into()),
+        };
+        let rx = cx.prompt_for_paths(options);
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(mut paths))) = rx.await else {
+                return;
+            };
+            let Some(dir) = paths.pop() else {
+                return;
+            };
+            let (repo_key, repo_root, repo_name) = cx
+                .background_spawn(async move { new_task::resolve_attached_repo(&dir.clone()) })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                app.finish_new_attached_task(repo_key, repo_root, repo_name, cx)
+            });
+        })
+        .detach();
+    }
+
+    fn finish_new_attached_task(
+        &mut self,
+        repo_key: String,
+        repo_root: String,
+        repo_name: String,
+        cx: &mut Context<Self>,
+    ) {
+        // `resolve_attached_repo`'s no-repo fallback sets `repo_root` to the
+        // directory itself, which doubles as the attached directory here.
+        let directory = repo_root.clone();
+        let layout = single_terminal_layout();
+        let sort_order = self.next_sort_order();
+        let task = Task::new_attached(
+            repo_key, repo_root, repo_name, directory, layout, sort_order,
+        );
+        self.add_task_and_select(task, cx);
+    }
+
+    /// "+ Worktree": picks an existing repository checkout via the same
+    /// native directory picker, generates a fresh branch name
+    /// (`new_task::create_worktree_task`), runs `git worktree add`, and
+    /// starts a `worktree`-kind Task there.
+    ///
+    /// This wave has no persistent "registered repositories" list to pick
+    /// from (that's future work -- see this module's scope note and the
+    /// task brief's allowance for a minimal "+"-menu flow); the directory
+    /// picker doubles as ad hoc repo selection, resolved fresh via
+    /// `GitEngine::repo_info` every time.
+    pub(crate) fn start_new_worktree_task(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.new_task_error = None;
+        let options = PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Choose a repository for the new worktree task".into()),
+        };
+        let rx = cx.prompt_for_paths(options);
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(mut paths))) = rx.await else {
+                return;
+            };
+            let Some(repo_path) = paths.pop() else {
+                return;
+            };
+            let outcome = cx
+                .background_spawn(async move { new_task::create_worktree_task(&repo_path) })
+                .await;
+            match outcome {
+                Ok(prepared) => {
+                    let _ = this.update(cx, |app, cx| app.finish_new_worktree_task(prepared, cx));
+                }
+                Err(message) => {
+                    let _ = this.update(cx, |app, cx| {
+                        app.new_task_error = Some(message);
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn finish_new_worktree_task(
+        &mut self,
+        prepared: new_task::PreparedWorktree,
+        cx: &mut Context<Self>,
+    ) {
+        let layout = single_terminal_layout();
+        let sort_order = self.next_sort_order();
+        let task = Task::new_worktree(
+            prepared.repo_key,
+            prepared.repo_root,
+            prepared.repo_name,
+            prepared.branch,
+            prepared.base,
+            prepared.worktree_path,
+            layout,
+            sort_order,
+        );
+        self.add_task_and_select(task, cx);
+    }
+
+    fn next_sort_order(&self) -> i64 {
+        self.db.next_sort_order().unwrap_or(self.tasks.len() as i64)
+    }
+
+    /// Persists `task`, appends it to `self.tasks`, loads its (single-pane)
+    /// workspace, and selects it.
+    fn add_task_and_select(&mut self, task: Task, cx: &mut Context<Self>) {
+        if let Err(err) = self.db.upsert_task(&task) {
+            eprintln!("labolabo-app: failed to persist new task: {err}");
+        }
+        let id = task.id.clone();
+        self.tasks.push(task);
+        self.ensure_workspace_loaded(&id, DEFAULT_PANE_COLS, DEFAULT_PANE_ROWS, cx);
+        self.selected_task_id = Some(id.clone());
+        let _ = self.db.set_selected_task_id(Some(&id));
         cx.notify();
     }
 
     // MARK: - input routing
 
     fn key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, _cx: &mut Context<Self>) {
-        let Some(runtime) = self.runtimes.get(&self.focused_pane) else {
+        let Some(task_id) = self.selected_task_id.as_deref() else {
+            return;
+        };
+        let Some(workspace) = self.workspaces.get(task_id) else {
+            return;
+        };
+        let Some(runtime) = workspace.runtimes.get(&workspace.focused_pane) else {
             return;
         };
         // TODO(W5a): IME composition is not wired up here -- see
@@ -381,21 +749,35 @@ impl TerminalApp {
 
     // MARK: - action handlers (see the `actions!` list + main.rs's `bind_keys`)
 
+    fn selected_task_and_focused_pane(&self) -> Option<(String, PaneId)> {
+        let task_id = self.selected_task_id.clone()?;
+        let focused = self.workspaces.get(&task_id)?.focused_pane;
+        Some((task_id, focused))
+    }
+
     fn action_new_tab(&mut self, _: &NewTab, window: &mut Window, cx: &mut Context<Self>) {
-        self.add_tab_to(self.focused_pane, window, cx);
+        if let Some((task_id, anchor)) = self.selected_task_and_focused_pane() {
+            self.add_tab_to(&task_id, anchor, window, cx);
+        }
     }
 
     fn action_close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
-        self.close_pane_user(self.focused_pane, cx);
-        window.focus(&self.focus_handle);
+        if let Some((task_id, pane)) = self.selected_task_and_focused_pane() {
+            self.close_pane_user(&task_id, pane, cx);
+            window.focus(&self.focus_handle);
+        }
     }
 
     fn action_split_right(&mut self, _: &SplitRight, window: &mut Window, cx: &mut Context<Self>) {
-        self.split_focused(TileOrientation::Horizontal, window, cx);
+        if let Some(task_id) = self.selected_task_id.clone() {
+            self.split_focused(&task_id, TileOrientation::Horizontal, window, cx);
+        }
     }
 
     fn action_split_down(&mut self, _: &SplitDown, window: &mut Window, cx: &mut Context<Self>) {
-        self.split_focused(TileOrientation::Vertical, window, cx);
+        if let Some(task_id) = self.selected_task_id.clone() {
+            self.split_focused(&task_id, TileOrientation::Vertical, window, cx);
+        }
     }
 
     fn action_focus_next_pane(
@@ -404,7 +786,9 @@ impl TerminalApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.move_focus(true, window, cx);
+        if let Some(task_id) = self.selected_task_id.clone() {
+            self.move_focus(&task_id, true, window, cx);
+        }
     }
 
     fn action_focus_prev_pane(
@@ -413,43 +797,80 @@ impl TerminalApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.move_focus(false, window, cx);
+        if let Some(task_id) = self.selected_task_id.clone() {
+            self.move_focus(&task_id, false, window, cx);
+        }
     }
 
     fn action_select_tab_1(&mut self, _: &SelectTab1, window: &mut Window, cx: &mut Context<Self>) {
-        self.select_tab_index(0, window, cx);
+        self.action_select_tab_index(0, window, cx);
     }
     fn action_select_tab_2(&mut self, _: &SelectTab2, window: &mut Window, cx: &mut Context<Self>) {
-        self.select_tab_index(1, window, cx);
+        self.action_select_tab_index(1, window, cx);
     }
     fn action_select_tab_3(&mut self, _: &SelectTab3, window: &mut Window, cx: &mut Context<Self>) {
-        self.select_tab_index(2, window, cx);
+        self.action_select_tab_index(2, window, cx);
     }
     fn action_select_tab_4(&mut self, _: &SelectTab4, window: &mut Window, cx: &mut Context<Self>) {
-        self.select_tab_index(3, window, cx);
+        self.action_select_tab_index(3, window, cx);
     }
     fn action_select_tab_5(&mut self, _: &SelectTab5, window: &mut Window, cx: &mut Context<Self>) {
-        self.select_tab_index(4, window, cx);
+        self.action_select_tab_index(4, window, cx);
     }
     fn action_select_tab_6(&mut self, _: &SelectTab6, window: &mut Window, cx: &mut Context<Self>) {
-        self.select_tab_index(5, window, cx);
+        self.action_select_tab_index(5, window, cx);
     }
     fn action_select_tab_7(&mut self, _: &SelectTab7, window: &mut Window, cx: &mut Context<Self>) {
-        self.select_tab_index(6, window, cx);
+        self.action_select_tab_index(6, window, cx);
     }
     fn action_select_tab_8(&mut self, _: &SelectTab8, window: &mut Window, cx: &mut Context<Self>) {
-        self.select_tab_index(7, window, cx);
+        self.action_select_tab_index(7, window, cx);
     }
     fn action_select_tab_9(&mut self, _: &SelectTab9, window: &mut Window, cx: &mut Context<Self>) {
-        self.select_tab_index(8, window, cx);
+        self.action_select_tab_index(8, window, cx);
+    }
+
+    fn action_select_tab_index(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(task_id) = self.selected_task_id.clone() {
+            self.select_tab_index(&task_id, index, window, cx);
+        }
     }
 }
 
-impl Render for TerminalApp {
+/// A single fresh terminal pane's `TileLayout` -- the initial layout for
+/// every newly created Task (both kinds).
+fn single_terminal_layout() -> labolabo_core::TileLayout {
+    let pane = PaneItem::new(PaneKind::Terminal, PaneKind::Terminal.default_title());
+    PaneTilingModel::new(TileNode::leaf(pane)).snapshot()
+}
+
+impl Render for LaboLaboApp {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let spec = self.spec.clone();
-        let focused_pane = self.focused_pane;
-        let tree = render_tile(&self.model.root, &self.runtimes, focused_pane, &spec, cx);
+        let sidebar_el = sidebar::render(self, cx);
+
+        let workspace_el = if let Some(task_id) = self.selected_task_id.clone() {
+            if let Some(workspace) = self.workspaces.get(&task_id) {
+                let spec = self.spec.clone();
+                let focused_pane = workspace.focused_pane;
+                task_workspace::render_tile(
+                    &task_id,
+                    &workspace.model.root,
+                    &workspace.runtimes,
+                    focused_pane,
+                    &spec,
+                    cx,
+                )
+            } else {
+                empty_state("Loading task...")
+            }
+        } else {
+            empty_state("No task selected. Use \"+ Attached\" or \"+ Worktree\" to start one.")
+        };
 
         div()
             .track_focus(&self.focus_handle)
@@ -470,306 +891,21 @@ impl Render for TerminalApp {
             .on_action(cx.listener(Self::action_select_tab_8))
             .on_action(cx.listener(Self::action_select_tab_9))
             .flex()
-            .flex_col()
+            .flex_row()
             .size_full()
             .bg(rgb(0x000000))
-            .child(tree)
+            .child(sidebar_el)
+            .child(workspace_el)
     }
 }
 
-/// Recursively render one node of the tile tree: a leaf becomes a pane frame
-/// ([`render_leaf`]); a split becomes a flex row/column (per
-/// [`TileOrientation`]) with its two children sized by `node.ratio`.
-fn render_tile(
-    node: &TileNode,
-    runtimes: &HashMap<PaneId, PaneRuntime>,
-    focused_pane: PaneId,
-    spec: &RenderSpec,
-    cx: &mut Context<TerminalApp>,
-) -> AnyElement {
-    if node.is_leaf() {
-        return render_leaf(node, runtimes, focused_pane, spec, cx);
-    }
-
-    let Some(first_child) = node.children.first() else {
-        return div().size_full().into_any_element();
-    };
-    let Some(second_child) = node.children.get(1) else {
-        // A split with fewer than 2 children shouldn't happen (the model
-        // always creates 2-way splits) -- render the one child we do have
-        // rather than drop its content on the floor.
-        return render_tile(first_child, runtimes, focused_pane, spec, cx);
-    };
-
-    // Horizontal orientation lays children out side by side (a row);
-    // vertical stacks them top/bottom (a column) -- see `tiling.rs`'s
-    // `default_layout` doc comment for the canonical example this mirrors.
-    let is_row = node.orientation == TileOrientation::Horizontal;
-    let ratio = (node.ratio as f32).clamp(0.05, 0.95);
-
-    let first_el = render_tile(first_child, runtimes, focused_pane, spec, cx);
-    let second_el = render_tile(second_child, runtimes, focused_pane, spec, cx);
-
-    let (first_wrap, second_wrap) = if is_row {
-        (
-            div().h_full().w(relative(ratio)).child(first_el),
-            div().h_full().w(relative(1.0 - ratio)).child(second_el),
-        )
-    } else {
-        (
-            div().w_full().h(relative(ratio)).child(first_el),
-            div().w_full().h(relative(1.0 - ratio)).child(second_el),
-        )
-    };
-
-    let mut container = div().flex().size_full();
-    container = if is_row {
-        container.flex_row()
-    } else {
-        container.flex_col()
-    };
-    container
-        .child(first_wrap)
-        .child(second_wrap)
-        .into_any_element()
-}
-
-/// Render one leaf (tab group): a tab bar + the active tab's terminal
-/// canvas, framed with a focus-indicating border.
-///
-/// ## Per-pane sizing
-///
-/// The canvas's `prepaint` closure (not `paint`) does the resize-diffing:
-/// `canvas`'s two callbacks are the one place gpui hands this element its
-/// actual laid-out `Bounds<Pixels>` (post-flex/post-ratio, so it reacts to
-/// both window resizes and split changes without this module reimplementing
-/// gpui's flex math itself), and `prepaint` is `FnOnce` per repaint, so
-/// calling `Terminal::resize` there -- guarded by the pane's own
-/// `last_size` cache -- runs it exactly once per frame where the size
-/// actually changed. Both closures run outside any `&mut TerminalApp`
-/// borrow (gpui drives them later, during its own paint pass, not
-/// synchronously from `render`), which is why the resize path only needs
-/// `&Terminal` (an `Arc` clone) and a shared `Rc<Cell<_>>`, not app state.
-fn render_leaf(
-    node: &TileNode,
-    runtimes: &HashMap<PaneId, PaneRuntime>,
-    focused_pane: PaneId,
-    spec: &RenderSpec,
-    cx: &mut Context<TerminalApp>,
-) -> AnyElement {
-    let is_focused_leaf = node.panes.iter().any(|p| p.id == focused_pane);
-    let selected_id = node.selected_pane().map(|p| p.id);
-    let runtime = selected_id.and_then(|id| runtimes.get(&id));
-
-    let session_for_resize = runtime.map(|rt| rt.session.clone());
-    let last_size = runtime.map(|rt| rt.last_size.clone());
-    let snapshot = runtime.map(|rt| rt.session.snapshot());
-    let prepaint_spec = spec.clone();
-    let paint_spec = spec.clone();
-
-    let canvas_el = canvas(
-        move |bounds, _window, _cx| {
-            if let (Some(session), Some(last_size)) = (&session_for_resize, &last_size) {
-                let (cols, rows) = grid::grid_size_for_area(
-                    bounds.size.width.into(),
-                    bounds.size.height.into(),
-                    prepaint_spec.cell_width,
-                    prepaint_spec.cell_height,
-                );
-                if last_size.get() != (cols, rows) {
-                    last_size.set((cols, rows));
-                    session.resize(cols, rows);
-                }
-            }
-        },
-        move |bounds, _, window, cx| {
-            if let Some(snapshot) = &snapshot {
-                render::paint_grid(snapshot, &paint_spec, bounds, window, cx);
-            }
-        },
-    )
-    .size_full();
-
-    let click_target = selected_id;
-    let canvas_area = div()
+fn empty_state(message: &'static str) -> gpui::AnyElement {
+    div()
         .flex_1()
-        .w_full()
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(move |this, _: &MouseDownEvent, window, cx| {
-                if let Some(id) = click_target {
-                    this.select_pane(id, window, cx);
-                }
-            }),
-        )
-        .child(canvas_el);
-
-    let tab_bar = render_pane_tab_bar(node, is_focused_leaf, cx);
-
-    div()
         .flex()
-        .flex_col()
-        .size_full()
-        .border_1()
-        .border_color(rgb(if is_focused_leaf {
-            FOCUS_BORDER_COLOR
-        } else {
-            IDLE_BORDER_COLOR
-        }))
-        .child(tab_bar)
-        .child(canvas_area)
-        .into_any_element()
-}
-
-/// One leaf's tab bar: a chip per tab (click to select, "x" to close) plus a
-/// trailing "+" to add another tab to this same group -- the same
-/// click/close/add affordances wave 5a's single window-wide tab bar had, now
-/// per pane.
-fn render_pane_tab_bar(
-    node: &TileNode,
-    is_focused: bool,
-    cx: &mut Context<TerminalApp>,
-) -> impl IntoElement {
-    let anchor = node.selected_pane().map(|p| p.id);
-
-    div()
-        .flex()
-        .flex_row()
         .items_center()
-        .h(px(grid::TAB_BAR_HEIGHT))
-        .w_full()
-        .bg(rgb(if is_focused { 0x2f2f2f } else { 0x232323 }))
-        .px_1()
-        .gap_1()
-        .children(node.panes.iter().map(|pane| {
-            let selected = anchor == Some(pane.id);
-            let pane_id = pane.id;
-            let title: SharedString = pane.title.clone().into();
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_1()
-                .px_2()
-                .rounded_sm()
-                .when(selected, |el| el.bg(rgb(0x454545)))
-                .when(!selected, |el| el.bg(rgb(0x333333)))
-                .child(
-                    div()
-                        .px_1()
-                        .text_color(rgb(0xe5e5e5))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, _: &MouseDownEvent, window, cx| {
-                                this.select_pane(pane_id, window, cx);
-                            }),
-                        )
-                        .child(title),
-                )
-                .child(
-                    div()
-                        .px_1()
-                        .text_color(rgb(0x999999))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, _: &MouseDownEvent, window, cx| {
-                                this.close_pane_user(pane_id, cx);
-                                window.focus(&this.focus_handle);
-                            }),
-                        )
-                        .child("\u{d7}"),
-                )
-        }))
-        .child(
-            div()
-                .px_2()
-                .text_color(rgb(0xe5e5e5))
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _: &MouseDownEvent, window, cx| {
-                        if let Some(anchor) = anchor {
-                            this.add_tab_to(anchor, window, cx);
-                        }
-                    }),
-                )
-                .child("+"),
-        )
-}
-
-/// Bridges `labolabo_term`'s blocking [`Terminal::recv_event`] into gpui,
-/// with the same two-stage coalesce-then-pace design as wave 5a's
-/// (originally the `gpui-term-poc` spike's `spawn_redraw_task`): drain a
-/// burst of already-queued wakeups into one redraw, then enforce
-/// `FRAME_INTERVAL` as a minimum gap before the next one, draining anything
-/// that arrived during that quiet window too. An `Exit` seen at any point
-/// (awaited or drained) closes the pane via [`TerminalApp::handle_pane_exit`]
-/// and ends the task.
-///
-/// `Terminal` exposes no async event stream (`recv_event` blocks the calling
-/// thread), so a dedicated OS thread does the blocking wait and forwards
-/// [`BridgeMsg`]s to the gpui-side async `Task` over an unbounded channel;
-/// the `Task` is the one that actually calls `cx.notify()`, since only
-/// gpui's own executor may touch a `Context`. The bridge thread exits when
-/// either the session reports `TermEvent::Exit` or the channel closes (the
-/// gpui `Task` -- and therefore its receiver -- was dropped because the pane
-/// was closed); see `EVENT_POLL_TIMEOUT`'s doc comment for why the latter is
-/// only checked periodically rather than instantly.
-fn spawn_redraw_bridge(
-    session: Arc<Terminal>,
-    pane_id: PaneId,
-    cx: &mut Context<TerminalApp>,
-) -> Task<()> {
-    let (notify_tx, mut notify_rx) = mpsc::unbounded::<BridgeMsg>();
-
-    thread::spawn(move || loop {
-        match session.recv_event(EVENT_POLL_TIMEOUT) {
-            Some(TermEvent::Wakeup) => {
-                if notify_tx.unbounded_send(BridgeMsg::Wakeup).is_err() {
-                    break;
-                }
-            }
-            Some(TermEvent::Exit) => {
-                let _ = notify_tx.unbounded_send(BridgeMsg::Exit);
-                break;
-            }
-            None => {
-                if notify_tx.is_closed() {
-                    break;
-                }
-            }
-        }
-    });
-
-    cx.spawn(async move |this, cx| {
-        // Drain everything queued right now; report whether an Exit was in
-        // the batch (Exit is terminal, so nothing follows it anyway).
-        let drain = |rx: &mut mpsc::UnboundedReceiver<BridgeMsg>| -> bool {
-            let mut exited = false;
-            while let Ok(msg) = rx.try_recv() {
-                if matches!(msg, BridgeMsg::Exit) {
-                    exited = true;
-                }
-            }
-            exited
-        };
-
-        while let Some(msg) = notify_rx.next().await {
-            let mut exited = matches!(msg, BridgeMsg::Exit);
-            exited |= drain(&mut notify_rx);
-            if exited {
-                let _ = this.update(cx, |app, cx| app.handle_pane_exit(pane_id, cx));
-                break;
-            }
-
-            if this.update(cx, |_, cx| cx.notify()).is_err() {
-                break;
-            }
-
-            Timer::after(FRAME_INTERVAL).await;
-            if drain(&mut notify_rx) {
-                let _ = this.update(cx, |app, cx| app.handle_pane_exit(pane_id, cx));
-                break;
-            }
-        }
-    })
+        .justify_center()
+        .text_color(rgb(0x8a8a8a))
+        .child(message)
+        .into_any_element()
 }
