@@ -126,6 +126,12 @@ pub fn render(app: &LaboLaboApp, cx: &mut Context<LaboLaboApp>) -> impl IntoElem
         for task in group.tasks {
             let is_selected = selected.as_deref() == Some(task.id.as_str());
             let status_color = app.task_agent_status(&task.id).and_then(status_dot_color);
+            // Cross-session conflict warning (`plans` wave 5i §2): another
+            // Task in the same repo has changed one of the same files, per
+            // whatever Git status each has cached so far -- see
+            // `LaboLaboApp::task_conflicts`'s doc comment for the "only
+            // status-fetched Tasks participate" limitation.
+            let has_conflict = !app.task_conflicts(&task.id).is_empty();
             let row_id: SharedString = format!("task-row-{}", task.id).into();
             let drag_task_id = task.id.clone();
             let drag_repo_key = task.repo_key.clone();
@@ -147,6 +153,14 @@ pub fn render(app: &LaboLaboApp, cx: &mut Context<LaboLaboApp>) -> impl IntoElem
                 .child(SharedString::from(task.title.clone()))
                 .when_some(status_color, |el, color| {
                     el.child(div().w(px(6.0)).h(px(6.0)).rounded_full().bg(rgb(color)))
+                })
+                .when(has_conflict, |el| {
+                    el.child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(rgb(0xffa500))
+                            .child("\u{26A0}"),
+                    )
                 })
                 .on_mouse_down(
                     MouseButton::Left,

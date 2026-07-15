@@ -97,12 +97,15 @@ impl VtBackend for AlacrittyBackend {
         rows: u16,
         pty_writer: SharedWriter,
         colors: &ColorScheme,
+        max_scrollback: usize,
     ) -> anyhow::Result<Self> {
-        // `scrolling_history: 1000` mirrors the spike's M3 finding (alacritty's
-        // 10_000 default measurably hurt steady-state throughput; we don't
-        // render scrollback here anyway).
+        // The spike's M3 finding motivated the original `1000` default
+        // (alacritty's own `10_000` default measurably hurt steady-state
+        // throughput; we don't render scrollback here anyway) -- now
+        // caller-configurable (`labolabo-app`'s settings screen), still
+        // defaulting to `1000` (`crate::session::DEFAULT_MAX_SCROLLBACK`).
         let config = Config {
-            scrolling_history: 1000,
+            scrolling_history: max_scrollback,
             ..Config::default()
         };
         let size = GridSize {

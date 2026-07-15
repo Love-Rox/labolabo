@@ -40,7 +40,7 @@ pub mod session;
 pub mod snapshot;
 
 pub use color::ColorScheme;
-pub use session::{SharedWriter, TermEvent, TermSession};
+pub use session::{SharedWriter, TermEvent, TermSession, DEFAULT_MAX_SCROLLBACK};
 pub use snapshot::{CellSnapshot, CursorSnapshot, GridSnapshot, Rgb};
 
 #[cfg(not(any(feature = "backend-alacritty", feature = "backend-ghostty-vt")))]

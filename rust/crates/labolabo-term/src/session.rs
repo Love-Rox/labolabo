@@ -52,6 +52,13 @@ const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 
 const READ_BUF_SIZE: usize = 64 * 1024;
 
+/// Default scrollback cap (lines of history retained past the live
+/// viewport), used by every `spawn_*` entry point that doesn't take an
+/// explicit `max_scrollback` -- see [`TermSession::spawn_with_scrollback_options`].
+/// Both backends previously hardcoded this same value; `labolabo-app`'s
+/// settings screen is the first caller to ever pass something else.
+pub const DEFAULT_MAX_SCROLLBACK: usize = 1000;
+
 /// A notification that something changed. Coalesced: one `Wakeup` may cover
 /// many underlying grid updates. Pull the actual content via
 /// [`TermSession::snapshot`].
@@ -183,6 +190,35 @@ impl<B: VtBackend> TermSession<B> {
         colors: &ColorScheme,
         cwd: Option<&Path>,
     ) -> anyhow::Result<Self> {
+        Self::spawn_with_scrollback_options(
+            cols,
+            rows,
+            command,
+            env,
+            colors,
+            cwd,
+            DEFAULT_MAX_SCROLLBACK,
+        )
+    }
+
+    /// Like [`Self::spawn_with_cwd_options`], with an additional
+    /// `max_scrollback`: how many lines of history the grid retains past
+    /// the live viewport (both backends' `VtBackend::new` -- see that
+    /// trait method's doc comment). `labolabo-app`'s settings screen is
+    /// this method's only caller that passes anything other than
+    /// [`DEFAULT_MAX_SCROLLBACK`] -- every other `spawn_*` entry point
+    /// above funnels down to `spawn_with_cwd_options`, which passes that
+    /// default, so existing callers/tests are unaffected by this method's
+    /// addition.
+    pub fn spawn_with_scrollback_options(
+        cols: u16,
+        rows: u16,
+        command: Option<&str>,
+        env: &[(String, String)],
+        colors: &ColorScheme,
+        cwd: Option<&Path>,
+        max_scrollback: usize,
+    ) -> anyhow::Result<Self> {
         let mut cmd = match command {
             Some(c) => {
                 let mut cmd = CommandBuilder::new("/bin/sh");
@@ -275,6 +311,7 @@ impl<B: VtBackend> TermSession<B> {
                     event_tx,
                     child,
                     colors,
+                    max_scrollback,
                 );
             });
         }
@@ -464,8 +501,9 @@ fn run_worker<B: VtBackend>(
     event_tx: Sender<TermEvent>,
     mut child: Box<dyn portable_pty::Child + Send + Sync>,
     colors: ColorScheme,
+    max_scrollback: usize,
 ) {
-    let mut backend = match B::new(cols, rows, writer, &colors) {
+    let mut backend = match B::new(cols, rows, writer, &colors, max_scrollback) {
         Ok(b) => b,
         Err(_) => return,
     };

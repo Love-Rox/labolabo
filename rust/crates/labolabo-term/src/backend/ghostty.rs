@@ -54,11 +54,12 @@ impl VtBackend for GhosttyBackend {
         rows: u16,
         pty_writer: SharedWriter,
         colors: &ColorScheme,
+        max_scrollback: usize,
     ) -> anyhow::Result<Self> {
         let mut terminal = Terminal::new(TerminalOptions {
             cols,
             rows,
-            max_scrollback: 1000,
+            max_scrollback,
         })
         .map_err(|e| anyhow!("libghostty-vt Terminal::new failed: {e:?}"))?;
 
