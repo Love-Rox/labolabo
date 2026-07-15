@@ -618,11 +618,18 @@ impl LaboLaboApp {
             let Some(dir) = paths.pop() else {
                 return;
             };
-            let (repo_key, repo_root, repo_name) = cx
-                .background_spawn(async move { new_task::resolve_attached_repo(&dir.clone()) })
+            // The *picked* directory is the Task's attached directory (the
+            // user may deliberately pick a subdirectory of a repo -- the
+            // shell should open there, not at the repo root); the resolved
+            // repo identity is only for sidebar grouping/labeling.
+            let (directory, (repo_key, repo_root, repo_name)) = cx
+                .background_spawn(async move {
+                    let repo = new_task::resolve_attached_repo(&dir);
+                    (dir.to_string_lossy().into_owned(), repo)
+                })
                 .await;
             let _ = this.update(cx, |app, cx| {
-                app.finish_new_attached_task(repo_key, repo_root, repo_name, cx)
+                app.finish_new_attached_task(directory, repo_key, repo_root, repo_name, cx)
             });
         })
         .detach();
@@ -630,14 +637,12 @@ impl LaboLaboApp {
 
     fn finish_new_attached_task(
         &mut self,
+        directory: String,
         repo_key: String,
         repo_root: String,
         repo_name: String,
         cx: &mut Context<Self>,
     ) {
-        // `resolve_attached_repo`'s no-repo fallback sets `repo_root` to the
-        // directory itself, which doubles as the attached directory here.
-        let directory = repo_root.clone();
         let layout = single_terminal_layout();
         let sort_order = self.next_sort_order();
         let task = Task::new_attached(
