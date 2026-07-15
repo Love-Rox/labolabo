@@ -670,3 +670,63 @@ implementation); unit tests cover CRUD round-trips (including `TileLayout`
 through the DB), migration-ledger idempotence, on-disk reopen persistence,
 and malformed-value error surfacing. The UI driving all of this lives in
 `crates/labolabo-app` (see its README's "The Task model" section).
+
+## Wave 6a (macOS `.app` bundle)
+
+`scripts/bundle-macos.sh` packages the three built binaries
+(`labolabo-app`, the gpui GUI; `labolabo`, the control CLI; `labolabo-hook`,
+the Claude Code hooks forwarder — see "Wave 4b" above) into a distributable
+`LaboLabo-rs.app`, mirroring the Swift app's own release packaging
+(`.github/workflows/release-build.yml`):
+
+```sh
+rust/scripts/bundle-macos.sh
+# -> rust/target/bundle/LaboLabo-rs.app
+# -> rust/target/bundle/LaboLabo-rs-<version>.zip
+```
+
+It runs `cargo build --release -p labolabo-app -p labolabo-core`, then
+assembles `Contents/MacOS/{labolabo-app,labolabo,labolabo-hook}`,
+`Contents/Resources/AppIcon.icns`, and `Contents/Info.plist`, ad-hoc signs
+(`codesign --sign -`, the same signing identity the Swift app's release
+build uses — no Developer ID / notarization), and zips with `ditto`.
+
+A few design decisions worth calling out:
+
+- **All three binaries live side by side in `Contents/MacOS/`.** This isn't
+  just a packaging convenience: `crates/labolabo-app/src/hooks.rs`'s
+  `resolve_hook_binary` finds `labolabo-hook` as the sibling of
+  `std::env::current_exe()`, so this layout is what makes hooks injection
+  (agent status dots, session memory, resume-at-restore) work inside the
+  bundle at all — no code change was needed, the existing sibling-directory
+  resolution already fits an app bundle's flat `MacOS/` directory.
+- **Bundle identifier**: `com.love-rox.labolabo-rs` — the same
+  `com.love-rox` prefix as the Swift app (`app/project.yml`'s
+  `bundleIdPrefix`), with an `-rs` suffix so the two apps never collide
+  (separate `LSApplicationCategoryType`/data dirs/preferences; the Rust
+  port's own on-disk data directory, `store::rust_app_data_dir`, is
+  similarly named `LaboLabo-rs`, not `LaboLabo` — see "Wave 5b-3" above).
+- **Version**: `CFBundleShortVersionString` is a hand-set `1.0.0`, *not*
+  the workspace crates' own `Cargo.toml` `version` (still `0.1.0` — this
+  port is pre-1.0 internally) — per explicit product direction, this
+  bundle is versioned as a major bump from the current Swift app's release
+  line (`Config/Version.xcconfig`'s `MARKETING_VERSION`, 0.7.x as of this
+  wave), not a continuation of either the Swift 0.x line or the crates' own
+  0.1.0. `CFBundleVersion` (the build number) follows the Swift app's own
+  convention: `git rev-list --count HEAD`.
+- **Icon**: reuses the Swift app's own artwork
+  (`app/Sources/Assets.xcassets/AppIcon.appiconset/*.png`) rather than
+  shipping unbranded or placeholder icons — those PNGs already use
+  `iconutil`'s exact `.iconset` naming convention, so the script copies
+  them into a scratch `.iconset` directory and converts with
+  `iconutil -c icns` directly.
+- **`LSMinimumSystemVersion`**: `10.15.7`, gpui's own
+  Metal-backed-renderer floor (its `build.rs` passes this as the macOS
+  linker version-min), not the Swift app's unrelated `14.0` deployment
+  target.
+
+`.github/workflows/rust-app-bundle.yml` runs this script on `macos-15` and
+uploads the resulting `.zip` as a workflow artifact. It's
+**`workflow_dispatch`-only** (no push/PR/release trigger) — the Rust port
+isn't part of the release-please/`release-build.yml` release flow yet;
+that integration is a separate future decision.
