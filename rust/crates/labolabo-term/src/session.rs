@@ -26,7 +26,7 @@
 use std::io::{Read, Write};
 use std::marker::PhantomData;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -36,6 +36,7 @@ use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, Pt
 
 use crate::backend::VtBackend;
 use crate::color::ColorScheme;
+use crate::mouse::MouseMode;
 use crate::snapshot::GridSnapshot;
 
 /// Shared, mutex-guarded PTY writer. Both the caller's [`TermSession::
@@ -112,6 +113,17 @@ pub struct TermSession<B: VtBackend> {
     /// viewport or send cursor-key sequences instead (see
     /// `VtBackend::alt_screen_active`'s doc comment).
     alt_screen: Arc<AtomicBool>,
+    /// Mirrors `VtBackend::alternate_scroll_active` for the caller thread --
+    /// same refresh cadence/shape as `alt_screen` above. Read by
+    /// [`Self::alternate_scroll_active`].
+    alternate_scroll: Arc<AtomicBool>,
+    /// Mirrors `VtBackend::mouse_mode` for the caller thread -- same refresh
+    /// cadence as `bracketed_paste`/`alt_screen` above (a plain flag the
+    /// worker thread refreshes after every processed PTY byte batch), just
+    /// packed into a single `AtomicU8` (see `MouseMode::to_bits`/
+    /// `from_bits`) rather than an `AtomicBool`, since it carries more than
+    /// one bit of state. Read by [`Self::mouse_mode`].
+    mouse_mode: Arc<AtomicU8>,
     /// A kill handle split off the child (`Child::clone_killer`) so
     /// [`Self::shutdown`] can signal it even though the `Child` itself is
     /// owned by (and reaped on) the worker thread.
@@ -263,6 +275,13 @@ impl<B: VtBackend> TermSession<B> {
         let latest = Arc::new(Mutex::new(Arc::new(GridSnapshot::blank(cols, rows))));
         let bracketed_paste = Arc::new(AtomicBool::new(false));
         let alt_screen = Arc::new(AtomicBool::new(false));
+        // Defaults `true` -- matches both backends' own documented default
+        // for DECSET 1007 (see `VtBackend::alternate_scroll_active`'s doc
+        // comment), so a session's very first snapshot (before any worker
+        // update has landed) reports the same value the backend itself
+        // would report once queried.
+        let alternate_scroll = Arc::new(AtomicBool::new(true));
+        let mouse_mode = Arc::new(AtomicU8::new(MouseMode::OFF.to_bits()));
         let (event_tx, event_rx) = mpsc::channel::<TermEvent>();
         let (worker_tx, worker_rx) = mpsc::channel::<WorkerMsg>();
 
@@ -299,6 +318,8 @@ impl<B: VtBackend> TermSession<B> {
             let colors = colors.clone();
             let bracketed_paste = bracketed_paste.clone();
             let alt_screen = alt_screen.clone();
+            let alternate_scroll = alternate_scroll.clone();
+            let mouse_mode = mouse_mode.clone();
             thread::spawn(move || {
                 run_worker::<B>(
                     cols,
@@ -307,6 +328,8 @@ impl<B: VtBackend> TermSession<B> {
                     latest,
                     bracketed_paste,
                     alt_screen,
+                    alternate_scroll,
+                    mouse_mode,
                     worker_rx,
                     event_tx,
                     child,
@@ -322,6 +345,8 @@ impl<B: VtBackend> TermSession<B> {
             latest,
             bracketed_paste,
             alt_screen,
+            alternate_scroll,
+            mouse_mode,
             events: Mutex::new(event_rx),
             worker_tx: Mutex::new(worker_tx),
             killer: Mutex::new(killer),
@@ -440,6 +465,29 @@ impl<B: VtBackend> TermSession<B> {
         self.alt_screen.load(Ordering::Relaxed)
     }
 
+    /// Whether "alternate scroll mode" (DECSET `1007`) is currently active
+    /// -- a cheap, non-blocking read of the flag the worker thread
+    /// refreshes after every processed PTY byte batch (see `run_worker`
+    /// and `VtBackend::alternate_scroll_active`, including its doc comment
+    /// for the `true` default). `labolabo-app`'s wheel handler checks this
+    /// (only once mouse reporting is confirmed off -- see `Self::
+    /// mouse_mode`) to decide whether an alt-screen scroll gesture should
+    /// convert to cursor-key sequences at all.
+    pub fn alternate_scroll_active(&self) -> bool {
+        self.alternate_scroll.load(Ordering::Relaxed)
+    }
+
+    /// The running program's currently requested mouse-reporting
+    /// configuration -- a cheap, non-blocking read of the flag the worker
+    /// thread refreshes after every processed PTY byte batch (see
+    /// `run_worker` and `VtBackend::mouse_mode`). `labolabo-app`'s
+    /// mouse-event routing uses this to decide whether a click/drag/scroll
+    /// should be SGR-encoded and forwarded to the child instead of driving
+    /// this crate's own text-selection/scrollback UI.
+    pub fn mouse_mode(&self) -> MouseMode {
+        MouseMode::from_bits(self.mouse_mode.load(Ordering::Relaxed))
+    }
+
     /// Wait up to `timeout` for the next [`TermEvent`], or `None` on timeout.
     pub fn recv_event(&self, timeout: Duration) -> Option<TermEvent> {
         let rx = self.events.lock().ok()?;
@@ -497,6 +545,8 @@ fn run_worker<B: VtBackend>(
     latest: Arc<Mutex<Arc<GridSnapshot>>>,
     bracketed_paste: Arc<AtomicBool>,
     alt_screen: Arc<AtomicBool>,
+    alternate_scroll: Arc<AtomicBool>,
+    mouse_mode: Arc<AtomicU8>,
     rx: Receiver<WorkerMsg>,
     event_tx: Sender<TermEvent>,
     mut child: Box<dyn portable_pty::Child + Send + Sync>,
@@ -563,6 +613,8 @@ fn run_worker<B: VtBackend>(
                 // time between frames).
                 bracketed_paste.store(backend.bracketed_paste(), Ordering::Relaxed);
                 alt_screen.store(backend.alt_screen_active(), Ordering::Relaxed);
+                alternate_scroll.store(backend.alternate_scroll_active(), Ordering::Relaxed);
+                mouse_mode.store(backend.mouse_mode().to_bits(), Ordering::Relaxed);
                 if last_snapshot.elapsed() >= FRAME_INTERVAL {
                     last_snapshot = Instant::now();
                     publish_snapshot(&mut backend, &latest, &event_tx);

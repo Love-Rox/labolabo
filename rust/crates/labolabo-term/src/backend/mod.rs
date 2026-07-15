@@ -14,6 +14,7 @@
 //! this is compile-time monomorphization, not runtime dispatch.
 
 use crate::color::ColorScheme;
+use crate::mouse::MouseMode;
 use crate::session::SharedWriter;
 use crate::snapshot::GridSnapshot;
 
@@ -143,4 +144,47 @@ pub trait VtBackend: 'static {
     /// primary screen's scrollback), so [`Self::scroll_display`] would be a
     /// silent no-op there regardless.
     fn alt_screen_active(&self) -> bool;
+
+    /// Whether "alternate scroll mode" (DECSET `1007`) is currently
+    /// active: while [`Self::alt_screen_active`] is also true, this tells
+    /// [`crate::TermSession`]'s caller whether a wheel/trackpad scroll
+    /// gesture over the alt screen should be translated into cursor-key
+    /// escape sequences (`labolabo-app`'s existing behavior for `vim`/
+    /// `less`/`htop`-style programs that manage their own internal
+    /// scrolling) -- or, when `false`, left alone entirely (neither
+    /// forwarded as cursor keys nor scrolled locally -- there is nothing
+    /// sensible to do with a scroll gesture over a bare alt-screen program
+    /// that has explicitly opted out of both mouse reporting *and*
+    /// alternate scroll).
+    ///
+    /// **Defaults to `true`** on both backends when unset (confirmed by
+    /// reading each backend's own source): `alacritty_terminal`'s
+    /// `TermMode::default()` includes `ALTERNATE_SCROLL`; `libghostty-vt`'s
+    /// underlying Zig source (`terminal/modes.zig`) gives its
+    /// `mouse_alternate_scroll` entry `.default = true`. A caller
+    /// checking this before mouse-tracking is even considered (see
+    /// `labolabo-app`'s wheel handler, which checks [`Self::mouse_mode`]
+    /// first and only falls through to this when tracking is off) gets the
+    /// same "convert to cursor keys" behavior this crate already had before
+    /// this method existed, for every alt-screen program that hasn't
+    /// explicitly disabled it -- this method only changes behavior for the
+    /// rarer case of a program that both uses the alt screen *and*
+    /// explicitly sends `ESC[?1007l`.
+    fn alternate_scroll_active(&self) -> bool;
+
+    /// The running program's currently requested mouse-reporting
+    /// configuration (DECSET `9`/`1000`/`1002`/`1003` tracking mode, DECSET
+    /// `1006` SGR coordinates) -- see [`MouseMode`]'s doc comment.
+    ///
+    /// Queried after every processed PTY byte batch and cached in a plain
+    /// `MouseMode` the caller thread can read without blocking (see
+    /// [`crate::TermSession::mouse_mode`]) -- the same "publish a cheap
+    /// plain-data flag for the caller thread" shape as
+    /// [`Self::bracketed_paste`]/[`Self::alt_screen_active`], just for a
+    /// small struct instead of a single bool. `labolabo-app`'s mouse-event
+    /// routing uses this to decide whether a click/drag/scroll should be
+    /// SGR-encoded and forwarded to the child (vim, tmux, a mouse-aware
+    /// TUI, ...) instead of driving this crate's own text-selection/
+    /// scrollback UI.
+    fn mouse_mode(&self) -> MouseMode;
 }

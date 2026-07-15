@@ -27,14 +27,15 @@ use std::time::Duration;
 use futures::channel::mpsc;
 use futures::StreamExt;
 use gpui::{
-    canvas, div, prelude::*, px, relative, rgb, rgba, AnyElement, Bounds, Context, DragMoveEvent,
-    ElementInputHandler, ExternalPaths, FocusHandle, IntoElement, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollWheelEvent, SharedString, Task as GpuiTask,
-    Window,
+    canvas, div, prelude::*, px, relative, rgb, rgba, AnyElement, Bounds, Context, CursorStyle,
+    DragMoveEvent, ElementInputHandler, ExternalPaths, FocusHandle, IntoElement, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollWheelEvent, SharedString,
+    Task as GpuiTask, Window,
 };
 
 use labolabo_core::{
-    AgentStatus, AgentUsage, DropEdge, PaneId, PaneKind, PaneTilingModel, TileNode, TileOrientation,
+    AgentStatus, AgentUsage, DropEdge, NodeId, PaneId, PaneKind, PaneTilingModel, TileNode,
+    TileOrientation,
 };
 use labolabo_term::{TermEvent, Terminal};
 
@@ -98,6 +99,36 @@ impl Render for TabDragPreview {
             .text_color(rgb(0xe5e5e5))
             .text_size(px(11.0))
             .child(self.0.clone())
+    }
+}
+
+/// Payload of an in-progress pane-divider drag (`render_tile`'s split
+/// branch): identifies which split node's `ratio` is being dragged, and
+/// along which axis. `orientation` is carried here (rather than re-derived
+/// from the tree on every drag-move event) so a drag stays well-defined
+/// even if `orientation` were ever ambiguous mid-drag -- a resize never
+/// changes a split's own orientation, so this is simply the value read
+/// once when the drag started (`plans` W5j #2 -- interactive divider
+/// drag-resize).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DividerDragPayload {
+    pub node_id: NodeId,
+    pub orientation: TileOrientation,
+}
+
+/// The (deliberately invisible) view gpui's drag-and-drop system requires
+/// as a [`DividerDragPayload`] drag's `.on_drag` preview. A divider drag
+/// has no meaningful "thing being dragged" to show under the cursor, unlike
+/// [`TabDragPreview`]: the two neighboring panes resize live underneath as
+/// the ratio updates (`app::LaboLaboApp::update_divider_drag`), which *is*
+/// the drag's own visual feedback -- a floating ghost chip following the
+/// cursor on top of that would only be visual noise. Renders as a bare,
+/// zero-size `div()`.
+pub struct DividerDragPreview;
+
+impl Render for DividerDragPreview {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
     }
 }
 
@@ -208,6 +239,20 @@ pub struct PaneRuntime {
     /// extract text. See `crate::selection`'s module doc comment for what
     /// a selection's coordinates mean against a possibly-scrolled snapshot.
     pub selection: Option<Selection>,
+    /// Whether the in-progress left-button gesture (mouse-down through the
+    /// matching mouse-up) is being SGR-encoded and forwarded to the child
+    /// program's PTY (`crate::mouse_report`), instead of driving local text
+    /// selection (`selection` above) -- decided once, at mouse-down
+    /// (`app::LaboLaboApp::begin_selection`), from that moment's
+    /// `Terminal::mouse_mode()` and whether Shift was held (Shift forces
+    /// local selection even while the child has mouse reporting on --
+    /// matches real Ghostty's own default `mouse-shift-capture` behavior,
+    /// confirmed by reading the vendored Ghostty source), and held fixed
+    /// for the rest of that one gesture so a modifier key changing
+    /// mid-drag can't switch behavior underneath the user. `selection` and
+    /// this flag are mutually exclusive for the duration of one gesture:
+    /// when this is `true`, `selection` is left `None` throughout.
+    pub reporting_drag: bool,
     /// Fractional scroll-line remainder carried between wheel/trackpad
     /// events for this pane -- see `grid::accumulate_scroll_lines`'s doc
     /// comment for why this needs to persist across events (a slow
@@ -334,6 +379,37 @@ pub fn spawn_redraw_bridge(
     });
 
     cx.spawn(async move |this, cx| {
+        // Coalesce a burst of already-buffered messages into whatever this
+        // one call observes -- never blocks (`try_recv`), so calling it
+        // right after `notify_rx.next().await` already delivered one
+        // message just picks up anything that piled up behind it. Only
+        // ever used *before* this loop's own `cx.notify()`, so its "did we
+        // see `Exit`" return value is the one thing every caller needs;
+        // any `Wakeup`s it drains are implicitly covered by the `notify()`
+        // that follows in the same loop iteration.
+        //
+        // W5j bug report #2 (a terminal pane appearing "stuck"/stale after
+        // a layout change, e.g. toggling the Git side pane, until real PTY
+        // output arrived): an earlier version of this function *also*
+        // called `drain` a second time, after the `FRAME_INTERVAL` pacing
+        // sleep below, using only its `Exit`-detection return value -- any
+        // `Wakeup`(s) that drain silently discarded were never followed by
+        // a `cx.notify()` at all, so gpui had no reason to repaint until
+        // some later, unrelated event happened to produce a fresh
+        // `Wakeup`. A resize is exactly the kind of event prone to
+        // producing a second, closely-spaced `Wakeup` within that 16ms
+        // window (the resize's own snapshot-republish, immediately
+        // followed by the child program's own SIGWINCH-triggered
+        // redraw/echo) -- landing precisely in the swallow window. Fixed
+        // by removing that second call outright: anything that arrives
+        // during the sleep is simply left queued, so `notify_rx.next()
+        // .await` at the top of the next iteration resolves immediately
+        // (non-blocking in practice) and this same drain-then-notify path
+        // runs again for it, guaranteeing every real `Wakeup` is
+        // eventually followed by a `cx.notify()` call -- the actual
+        // invariant this bridge needs -- while still capping the rate to
+        // at most one `cx.notify()` per `FRAME_INTERVAL`, exactly as
+        // before.
         let drain = |rx: &mut mpsc::UnboundedReceiver<BridgeMsg>| -> bool {
             let mut exited = false;
             while let Ok(msg) = rx.try_recv() {
@@ -357,10 +433,6 @@ pub fn spawn_redraw_bridge(
             }
 
             gpui::Timer::after(FRAME_INTERVAL).await;
-            if drain(&mut notify_rx) {
-                let _ = this.update(cx, |app, cx| app.handle_pane_exit(&task_id, pane_id, cx));
-                break;
-            }
         }
     })
 }
@@ -385,6 +457,7 @@ pub fn insert_runtime(
             last_size: Rc::new(Cell::new((cols, rows))),
             last_bounds: Rc::new(Cell::new(Bounds::default())),
             selection: None,
+            reporting_drag: false,
             pending_scroll: 0.0,
             pane_uuid,
             _redraw_task: redraw_task,
@@ -392,9 +465,23 @@ pub fn insert_runtime(
     );
 }
 
+/// Hit-test width (pixels) of a pane-divider's drag handle, and the
+/// visible width of its hover/active highlight -- both the same fixed
+/// thickness, centered exactly on the split boundary (`ratio * 100%`) via
+/// a negative margin of half this width, regardless of the split
+/// container's actual pixel size. Deliberately small (a thin line, not a
+/// wide gutter) to keep the two neighboring panes' content flush most of
+/// the time, matching most desktop split-pane conventions.
+const DIVIDER_HIT_WIDTH: f32 = 6.0;
+
 /// Recursively render one node of `task_id`'s tile tree -- identical
 /// tree-walk to wave 5b-2's `app::render_tile`, just carrying `task_id`
-/// through so leaf click handlers route back to the right Task.
+/// through so leaf click handlers route back to the right Task, plus (W5j
+/// #2) a draggable divider between a split's two children and
+/// `divider_drag_active` threaded through to every leaf so their canvases'
+/// `prepaint` closures can suppress `Terminal::resize` while any divider
+/// anywhere in the tree is actively being dragged (see `render_leaf`'s doc
+/// comment on this parameter).
 #[allow(clippy::too_many_arguments)]
 pub fn render_tile(
     task_id: &str,
@@ -407,6 +494,7 @@ pub fn render_tile(
     focus_handle: &FocusHandle,
     active_preedit: Option<&PreeditState>,
     pane_drag_hover: Option<PaneDragHover>,
+    divider_drag_active: bool,
     cx: &mut Context<LaboLaboApp>,
 ) -> AnyElement {
     if node.is_leaf() {
@@ -421,6 +509,7 @@ pub fn render_tile(
             focus_handle,
             active_preedit,
             pane_drag_hover,
+            divider_drag_active,
             cx,
         );
     }
@@ -440,12 +529,16 @@ pub fn render_tile(
             focus_handle,
             active_preedit,
             pane_drag_hover,
+            divider_drag_active,
             cx,
         );
     };
 
     let is_row = node.orientation == TileOrientation::Horizontal;
-    let ratio = (node.ratio as f32).clamp(0.05, 0.95);
+    let ratio = (node.ratio as f32).clamp(
+        labolabo_core::MIN_SPLIT_RATIO as f32,
+        labolabo_core::MAX_SPLIT_RATIO as f32,
+    );
 
     let first_el = render_tile(
         task_id,
@@ -458,6 +551,7 @@ pub fn render_tile(
         focus_handle,
         active_preedit,
         pane_drag_hover,
+        divider_drag_active,
         cx,
     );
     let second_el = render_tile(
@@ -471,6 +565,7 @@ pub fn render_tile(
         focus_handle,
         active_preedit,
         pane_drag_hover,
+        divider_drag_active,
         cx,
     );
 
@@ -486,7 +581,74 @@ pub fn render_tile(
         )
     };
 
-    let mut container = div().flex().size_full();
+    // The draggable divider: an absolutely-positioned handle centered on
+    // the boundary line (`ratio * 100%` along the split axis, shifted back
+    // by half its own width via a negative margin so it straddles the
+    // boundary regardless of the container's actual pixel size), on top of
+    // (rendered after, in `container`'s child order) the two panes so it
+    // can catch mouse events right at their shared edge. Cursor and hover
+    // highlight communicate "draggable" the same way real desktop split
+    // panes do; the drag itself uses gpui's native drag-and-drop system
+    // (`on_drag`/`on_drag_move`/`on_drop`) rather than raw mouse-move --
+    // the same mechanism this file's tab-chip drag (`TabDragPayload`)
+    // already uses -- specifically because `on_drag_move`/`on_drop`
+    // deliver events based on the *drag's* live pointer position against
+    // whichever element they're registered on (here, `container` itself,
+    // spanning exactly the pixel region a ratio needs to be computed
+    // against), independent of the thin divider's own hit-test bounds --
+    // unlike a raw `on_mouse_move` listener, which only fires while the
+    // cursor is still hovering the *specific* element it's registered on,
+    // and would lose the drag the instant a fast flick outran a thin
+    // handle's own hitbox.
+    let divider_node_id = node.id;
+    let divider_id: SharedString = format!("divider-{task_id}-{:?}", node.id).into();
+    let divider = if is_row {
+        div()
+            .id(divider_id)
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .left(relative(ratio))
+            .ml(px(-(DIVIDER_HIT_WIDTH / 2.0)))
+            .w(px(DIVIDER_HIT_WIDTH))
+            .cursor(CursorStyle::ResizeLeftRight)
+            .hover(|el| el.bg(rgba(0x5e9eff66)))
+    } else {
+        div()
+            .id(divider_id)
+            .absolute()
+            .left_0()
+            .right_0()
+            .top(relative(ratio))
+            .mt(px(-(DIVIDER_HIT_WIDTH / 2.0)))
+            .h(px(DIVIDER_HIT_WIDTH))
+            .cursor(CursorStyle::ResizeUpDown)
+            .hover(|el| el.bg(rgba(0x5e9eff66)))
+    };
+    let divider = divider.on_drag(
+        DividerDragPayload {
+            node_id: divider_node_id,
+            orientation: node.orientation,
+        },
+        |_payload, _offset, _window, cx| cx.new(|_cx| DividerDragPreview),
+    );
+
+    let drag_task_id = task_id.to_string();
+    let drop_task_id = task_id.to_string();
+    let mut container = div()
+        .relative()
+        .flex()
+        .size_full()
+        .on_drag_move::<DividerDragPayload>(cx.listener(
+            move |app, event: &DragMoveEvent<DividerDragPayload>, _window, cx| {
+                app.update_divider_drag(&drag_task_id, event, cx);
+            },
+        ))
+        .on_drop::<DividerDragPayload>(cx.listener(
+            move |app, _payload: &DividerDragPayload, _window, cx| {
+                app.finish_divider_drag(&drop_task_id, cx);
+            },
+        ));
     container = if is_row {
         container.flex_row()
     } else {
@@ -495,14 +657,18 @@ pub fn render_tile(
     container
         .child(first_wrap)
         .child(second_wrap)
+        .child(divider)
         .into_any_element()
 }
 
 /// Render one leaf (tab group) of `task_id`'s tree. Identical to wave
 /// 5b-2's `app::render_leaf` (see its doc comment for the per-pane sizing
 /// rationale -- unchanged) other than threading `task_id` through the click
-/// handler, plus (this wave) wiring up IME input handling and the preedit
-/// overlay for whichever pane is the app's *focused* one.
+/// handler, wiring up IME input handling and the preedit overlay for
+/// whichever pane is the app's *focused* one, and (W5j #2)
+/// `divider_drag_active`, which the canvas's `prepaint` closure consults to
+/// suppress `Terminal::resize` while a divider anywhere in this Task's tree
+/// is being dragged -- see that closure's own comment.
 #[allow(clippy::too_many_arguments)]
 fn render_leaf(
     task_id: &str,
@@ -515,6 +681,7 @@ fn render_leaf(
     focus_handle: &FocusHandle,
     active_preedit: Option<&PreeditState>,
     pane_drag_hover: Option<PaneDragHover>,
+    divider_drag_active: bool,
     cx: &mut Context<LaboLaboApp>,
 ) -> AnyElement {
     let is_focused_leaf = node.panes.iter().any(|p| p.id == focused_pane);
@@ -556,16 +723,32 @@ fn render_leaf(
             if let Some(last_bounds) = &last_bounds_for_prepaint {
                 last_bounds.set(bounds);
             }
-            if let (Some(session), Some(last_size)) = (&session_for_resize, &last_size) {
-                let (cols, rows) = grid::grid_size_for_area(
-                    bounds.size.width.into(),
-                    bounds.size.height.into(),
-                    prepaint_spec.cell_width,
-                    prepaint_spec.cell_height,
-                );
-                if last_size.get() != (cols, rows) {
-                    last_size.set((cols, rows));
-                    session.resize(cols, rows);
+            // While any divider anywhere in this Task's tree is actively
+            // being dragged, `Terminal::resize` is suppressed here --
+            // `last_size` (and therefore whether a resize is due) is left
+            // untouched, so the *first* prepaint after the drag ends (once
+            // `divider_drag_active` goes back to `false` -- `app::
+            // LaboLaboApp::finish_divider_drag` clears it and calls
+            // `cx.notify()`) still detects the full accumulated size
+            // change against whatever `last_size` was before the drag
+            // started, and resizes exactly once with the final bounds.
+            // This is the "間引き" (throttle) `plans` W5j #2 asks for,
+            // applied as "finalize once at drag-end" rather than a
+            // time-based interval -- deliberately simpler to reason about
+            // than a mid-drag 16ms timer, and the task's own wording
+            // permits either.
+            if !divider_drag_active {
+                if let (Some(session), Some(last_size)) = (&session_for_resize, &last_size) {
+                    let (cols, rows) = grid::grid_size_for_area(
+                        bounds.size.width.into(),
+                        bounds.size.height.into(),
+                        prepaint_spec.cell_width,
+                        prepaint_spec.cell_height,
+                    );
+                    if last_size.get() != (cols, rows) {
+                        last_size.set((cols, rows));
+                        session.resize(cols, rows);
+                    }
                 }
             }
         },
@@ -599,13 +782,15 @@ fn render_leaf(
     .size_full();
 
     // Mouse wiring for this leaf's canvas: click-to-focus (pre-existing)
-    // plus mouse-down/move/up for text selection and wheel/trackpad
-    // scroll, all keyed off `click_target` (this leaf's selected pane --
-    // the one a click or scroll here should act on) and `task_id` (so a
-    // handler fired later, on whichever Task happens to be selected then,
-    // still routes back to *this* leaf's own Task -- see this function's
-    // doc comment). Each handler needs its own `move` capture of `task_id`
-    // since `cx.listener` closures can't share one.
+    // plus mouse-down/move/up for text selection *or* SGR mouse-report
+    // forwarding (`app::LaboLaboApp::begin_selection` decides which, per
+    // gesture -- see `crate::mouse_report`'s module doc comment) and
+    // wheel/trackpad scroll, all keyed off `click_target` (this leaf's
+    // selected pane -- the one a click or scroll here should act on) and
+    // `task_id` (so a handler fired later, on whichever Task happens to be
+    // selected then, still routes back to *this* leaf's own Task -- see
+    // this function's doc comment). Each handler needs its own `move`
+    // capture of `task_id` since `cx.listener` closures can't share one.
     let click_target = selected_id;
     let mousedown_task_id = task_id.to_string();
     let canvas_area = div().flex_1().w_full().on_mouse_down(
@@ -613,7 +798,7 @@ fn render_leaf(
         cx.listener(move |this, event: &MouseDownEvent, window, cx| {
             if let Some(id) = click_target {
                 this.select_pane(&mousedown_task_id, id, window, cx);
-                this.begin_selection(&mousedown_task_id, id, event.position, cx);
+                this.begin_selection(&mousedown_task_id, id, event, cx);
             }
         }),
     );
@@ -621,13 +806,16 @@ fn render_leaf(
     let move_task_id = task_id.to_string();
     let canvas_area = canvas_area.on_mouse_move(cx.listener(
         move |this, event: &MouseMoveEvent, _window, cx| {
-            // Only an active left-button drag extends a selection -- a
-            // plain hover (no button held) must not.
+            // Only an active left-button drag extends a selection or a
+            // mouse-report gesture -- a plain hover (no button held) does
+            // neither. Bare-hover mouse-move forwarding (relevant only
+            // under `MouseTracking::Any`) is out of scope for this wave --
+            // see `crate::mouse_report`'s module doc comment.
             if !event.dragging() {
                 return;
             }
             if let Some(id) = click_target {
-                this.extend_selection(&move_task_id, id, event.position, cx);
+                this.extend_selection(&move_task_id, id, event, cx);
             }
         },
     ));
@@ -635,9 +823,72 @@ fn render_leaf(
     let mouseup_task_id = task_id.to_string();
     let canvas_area = canvas_area.on_mouse_up(
         MouseButton::Left,
-        cx.listener(move |this, _: &MouseUpEvent, _window, cx| {
+        cx.listener(move |this, event: &MouseUpEvent, _window, cx| {
             if let Some(id) = click_target {
-                this.finish_selection(&mouseup_task_id, id, cx);
+                this.finish_selection(&mouseup_task_id, id, event, cx);
+            }
+        }),
+    );
+
+    // Right/middle-button clicks have no *local* behavior in this app (no
+    // context menu, no paste-on-middle-click) -- they're wired only for
+    // SGR mouse-report forwarding, a silent no-op when the pane's program
+    // hasn't requested mouse tracking (or Shift is held).
+    let right_down_task_id = task_id.to_string();
+    let canvas_area = canvas_area.on_mouse_down(
+        MouseButton::Right,
+        cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+            if let Some(id) = click_target {
+                this.report_mouse_click(
+                    &right_down_task_id,
+                    id,
+                    crate::mouse_report::MouseButtonKind::Right,
+                    event,
+                    cx,
+                );
+            }
+        }),
+    );
+    let right_up_task_id = task_id.to_string();
+    let canvas_area = canvas_area.on_mouse_up(
+        MouseButton::Right,
+        cx.listener(move |this, event: &MouseUpEvent, _window, _cx| {
+            if let Some(id) = click_target {
+                this.report_mouse_release(
+                    &right_up_task_id,
+                    id,
+                    crate::mouse_report::MouseButtonKind::Right,
+                    event,
+                );
+            }
+        }),
+    );
+    let middle_down_task_id = task_id.to_string();
+    let canvas_area = canvas_area.on_mouse_down(
+        MouseButton::Middle,
+        cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+            if let Some(id) = click_target {
+                this.report_mouse_click(
+                    &middle_down_task_id,
+                    id,
+                    crate::mouse_report::MouseButtonKind::Middle,
+                    event,
+                    cx,
+                );
+            }
+        }),
+    );
+    let middle_up_task_id = task_id.to_string();
+    let canvas_area = canvas_area.on_mouse_up(
+        MouseButton::Middle,
+        cx.listener(move |this, event: &MouseUpEvent, _window, _cx| {
+            if let Some(id) = click_target {
+                this.report_mouse_release(
+                    &middle_up_task_id,
+                    id,
+                    crate::mouse_report::MouseButtonKind::Middle,
+                    event,
+                );
             }
         }),
     );

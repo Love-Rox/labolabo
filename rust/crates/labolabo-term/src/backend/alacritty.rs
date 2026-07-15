@@ -20,6 +20,7 @@ use alacritty_terminal::vte::ansi::{
 
 use crate::backend::VtBackend;
 use crate::color::ColorScheme;
+use crate::mouse::{MouseMode, MouseTracking};
 use crate::session::SharedWriter;
 use crate::snapshot::{CellSnapshot, CursorSnapshot, GridSnapshot, Rgb};
 
@@ -241,6 +242,41 @@ impl VtBackend for AlacrittyBackend {
 
     fn alt_screen_active(&self) -> bool {
         self.term.mode().contains(TermMode::ALT_SCREEN)
+    }
+
+    fn alternate_scroll_active(&self) -> bool {
+        self.term.mode().contains(TermMode::ALTERNATE_SCROLL)
+    }
+
+    fn mouse_mode(&self) -> MouseMode {
+        let mode = self.term.mode();
+        // The three tracking bits below are mutually exclusive (confirmed
+        // by reading `alacritty_terminal`'s `set_private_mode`: "Mouse
+        // protocols are mutually exclusive" -- it clears the whole
+        // `TermMode::MOUSE_MODE` group before inserting the newly-set bit),
+        // checked most-specific first for the same reasoning as the
+        // ghostty backend's `mouse_mode`.
+        //
+        // DECSET `9` (X10) has no dedicated `TermMode` bit at all: the
+        // vendored `vte::ansi::PrivateMode::from(u16)` mapping this crate
+        // depends on (confirmed by reading its source) has no
+        // `NamedPrivateMode` variant for mode `9`, so `alacritty_terminal`
+        // silently ignores it -- this backend can never report
+        // `MouseTracking::X10` (see `MouseTracking::X10`'s own doc comment
+        // for the same limitation, and `crate::backend::ghostty
+        // ::GhosttyBackend::mouse_mode` for the backend that *does* track
+        // it).
+        let tracking = if mode.contains(TermMode::MOUSE_MOTION) {
+            MouseTracking::Any
+        } else if mode.contains(TermMode::MOUSE_DRAG) {
+            MouseTracking::Button
+        } else if mode.contains(TermMode::MOUSE_REPORT_CLICK) {
+            MouseTracking::Normal
+        } else {
+            MouseTracking::Off
+        };
+        let sgr = mode.contains(TermMode::SGR_MOUSE);
+        MouseMode { tracking, sgr }
     }
 }
 

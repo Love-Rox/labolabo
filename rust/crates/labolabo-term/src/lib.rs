@@ -36,10 +36,12 @@
 
 pub mod backend;
 pub mod color;
+pub mod mouse;
 pub mod session;
 pub mod snapshot;
 
 pub use color::ColorScheme;
+pub use mouse::{MouseMode, MouseTracking};
 pub use session::{SharedWriter, TermEvent, TermSession, DEFAULT_MAX_SCROLLBACK};
 pub use snapshot::{CellSnapshot, CursorSnapshot, GridSnapshot, Rgb};
 
