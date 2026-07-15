@@ -208,3 +208,28 @@ pub use hook_settings::{
 // (those already round-trip through `Task::layout`/`tiling::PaneItem`, see
 // `tiling.rs`'s module doc comment).
 pub use store::AgentBindings;
+
+// Control CLI wave (`plans/012-task-model-and-control-cli.md` §2,
+// `docs/control-protocol.md`): the bidirectional CLI/agent-to-app RPC
+// channel that lets `labolabo tab open`/`task list`/`tab list`/`focus`
+// operate a running `labolabo-app` -- a separate channel from the
+// receive-only hooks bus (wave 5c above). Appended at the tail, same
+// reasoning as every other wave block in this file.
+//
+// - `control_protocol`: pure request/response (de)serialization, the
+//   control socket's path convention, and the `--task current`/ambient-
+//   context resolution rules -- the `hook_settings` of this pair.
+// - `control`: the AF_UNIX request/response transport (`ControlServer` +
+//   `send_control_request`) -- the `hooks` of this pair. `#[cfg(unix)]`
+//   like `hooks::UnixSocketEventTransport`; a Windows Named Pipe transport
+//   is future work (docs/control-protocol.md §9).
+pub mod control;
+pub mod control_protocol;
+
+pub use control::ControlHandler;
+#[cfg(unix)]
+pub use control::{send_control_request, ControlServer};
+pub use control_protocol::{
+    control_socket_path_from_uuid, parse_request, parse_response, resolve_socket_path,
+    resolve_target_task, resolve_task_flag, ControlCommand, ControlRequest, ControlResponse,
+};
