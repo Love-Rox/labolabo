@@ -167,3 +167,16 @@ pub use hooks::{AgentEventTransport, AgentStatusBus, OnEvent, OnMessage};
 pub mod store;
 
 pub use store::{SessionDatabase, SessionPersisting, SessionRecord, StoreError, StoreResult};
+pub use store::{Task, TaskDatabase, TaskKind, TaskStatus};
+
+// Wave 5b-3 (`plans/012-task-model-and-control-cli.md` §1's "new worktree
+// Task" flow). Appended at the tail, same reasoning as the wave 4a/4b/4c
+// blocks above: minimizes merge conflicts with other in-flight
+// porting-wave branches editing this same file.
+//
+// - `branch_naming`: pure branch-name generation for the Task model's
+//   "new worktree" flow (`labolabo-app`'s UI calls this, then
+//   `GitEngine::add_worktree`) -- no Swift counterpart, new-in-Rust
+//   product surface (see `store::task_database`'s module doc comment for
+//   why the Task model itself has none either).
+pub mod branch_naming;

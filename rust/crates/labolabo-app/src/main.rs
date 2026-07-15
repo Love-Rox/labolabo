@@ -1,34 +1,40 @@
-//! `labolabo-app`: a gpui terminal-shell binary for LaboLabo's Rust
-//! cross-platform port. Wave 5b-2 replaces the wave 5a placeholder flat tab
-//! bar with the real tile/tab tree (`labolabo_core::tiling::
-//! PaneTilingModel`): split panes, each with its own tab group, keyboard
-//! navigation, and a real `labolabo-term` `Terminal` session per tab. Not
-//! the production UI: see `crates/labolabo-app/README.md` for scope and
-//! known TODOs (IME, Linux gpui build support, layout persistence, drag &
-//! drop).
+//! `labolabo-app`: a gpui binary for LaboLabo's Rust cross-platform port.
+//! Wave 5b-3 layers the Task model (`plans/012-task-model-and-control-
+//! cli.md` §1) over wave 5b-2's tile/tab tree: a left sidebar lists Tasks
+//! grouped by repo, each Task owns its own `PaneTilingModel` (split panes +
+//! tab groups, each tab a real `labolabo-term` `Terminal` session spawned
+//! in the Task's working directory), and Tasks + layouts persist to a
+//! Rust-only SQLite database (restored on relaunch). Not the production
+//! UI: see `crates/labolabo-app/README.md` for scope and known TODOs (IME,
+//! Linux gpui build support, drag & drop, Task rename/done/archive, the
+//! control CLI).
 
 mod app;
 mod focus;
 mod ghostty_config;
 mod grid;
 mod keys;
+mod new_task;
 mod render;
+mod sidebar;
+mod task_workspace;
 
 use gpui::{
     prelude::*, px, size, App, Application, Bounds, KeyBinding, WindowBounds, WindowOptions,
 };
 
 use app::{
-    CloseTab, FocusNextPane, FocusPrevPane, NewTab, SelectTab1, SelectTab2, SelectTab3, SelectTab4,
-    SelectTab5, SelectTab6, SelectTab7, SelectTab8, SelectTab9, SplitDown, SplitRight, TerminalApp,
+    CloseTab, FocusNextPane, FocusPrevPane, LaboLaboApp, NewTab, SelectTab1, SelectTab2,
+    SelectTab3, SelectTab4, SelectTab5, SelectTab6, SelectTab7, SelectTab8, SelectTab9, SplitDown,
+    SplitRight,
 };
 
 /// Initial window size -- purely a starting point. The initial terminal
 /// grid size is derived from this via the same `grid::grid_size_for_window`
-/// function window-resize uses (see `TerminalApp::viewport_grid_size`), so
+/// function window-resize uses (see `LaboLaboApp::viewport_grid_size`), so
 /// there is no separately-hardcoded initial column/row count to keep in
-/// sync with it.
-const INITIAL_WIDTH: f32 = 900.0;
+/// sync with it. Wider than wave 5b-2's 900 to leave room for the sidebar.
+const INITIAL_WIDTH: f32 = 1120.0;
 const INITIAL_HEIGHT: f32 = 600.0;
 
 fn main() {
@@ -70,7 +76,7 @@ fn main() {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 ..Default::default()
             },
-            |window, cx| cx.new(|cx| TerminalApp::new(&font_config, &color_config, window, cx)),
+            |window, cx| cx.new(|cx| LaboLaboApp::new(&font_config, &color_config, window, cx)),
         )
         .expect("failed to open labolabo-app window");
         cx.activate(true);

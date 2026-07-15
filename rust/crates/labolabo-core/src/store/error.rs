@@ -1,9 +1,8 @@
-//! Error type for `store::database`. Swift's `SessionPersisting` conformers
-//! throw plain `Error` (GRDB's `DatabaseError`, mostly); this enum plays the
-//! same role, adding a variant for the one failure mode Swift's `Date`
-//! decoding has no analogue for spelling out explicitly (an unparseable
-//! stored date — see `database::parse_grdb_datetime`), since Rust has no
-//! implicit `Decoder`/`as?` bridging to fall back on.
+//! Error type for `store::database` and `store::task_database`. Swift's
+//! `SessionPersisting` conformers throw plain `Error` (GRDB's
+//! `DatabaseError`, mostly); this enum plays the same role, adding variants
+//! for failure modes Swift's `Codable`/`as?` bridging has no analogue for
+//! spelling out explicitly, since Rust has no implicit `Decoder` fallback.
 
 use std::fmt;
 
@@ -11,11 +10,24 @@ use std::fmt;
 pub enum StoreError {
     Sqlite(rusqlite::Error),
     Io(std::io::Error),
-    /// A `session.addedAt` (or other `DATETIME` column) value could not be
-    /// parsed under GRDB's `Date` decoding contract (see
-    /// `database::parse_grdb_datetime`). Carries the table/column and the
-    /// raw stored text for diagnostics.
+    /// A `session.addedAt` (or other `DATETIME`-ish column) value could not
+    /// be parsed. Carries the table/column and the raw stored text for
+    /// diagnostics. Used both by `database`'s GRDB-`Date`-compatible parser
+    /// (`database::parse_grdb_datetime`) and by `task_database`'s plain
+    /// RFC 3339 parser (that module has no GRDB-compatibility constraint —
+    /// see its module doc comment).
     InvalidDate {
+        column: &'static str,
+        raw: String,
+    },
+    /// `task_database`: a `task.layout` column's stored text was not valid
+    /// [`crate::tiling::TileLayout`] JSON.
+    InvalidLayoutJson(serde_json::Error),
+    /// `task_database`: a `task.kind`/`task.status` column held a string
+    /// outside the fixed set this crate writes (`"worktree"`/`"attached"`,
+    /// `"active"`/`"done"`/`"archived"`) — e.g. a hand-edited or
+    /// future-version database. Carries the column name and raw value.
+    InvalidTaskEnum {
         column: &'static str,
         raw: String,
     },
@@ -27,10 +39,16 @@ impl fmt::Display for StoreError {
             StoreError::Sqlite(e) => write!(f, "sqlite error: {e}"),
             StoreError::Io(e) => write!(f, "io error: {e}"),
             StoreError::InvalidDate { column, raw } => {
+                write!(f, "column {column:?} holds an unparseable date: {raw:?}")
+            }
+            StoreError::InvalidLayoutJson(e) => {
                 write!(
                     f,
-                    "column {column:?} holds an unparseable GRDB date: {raw:?}"
+                    "column \"task.layout\" holds invalid TileLayout JSON: {e}"
                 )
+            }
+            StoreError::InvalidTaskEnum { column, raw } => {
+                write!(f, "column {column:?} holds an unrecognized value: {raw:?}")
             }
         }
     }
@@ -42,6 +60,8 @@ impl std::error::Error for StoreError {
             StoreError::Sqlite(e) => Some(e),
             StoreError::Io(e) => Some(e),
             StoreError::InvalidDate { .. } => None,
+            StoreError::InvalidLayoutJson(e) => Some(e),
+            StoreError::InvalidTaskEnum { .. } => None,
         }
     }
 }

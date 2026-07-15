@@ -67,6 +67,16 @@ running the **same** integration tests as ghostty (`tests/backend_common.rs`).
   entries; `VtBackend::new` takes it and each backend applies it to its own
   VT core (alacritty: an in-crate 256-color table built from `ANSI_16` +
   the standard xterm cube/grayscale ramp, with the scheme's overrides
+  applied on top).
+- **The child's working directory is opt-in via
+  `spawn_with_cwd_options(cols, rows, command, env, &ColorScheme, cwd:
+  Option<&Path>)`** — the fullest entry point; `spawn_with_options` is a
+  thin wrapper passing `cwd: None` (the child inherits this process's own
+  working directory, same as before this option existed). This is what
+  `labolabo-app`'s Task model (`plans/012-task-model-and-control-cli.md`
+  §1) uses to spawn a Task's panes inside that Task's worktree/attached
+  directory rather than wherever the app process happens to be running
+  from.
   layered on top; ghostty: `libghostty-vt`'s own
   `set_default_fg_color`/`set_default_bg_color`/`set_default_cursor_color`/
   `set_default_color_palette` setters) — see `backend/alacritty.rs` and

@@ -27,3 +27,12 @@ labolabo-term = { path = "../labolabo-term", default-features = false }
 anyhow = "1"
 futures = "0.3"
 gpui = "0.2"
+
+# Wave 5b-3 (Task model, `plans/012-task-model-and-control-cli.md` §1):
+# `new_task::create_worktree_task` stamps today's date into the generated
+# branch name (`branch_naming::generate_branch_name`), and
+# `LaboLaboApp::select_task`/`persist_workspace` stamp `Task::
+# last_active_at` -- both need `chrono::Utc::now()`. Version/feature set
+# matches `labolabo-core`'s own `chrono` dependency to keep one resolved
+# version in the workspace lockfile.
+chrono = { version = "0.4.45", default-features = false, features = ["std", "clock"] }

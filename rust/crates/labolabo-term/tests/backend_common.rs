@@ -205,6 +205,77 @@ fn colors_palette_override_reflected_in_sgr_colored_cell() {
     assert_eq!(cell.fg, custom);
 }
 
+/// `spawn_with_cwd_options` with a `cwd` sets the child's initial working
+/// directory: a shell started there and asked for its directory's basename
+/// prints it back (basename, not the full `pwd` path, so the assertion is
+/// immune to the 80-col grid wrapping a long temp-dir path mid-string). This
+/// is the mechanism the Task model (`plans/012`) relies on to spawn a Task's
+/// panes inside that Task's worktree/attached directory.
+#[test]
+fn cwd_option_sets_child_working_directory() {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "labolabo-term-cwd-{}-{:x}",
+        std::process::id(),
+        nanos as u64
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let leaf = dir.file_name().unwrap().to_string_lossy().into_owned();
+
+    let term = Terminal::spawn_with_cwd_options(
+        80,
+        10,
+        Some(r#"basename "$(pwd)"; sleep 0.2"#),
+        &[],
+        &ColorScheme::default(),
+        Some(&dir),
+    )
+    .expect("spawn");
+    let snap = term.wait_for(TIMEOUT, |g| g.contains_text(&leaf));
+    assert!(
+        snap.is_some(),
+        "expected cwd leaf {leaf:?} in pwd output, got:\n{}",
+        term.snapshot().to_text()
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `cwd: None` behaves exactly like `spawn_with_options` (this process's own
+/// working directory, unset by us -- `portable-pty`'s own default) -- guards
+/// the API-compatibility contract `spawn_with_options` was refactored to
+/// lean on.
+#[test]
+fn cwd_none_matches_spawn_with_options() {
+    let via_cwd = Terminal::spawn_with_cwd_options(
+        40,
+        10,
+        Some("printf same; sleep 0.2"),
+        &[],
+        &ColorScheme::default(),
+        None,
+    )
+    .expect("spawn_with_cwd_options");
+    let via_options = Terminal::spawn_with_options(
+        40,
+        10,
+        Some("printf same; sleep 0.2"),
+        &[],
+        &ColorScheme::default(),
+    )
+    .expect("spawn_with_options");
+
+    let a = via_cwd.wait_for(TIMEOUT, |g| g.contains_text("same"));
+    let b = via_options.wait_for(TIMEOUT, |g| g.contains_text("same"));
+    assert!(
+        a.is_some() && b.is_some(),
+        "both sessions should produce output"
+    );
+}
+
 /// Find the first cell whose text matches `needle` (a single grapheme, as
 /// printed by the tests above -- there's no ambiguity to resolve).
 fn find_cell<'a>(
