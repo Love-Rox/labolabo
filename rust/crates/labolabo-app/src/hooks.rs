@@ -104,8 +104,17 @@ impl HookRuntime {
     /// function), matching `task_workspace::spawn_redraw_bridge`'s split.
     pub fn new() -> (Self, mpsc::UnboundedReceiver<AgentStatusEvent>) {
         let socket_uuid = uuid::Uuid::new_v4().to_string();
-        let socket_path = socket_path_from_uuid(&socket_uuid, SOCKET_BASE_DIR);
+        Self::new_at(socket_path_from_uuid(&socket_uuid, SOCKET_BASE_DIR))
+    }
 
+    /// [`HookRuntime::new`]'s whole construction, parameterized on the
+    /// socket path -- private, split out so the end-to-end test can run the
+    /// real bus/channel/binary-resolution path against a socket under the
+    /// OS temp dir instead of littering the real [`SOCKET_BASE_DIR`] with
+    /// one stale socket file per `cargo test` run (the accept-loop thread
+    /// holds the listener until process exit, so a test process never
+    /// unlinks it itself).
+    fn new_at(socket_path: String) -> (Self, mpsc::UnboundedReceiver<AgentStatusEvent>) {
         let mut bus = AgentStatusBus::new(socket_path.clone());
         let (tx, rx) = mpsc::unbounded();
         bus.set_on_event(move |event| {
@@ -372,18 +381,30 @@ mod tests {
         }
     }
 
-    /// Exercises the real production path `HookRuntime::new` sets up: a real
-    /// AF_UNIX socket bound by the real [`AgentStatusBus`], a real
+    /// Exercises the real construction path `HookRuntime::new` uses
+    /// (`new_at`: real [`AgentStatusBus`] binding a real AF_UNIX socket,
+    /// real channel, real forwarder-binary resolution): a real
     /// `LABOLABO_PANE`-annotated payload sent through
     /// `labolabo_core::forward_hook` (the same pure logic the standalone
     /// `labolabo-hook` binary calls -- see `labolabo-core`'s
     /// `tests/labolabo_hook_bin.rs` for the equivalent real-subprocess test
-    /// at that layer), delivered over the channel `HookRuntime::new` hands
-    /// back, and finally resolved through the routing table this module
-    /// owns. Mirrors the wave 4b porting brief's suggested reference point.
+    /// at that layer), delivered over the channel, and finally resolved
+    /// through the routing table this module owns. Mirrors the wave 4b
+    /// porting brief's suggested reference point.
+    ///
+    /// Uses a socket under the OS temp dir (removed at the end) rather than
+    /// the production [`SOCKET_BASE_DIR`], so `cargo test` runs don't leave
+    /// stale socket files in the real `/tmp/labolabo` -- see `new_at`'s doc
+    /// comment. Path kept short: `sockaddr_un`'s `sun_path` is only 104
+    /// (Darwin) / 108 (Linux) bytes (same constraint `labolabo-core`'s own
+    /// socket tests document).
     #[test]
     fn hook_runtime_receives_a_real_socket_event_and_resolves_its_route() {
-        let (mut runtime, mut rx) = HookRuntime::new();
+        let socket_path = std::env::temp_dir()
+            .join(format!("lb-hr-{}.sock", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
+        let (mut runtime, mut rx) = HookRuntime::new_at(socket_path);
         let pane_uuid = "integration-pane-1".to_string();
         let pane_id = fresh_pane_id();
         runtime.register_pane(pane_uuid.clone(), "task-int-1".to_string(), pane_id);
@@ -422,6 +443,12 @@ mod tests {
             .expect("the event's pane_id should resolve through the routing table");
         assert_eq!(route.task_id, "task-int-1");
         assert_eq!(route.pane_id, pane_id);
+
+        // The bus's accept-loop thread holds the listener until process
+        // exit; unlink the socket file ourselves so the test leaves no
+        // artifact behind (safe on unix -- the bound listener works via
+        // the inode).
+        let _ = fs::remove_file(&runtime.socket_path);
     }
 
     #[test]

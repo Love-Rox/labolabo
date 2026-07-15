@@ -65,6 +65,26 @@ opens the Swift `SessionDatabase` (two live apps must never write the same
 SQLite file, and this schema shares nothing with GRDB's) — see
 `labolabo-core`'s `store::task_database` module docs for the full contract.
 
+### Smoke runs: always isolate the data directory
+
+Launching against the real database is not a harmless read: every restored
+Task spawns shells in — and, since wave 5c, **injects Claude Code hooks
+into** — that Task's real working directory. An exploratory "does it start"
+run must therefore never see the real `tasks.db`. Set
+`LABOLABO_RS_DATA_DIR` (developer escape hatch, honored by
+`labolabo_core::store::rust_app_data_dir`; empty value = unset) to a scratch
+directory:
+
+```sh
+LABOLABO_RS_DATA_DIR=$(mktemp -d) timeout 5 cargo run -p labolabo-app
+```
+
+(macOS ships no `timeout`; use coreutils' `gtimeout`, or just quit the app
+by hand.) Prefer quitting gracefully (window close / the last pane's Cmd+W
+quit path) over `kill -9`: hooks cleanup (`HookRuntime::restore_all`, which
+puts every injected `.claude/settings.local.json` back) runs from
+`on_app_quit` and never gets a chance under SIGKILL.
+
 To exercise the intended production VT backend instead
 (`backend-ghostty-vt`, real `libghostty-vt` — needs a local Ghostty source
 tree built with Zig 0.16; see `crates/labolabo-term/README.md` for the full
@@ -612,51 +632,55 @@ Verified locally:
 
 - `cargo build -p labolabo-app`, `cargo clippy -p labolabo-app --all-targets
   -- -D warnings`, and workspace-wide `cargo fmt --check` all pass.
-- `cargo test -p labolabo-app` (78 tests): the new `hooks` module's 12 tests
+- `cargo test -p labolabo-app` (78 tests): the new `hooks` module's 11 tests
   — routing-table round-trips (register/resolve/unregister/overwrite), real-
   filesystem `ensure_injected`/`restore_all` coverage (fresh injection
   writes all 7 events; idempotent re-injection; preserves another tool's
   existing hook entries; restore deletes a freshly-created file vs. restores
   a real prior file's exact original bytes; crash recovery from a stale
   `.labolabo-bak` before re-injecting), and one real-socket end-to-end test
-  (`hook_runtime_receives_a_real_socket_event_and_resolves_its_route`: a
-  real `AgentStatusBus` bound by `HookRuntime::new`, a real
-  `labolabo_core::forward_hook` call over that socket with a
-  `LABOLABO_PANE`-annotated payload, delivered through the real channel and
-  resolved through the real routing table) — plus all pre-existing tests
-  unchanged.
-- `cargo test -p labolabo-core` (221 lib tests + goldens, up from 186 at the
+  (`hook_runtime_receives_a_real_socket_event_and_resolves_its_route`: the
+  real `AgentStatusBus`/channel/binary-resolution construction path bound to
+  a temp-dir socket, a real `labolabo_core::forward_hook` call over that
+  socket with a `LABOLABO_PANE`-annotated payload, delivered through the
+  real channel and resolved through the real routing table) — plus all
+  pre-existing tests unchanged.
+- `cargo test -p labolabo-core` (224 lib tests + goldens, up from 186 at the
   end of wave 5b-3): the new `hook_settings` module (`shell_quote`/
   `hook_command`/`claude_resume_command`/`socket_path_from_uuid`, and
   `merge_hooks`'s create-vs-preserve/malformed-input/preserves-other-
   entries/idempotent-shape/all-seven-events behaviors), `store::
   agent_bindings` (round-trip, dedup, malformed-input degrade, plus a
   DB-level `agent_bindings_round_trips_through_upsert_and_all_tasks` in
-  `task_database.rs`), `tiling::PaneItem::is_resumable`, and
-  `agent_event_parser`/`hooks::annotate_ids`'s new `labolabo_task_id`
-  coverage — plus the full pre-existing suite (goldens untouched).
+  `task_database.rs`), `tiling::PaneItem::is_resumable`, the
+  `LABOLABO_RS_DATA_DIR` override in `store::data_dir` (used-verbatim /
+  empty-means-unset / absent-falls-back, tested through the pure
+  env-value-as-parameter core, no env mutation), and `agent_event_parser`/
+  `hooks::annotate_ids`'s new `labolabo_task_id` coverage — plus the full
+  pre-existing suite (goldens untouched).
 - Root `cargo build`/`cargo test`/`cargo clippy -- -D warnings` (workspace
   `default-members`: `labolabo-core` + `labolabo-term`) all pass.
-- `cargo run -p labolabo-app`, run for ~8 seconds and killed: no panic/crash
-  output, `~/Library/Application Support/LaboLabo-rs/tasks.db` was touched
-  (confirming `LaboLaboApp::new`, including the new `HookRuntime::new` +
-  `cx.on_app_quit` wiring, ran to completion).
+- `cargo run -p labolabo-app` smoke run, done the "Smoke runs" way
+  (`LABOLABO_RS_DATA_DIR=$(mktemp -d)`, ~8 seconds, then killed): no
+  panic/crash output, a fresh `tasks.db` was created **inside the scratch
+  directory** (not the real Application Support path, whose mtime was
+  verified untouched), and — the scratch DB having no Tasks — no directory
+  anywhere received a hooks injection.
 
-**Important caveat on that last check.** This machine's shared `tasks.db`
-(used by other agents/sessions developing this same port in parallel) had a
-pre-existing selected Task pointing at a real worktree directory outside
-this crate's own scope. Because that Task was auto-restored at launch,
+**Incident that motivated the smoke-run isolation above.** An earlier
+version of this check ran against the machine's real, shared `tasks.db`
+(populated by other agents/sessions developing this port in parallel),
+whose pre-existing selected Task pointed at a real worktree directory
+outside this crate's scope. That Task was auto-restored at launch, so
 `ensure_workspace_loaded` really injected a hooks entry into that
-directory's `.claude/settings.local.json`, and because the process was
-killed with `SIGTERM`/`SIGKILL` (not a graceful `cx.quit()`), `on_app_quit`
-never fired, so the injected file was **not** automatically cleaned up
-afterward. This was caught and (partially) remediated by hand — worth
-knowing before running `cargo run -p labolabo-app` again on a machine with
-an existing `tasks.db`: prefer a scratch/empty `tasks.db`
-(`XDG_DATA_HOME`/`%APPDATA%` env override, or run somewhere the default
-Application Support path is empty) for exploratory runs, and always quit
-gracefully (window close / Cmd+Q path) rather than killing the process, so
-`HookRuntime::restore_all` gets to run.
+directory's `.claude/settings.local.json`; and because the process was
+killed (not gracefully quit), `on_app_quit` never fired and the injected
+file was left behind. The leftover file and the run's stale socket were
+verified by hand to contain only the injection artifact (no user settings,
+no Swift-app entries) and removed. Two preventions landed as a result: the
+`LABOLABO_RS_DATA_DIR` escape hatch (`labolabo-core`'s
+`store::rust_app_data_dir`, unit-tested) and the "Smoke runs: always
+isolate the data directory" section above.
 
 **Not verified — no synthetic keyboard/mouse input, on explicit
 instruction, same as wave 5b-3 above:**

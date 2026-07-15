@@ -61,7 +61,32 @@ pub fn app_data_dir() -> PathBuf {
 /// see `store::task_database`'s module doc comment for why that matters
 /// (the Rust port's `Task` schema is not GRDB-compatible and must never be
 /// opened by, or written by, the Swift `SessionDatabase`).
+///
+/// **`LABOLABO_RS_DATA_DIR` override (developer escape hatch)**: when this
+/// environment variable is set and non-empty, its value is used verbatim as
+/// the data directory, bypassing the per-OS default entirely. Purpose: a
+/// development-time smoke run (`LABOLABO_RS_DATA_DIR=$(mktemp -d) cargo run
+/// -p labolabo-app`) must not touch the real user database — restoring real
+/// Tasks means spawning shells in (and injecting Claude hooks into) those
+/// Tasks' real working directories, which an exploratory run has no
+/// business doing. An empty value is treated as unset (same rule as the
+/// `XDG_DATA_HOME` handling below and `ghostty_config`'s `XDG_CONFIG_HOME`).
 pub fn rust_app_data_dir() -> PathBuf {
+    rust_app_data_dir_from(std::env::var_os("LABOLABO_RS_DATA_DIR").as_deref())
+}
+
+/// The env-value-as-parameter core of [`rust_app_data_dir`], split out so
+/// the override rule is unit-testable without mutating the real process
+/// environment (mutating env in tests races other tests on the same
+/// process; this crate's convention — same as `ghostty_config`'s
+/// `default_config_paths` XDG tests in `labolabo-app` — is to keep env
+/// reads in a thin caller and test the pure function).
+fn rust_app_data_dir_from(override_dir: Option<&std::ffi::OsStr>) -> PathBuf {
+    if let Some(dir) = override_dir {
+        if !dir.is_empty() {
+            return PathBuf::from(dir);
+        }
+    }
     #[cfg(target_os = "macos")]
     {
         home_dir()
@@ -116,5 +141,35 @@ mod tests {
             .join("Application Support")
             .join("LaboLabo");
         assert_eq!(app_data_dir(), expected);
+    }
+
+    // --- LABOLABO_RS_DATA_DIR override ------------------------------------
+    //
+    // Tested through the pure `rust_app_data_dir_from` (env value as a
+    // parameter), never by mutating the real process environment -- see
+    // that function's doc comment.
+
+    #[test]
+    fn data_dir_override_is_used_verbatim_when_set() {
+        assert_eq!(
+            rust_app_data_dir_from(Some(std::ffi::OsStr::new("/tmp/labolabo-scratch"))),
+            PathBuf::from("/tmp/labolabo-scratch")
+        );
+    }
+
+    #[test]
+    fn empty_data_dir_override_is_treated_as_unset() {
+        assert_eq!(
+            rust_app_data_dir_from(Some(std::ffi::OsStr::new(""))),
+            rust_app_data_dir_from(None)
+        );
+    }
+
+    #[test]
+    fn absent_data_dir_override_falls_back_to_the_per_os_default() {
+        assert_eq!(
+            rust_app_data_dir_from(None).file_name().unwrap(),
+            "LaboLabo-rs"
+        );
     }
 }
