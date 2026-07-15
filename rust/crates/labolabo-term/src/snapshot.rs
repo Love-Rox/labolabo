@@ -90,9 +90,29 @@ pub struct GridSnapshot {
     pub cols: u16,
     pub rows: u16,
     pub background: Rgb,
-    /// Row-major, `cols * rows` entries.
+    /// Row-major, `cols * rows` entries -- always the *currently displayed*
+    /// viewport (row 0 = the top on-screen row), regardless of
+    /// [`Self::scroll_offset`]: scrolling back into history (see
+    /// `backend::VtBackend::scroll_display`) changes *which* absolute lines
+    /// these cells show, not their shape or indexing.
     pub cells: Vec<CellSnapshot>,
     pub cursor: CursorSnapshot,
+    /// How far the viewport is currently scrolled back into history, in
+    /// lines: `0` means the live tail (the normal, "not scrolled" state --
+    /// new output keeps appearing at the bottom), and it increases toward
+    /// [`Self::scrollback_len`] as the view moves further into the past.
+    /// Shared sign/zero convention with `backend::VtBackend::scroll_display`
+    /// -- see that method's doc comment for the full contract (both
+    /// backends normalize to this regardless of their own native
+    /// convention).
+    pub scroll_offset: usize,
+    /// Total scrollback lines currently retained and available to scroll
+    /// back into -- the maximum valid [`Self::scroll_offset`]. Backend- and
+    /// history-size-dependent (see each backend's `scrolling_history`/
+    /// `max_scrollback` construction constant); a UI can use
+    /// `scroll_offset`/`scrollback_len` together to size a scrollbar
+    /// thumb/track.
+    pub scrollback_len: usize,
 }
 
 impl GridSnapshot {
@@ -109,6 +129,8 @@ impl GridSnapshot {
                 visible: true,
                 color: None,
             },
+            scroll_offset: 0,
+            scrollback_len: 0,
         }
     }
 

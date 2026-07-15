@@ -48,6 +48,76 @@ pub fn grid_size_for_window(
     grid_size_for_area(viewport_width, terminal_height, cell_width, cell_height)
 }
 
+/// Which `(col, row)` grid cell a pixel position *local to a pane's canvas*
+/// (i.e. already offset by the canvas's own bounds origin -- the caller
+/// subtracts `event.position - bounds.origin` before calling this) falls on,
+/// given that pane's measured cell size and its current grid dimensions.
+///
+/// Clamped into `[0, cols-1] x [0, rows-1]` (never out of range, even for a
+/// position slightly outside the canvas -- e.g. a fast mouse-drag that
+/// briefly reports a coordinate a pixel or two past the last row/column, or
+/// starts a selection right as a resize is landing) so callers can index a
+/// snapshot's `cells` with the result unconditionally, no separate bounds
+/// check needed. Mirrors [`grid_size_for_area`]'s "always in range, never
+/// panics" contract.
+pub fn cell_at(
+    local_x: f32,
+    local_y: f32,
+    cell_width: f32,
+    cell_height: f32,
+    cols: u16,
+    rows: u16,
+) -> (u16, u16) {
+    let col = if cell_width > 0.0 {
+        (local_x / cell_width).floor().max(0.0) as u32
+    } else {
+        0
+    };
+    let row = if cell_height > 0.0 {
+        (local_y / cell_height).floor().max(0.0) as u32
+    } else {
+        0
+    };
+    let col = col.min(cols.saturating_sub(1) as u32) as u16;
+    let row = row.min(rows.saturating_sub(1) as u32) as u16;
+    (col, row)
+}
+
+/// Accumulate a scroll-wheel/trackpad pixel delta into whole terminal lines
+/// to scroll by.
+///
+/// `pending` carries the fractional remainder between calls (mutated in
+/// place, one instance per pane) so a slow trackpad gesture -- many small
+/// sub-cell-height pixel deltas -- still eventually produces whole-line
+/// scroll steps instead of silently rounding each individual event to zero;
+/// mirrors real Ghostty's own `pending_scroll_y` accumulator
+/// (`Surface.scrollCallback` in the vendored Ghostty source). Callers pass
+/// gpui's `ScrollDelta::pixel_delta(line_height)` (which already unifies the
+/// traditional line-wheel and precision-trackpad cases into one pixel
+/// value, treating one "line" tick as worth exactly one `cell_height`) as
+/// `delta_y_px`.
+///
+/// Returns the (possibly zero) whole number of lines to scroll -- sign
+/// convention matches `labolabo_term::backend::VtBackend::scroll_display`
+/// directly (positive = up/into history), since gpui forwards the raw
+/// platform scroll delta unchanged and that raw value already carries the
+/// same "positive = up" convention real Ghostty's own apprt layer
+/// normalizes to (see `VtBackend::scroll_display`'s doc comment for the
+/// full chain of reasoning) -- callers can feed this straight into
+/// `Terminal::scroll` with no sign flip.
+///
+/// A non-finite or non-positive `cell_height` yields `0` every time (no
+/// division by zero/garbage) without touching `pending`.
+pub fn accumulate_scroll_lines(pending: &mut f32, delta_y_px: f32, cell_height: f32) -> i64 {
+    if !cell_height.is_finite() || cell_height <= 0.0 || !delta_y_px.is_finite() {
+        return 0;
+    }
+    let total = *pending + delta_y_px / cell_height;
+    let whole = total.trunc();
+    *pending = total - whole;
+    whole as i64
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -85,5 +155,71 @@ mod tests {
     fn window_size_matches_a_realistic_default() {
         // The app's INITIAL_WIDTH/HEIGHT (main.rs): 900x600.
         assert_eq!(grid_size_for_window(900.0, 600.0, 9.0, 18.0), (100, 31));
+    }
+
+    #[test]
+    fn cell_at_exact_cell_boundary() {
+        assert_eq!(cell_at(0.0, 0.0, 9.0, 18.0, 80, 24), (0, 0));
+        assert_eq!(cell_at(9.0, 18.0, 9.0, 18.0, 80, 24), (1, 1));
+        assert_eq!(cell_at(44.9, 89.9, 9.0, 18.0, 80, 24), (4, 4));
+    }
+
+    #[test]
+    fn cell_at_clamps_negative_position_to_zero() {
+        assert_eq!(cell_at(-50.0, -50.0, 9.0, 18.0, 80, 24), (0, 0));
+    }
+
+    #[test]
+    fn cell_at_clamps_past_the_last_row_or_column() {
+        // 80 cols x 24 rows -> last valid indices are (79, 23). A position
+        // far past the grid (a drag that slipped outside the canvas) must
+        // still resolve in-range, not panic or wrap.
+        assert_eq!(cell_at(10_000.0, 10_000.0, 9.0, 18.0, 80, 24), (79, 23));
+    }
+
+    #[test]
+    fn cell_at_degenerate_cell_size_never_divides_by_zero() {
+        assert_eq!(cell_at(10.0, 10.0, 0.0, 0.0, 80, 24), (0, 0));
+    }
+
+    #[test]
+    fn accumulate_scroll_lines_needs_a_full_cell_height_of_pixels() {
+        let mut pending = 0.0;
+        // Half a cell height: not enough for a whole line yet.
+        assert_eq!(accumulate_scroll_lines(&mut pending, 9.0, 18.0), 0);
+        assert!((pending - 0.5).abs() < f32::EPSILON);
+        // The other half arrives in a later event -> exactly one line, and
+        // the fractional remainder resets to (near) zero.
+        assert_eq!(accumulate_scroll_lines(&mut pending, 9.0, 18.0), 1);
+        assert!(pending.abs() < 1e-5);
+    }
+
+    #[test]
+    fn accumulate_scroll_lines_carries_remainder_across_many_small_deltas() {
+        // Ten trackpad micro-deltas of 2px each = 20px = a bit over one
+        // 18px cell -- exactly one line should eventually fall out, not
+        // zero (each individual 2px delta alone would round to 0).
+        let mut pending = 0.0;
+        let mut total_lines = 0i64;
+        for _ in 0..10 {
+            total_lines += accumulate_scroll_lines(&mut pending, 2.0, 18.0);
+        }
+        assert_eq!(total_lines, 1);
+    }
+
+    #[test]
+    fn accumulate_scroll_lines_negative_delta_scrolls_the_other_way() {
+        let mut pending = 0.0;
+        assert_eq!(accumulate_scroll_lines(&mut pending, -36.0, 18.0), -2);
+    }
+
+    #[test]
+    fn accumulate_scroll_lines_degenerate_cell_height_is_a_safe_no_op() {
+        let mut pending = 0.3;
+        assert_eq!(accumulate_scroll_lines(&mut pending, 100.0, 0.0), 0);
+        assert_eq!(accumulate_scroll_lines(&mut pending, 100.0, f32::NAN), 0);
+        assert_eq!(accumulate_scroll_lines(&mut pending, f32::NAN, 18.0), 0);
+        // `pending` is untouched by the degenerate calls above.
+        assert!((pending - 0.3).abs() < f32::EPSILON);
     }
 }

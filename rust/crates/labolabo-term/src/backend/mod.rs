@@ -76,4 +76,65 @@ pub trait VtBackend: 'static {
     /// (`labolabo-app`'s Cmd+V handler) uses this to decide whether to wrap
     /// the pasted text in `ESC[200~...ESC[201~`.
     fn bracketed_paste(&self) -> bool;
+
+    /// Scroll the viewport by `delta_lines`, relative to wherever it
+    /// currently is.
+    ///
+    /// **Sign convention (shared by both backends and by
+    /// [`crate::GridSnapshot::scroll_offset`], chosen to match
+    /// `alacritty_terminal`'s own native `Grid::scroll_display(Scroll::
+    /// Delta)` convention directly): positive scrolls *up*, into history
+    /// (older content becomes visible, `scroll_offset` increases); negative
+    /// scrolls *down*, toward the live tail (`scroll_offset` decreases).**
+    /// This is also the sign convention real Ghostty's own apprt layer
+    /// normalizes trackpad/wheel input to before calling its `Surface.
+    /// scrollCallback` (confirmed by reading the vendored Ghostty source's
+    /// `Surface.zig`: `ScrollAmount` is documented "negative is down, left
+    /// and positive is up, right", and macOS's `SurfaceView_AppKit.swift`
+    /// forwards `NSEvent.scrollingDeltaY` to it unmodified -- the same raw
+    /// value gpui's own `ScrollWheelEvent.delta` carries on macOS, so
+    /// `labolabo-app`'s wheel handler can feed a raw platform delta in here
+    /// with no extra sign flip).
+    ///
+    /// `libghostty-vt`'s own `Terminal::scroll_viewport(ScrollViewport::
+    /// Delta)` uses the **opposite** convention (its doc comment: "up is
+    /// negative") -- the ghostty backend negates the delta internally so
+    /// callers of *this* trait method never need to know that.
+    ///
+    /// Always clamped internally to `[0, scrollback length]` -- an
+    /// out-of-range delta (e.g. `i64::MIN`/`i64::MAX`, or simply "more than
+    /// there is history for") saturates rather than panicking or wrapping.
+    /// A no-op delta (`0`, or one that clamps to the current offset) is
+    /// harmless to call.
+    fn scroll_display(&mut self, delta_lines: i64);
+
+    /// Snap the viewport back to the live tail (`scroll_offset` `0`) in one
+    /// call, without the caller needing to know the current scrollback
+    /// length to compute an equivalent large `scroll_display` delta.
+    /// `labolabo-app` calls this on every keystroke that reaches the PTY --
+    /// the terminal-UI convention this crate follows (typing while scrolled
+    /// back jumps you to the live output, same as every mainstream
+    /// terminal).
+    fn scroll_to_bottom(&mut self);
+
+    /// Whether the alternate screen buffer (DECSET `1049`/`47`/`1047` -- the
+    /// full-screen mode `vim`, `less`, `htop`, and similar TUI programs use)
+    /// is currently active.
+    ///
+    /// `labolabo-app`'s wheel handler uses this to decide whether a
+    /// scroll gesture should move *this* crate's own viewport
+    /// ([`Self::scroll_display`]) or instead be translated into cursor-key
+    /// escape sequences written straight to the PTY -- real Ghostty's
+    /// default behavior for alt-screen programs (DECSET `1007`, "alternate
+    /// scroll mode", which defaults on: confirmed in the vendored Ghostty
+    /// source, `terminal/modes.zig`'s `mouse_alternate_scroll` entry has
+    /// `.default = true`), since alt-screen programs typically manage their
+    /// own internal scrolling (e.g. `vim`'s buffer, `less`'s pager) rather
+    /// than sharing this crate's history buffer -- and indeed the alt
+    /// screen has no scrollback of its own on either backend (alacritty:
+    /// `Term::new` gives the inactive/alternate grid a `max_scroll_limit` of
+    /// `0`; ghostty-vt's alternate screen is likewise not part of the
+    /// primary screen's scrollback), so [`Self::scroll_display`] would be a
+    /// silent no-op there regardless.
+    fn alt_screen_active(&self) -> bool;
 }

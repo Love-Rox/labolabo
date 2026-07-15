@@ -70,6 +70,13 @@ enum WorkerMsg {
     Bytes(Vec<u8>),
     /// A resize request from the caller (cols, rows).
     Resize(u16, u16),
+    /// A scroll-by-`delta_lines` request from the caller -- see
+    /// [`TermSession::scroll`]/[`crate::backend::VtBackend::
+    /// scroll_display`] for the sign convention.
+    Scroll(i64),
+    /// A "jump to the live tail" request -- see [`TermSession::
+    /// scroll_to_bottom`].
+    ScrollToBottom,
     /// The reader hit EOF/error on the PTY master.
     Eof,
 }
@@ -91,6 +98,13 @@ pub struct TermSession<B: VtBackend> {
     /// by the worker after every processed PTY byte batch (see
     /// `run_worker`), read non-blockingly by [`Self::bracketed_paste`].
     bracketed_paste: Arc<AtomicBool>,
+    /// Mirrors `VtBackend::alt_screen_active` for the caller thread -- same
+    /// refresh cadence and non-blocking read shape as `bracketed_paste`
+    /// above, read by [`Self::alt_screen_active`]. `labolabo-app`'s wheel
+    /// handler uses this to decide whether to scroll this crate's own
+    /// viewport or send cursor-key sequences instead (see
+    /// `VtBackend::alt_screen_active`'s doc comment).
+    alt_screen: Arc<AtomicBool>,
     /// A kill handle split off the child (`Child::clone_killer`) so
     /// [`Self::shutdown`] can signal it even though the `Child` itself is
     /// owned by (and reaped on) the worker thread.
@@ -212,6 +226,7 @@ impl<B: VtBackend> TermSession<B> {
 
         let latest = Arc::new(Mutex::new(Arc::new(GridSnapshot::blank(cols, rows))));
         let bracketed_paste = Arc::new(AtomicBool::new(false));
+        let alt_screen = Arc::new(AtomicBool::new(false));
         let (event_tx, event_rx) = mpsc::channel::<TermEvent>();
         let (worker_tx, worker_rx) = mpsc::channel::<WorkerMsg>();
 
@@ -247,6 +262,7 @@ impl<B: VtBackend> TermSession<B> {
             let latest = latest.clone();
             let colors = colors.clone();
             let bracketed_paste = bracketed_paste.clone();
+            let alt_screen = alt_screen.clone();
             thread::spawn(move || {
                 run_worker::<B>(
                     cols,
@@ -254,6 +270,7 @@ impl<B: VtBackend> TermSession<B> {
                     writer,
                     latest,
                     bracketed_paste,
+                    alt_screen,
                     worker_rx,
                     event_tx,
                     child,
@@ -267,6 +284,7 @@ impl<B: VtBackend> TermSession<B> {
             master,
             latest,
             bracketed_paste,
+            alt_screen,
             events: Mutex::new(event_rx),
             worker_tx: Mutex::new(worker_tx),
             killer: Mutex::new(killer),
@@ -300,6 +318,30 @@ impl<B: VtBackend> TermSession<B> {
         }
         if let Ok(tx) = self.worker_tx.lock() {
             let _ = tx.send(WorkerMsg::Resize(cols, rows));
+        }
+    }
+
+    /// Scroll the viewport by `delta_lines` -- see
+    /// [`crate::backend::VtBackend::scroll_display`]'s doc comment for the
+    /// sign convention (positive = up/into history) and clamping behavior.
+    /// Applied on the worker thread; a fresh [`GridSnapshot`] reflecting the
+    /// new `scroll_offset` is published (and a [`TermEvent::Wakeup`] fired)
+    /// immediately, same as [`Self::resize`] -- there may be no PTY output
+    /// to otherwise trigger a redraw.
+    pub fn scroll(&self, delta_lines: i64) {
+        if let Ok(tx) = self.worker_tx.lock() {
+            let _ = tx.send(WorkerMsg::Scroll(delta_lines));
+        }
+    }
+
+    /// Jump the viewport back to the live tail (`scroll_offset` `0`) --
+    /// see [`crate::backend::VtBackend::scroll_to_bottom`]'s doc comment.
+    /// `labolabo-app` calls this on every keystroke that reaches the PTY
+    /// (the terminal-UI convention: typing while scrolled back returns you
+    /// to the live output).
+    pub fn scroll_to_bottom(&self) {
+        if let Ok(tx) = self.worker_tx.lock() {
+            let _ = tx.send(WorkerMsg::ScrollToBottom);
         }
     }
 
@@ -349,6 +391,16 @@ impl<B: VtBackend> TermSession<B> {
     /// `ESC[200~...ESC[201~`.
     pub fn bracketed_paste(&self) -> bool {
         self.bracketed_paste.load(Ordering::Relaxed)
+    }
+
+    /// Whether the alternate screen buffer is currently active -- a cheap,
+    /// non-blocking read of the flag the worker thread refreshes after
+    /// every processed PTY byte batch (see `run_worker` and
+    /// `VtBackend::alt_screen_active`). `labolabo-app`'s wheel handler uses
+    /// this to decide whether to scroll this crate's own viewport or send
+    /// cursor-key sequences to the PTY instead.
+    pub fn alt_screen_active(&self) -> bool {
+        self.alt_screen.load(Ordering::Relaxed)
     }
 
     /// Wait up to `timeout` for the next [`TermEvent`], or `None` on timeout.
@@ -407,6 +459,7 @@ fn run_worker<B: VtBackend>(
     writer: SharedWriter,
     latest: Arc<Mutex<Arc<GridSnapshot>>>,
     bracketed_paste: Arc<AtomicBool>,
+    alt_screen: Arc<AtomicBool>,
     rx: Receiver<WorkerMsg>,
     event_tx: Sender<TermEvent>,
     mut child: Box<dyn portable_pty::Child + Send + Sync>,
@@ -420,18 +473,64 @@ fn run_worker<B: VtBackend>(
     // Start one interval in the past so the very first output snapshots
     // immediately instead of being swallowed by the throttle.
     let mut last_snapshot = Instant::now() - FRAME_INTERVAL;
+    // Whether `backend`'s state has changed since the last *published*
+    // snapshot -- sticky across a run of throttled `Bytes` messages. This
+    // closes a real gap the throttle above would otherwise leave: if an
+    // entire burst of PTY output lands within one `FRAME_INTERVAL` window
+    // (routine for anything that prints a lot at once -- `ls`, `cat`, a
+    // TUI's initial screen draw -- since the reader thread's `read()`s
+    // typically come back within microseconds of each other), every
+    // `Bytes` message in that burst can hit the `elapsed() < FRAME_INTERVAL`
+    // branch and skip publishing, one after another. If the very next event
+    // this worker sees is far in the future (or never comes at all -- e.g.
+    // the child then idles at a shell prompt or inside `sleep`), the last,
+    // truest state of the burst would otherwise never reach a published
+    // `GridSnapshot` until *something else* happens to nudge it (a keypress,
+    // a resize, or the child eventually exiting). `dirty` plus the
+    // `recv_timeout` below fixes that: once set, the loop wakes up on its
+    // own right when the throttle window ends and force-publishes, even
+    // with zero new messages.
+    let mut dirty = false;
 
-    while let Ok(msg) = rx.recv() {
+    loop {
+        let msg = if dirty {
+            let remaining = FRAME_INTERVAL.saturating_sub(last_snapshot.elapsed());
+            match rx.recv_timeout(remaining) {
+                Ok(msg) => msg,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    last_snapshot = Instant::now();
+                    publish_snapshot(&mut backend, &latest, &event_tx);
+                    dirty = false;
+                    continue;
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        } else {
+            // No pending unpublished change -- block indefinitely rather
+            // than polling, so a genuinely idle session costs nothing (the
+            // same "parked in a blocking wait" idle-CPU property the reader
+            // thread's tight `read()` loop and this design overall rely on).
+            match rx.recv() {
+                Ok(msg) => msg,
+                Err(_) => break,
+            }
+        };
+
         match msg {
             WorkerMsg::Bytes(bytes) => {
                 backend.feed(&bytes);
-                // Refresh the bracketed-paste flag on every processed batch
-                // (unlike the snapshot, not throttled -- it's a single cheap
-                // bool, and a paste can arrive at any time between frames).
+                // Refresh the bracketed-paste/alt-screen flags on every
+                // processed batch (unlike the snapshot, not throttled --
+                // they're single cheap bools, and either can change at any
+                // time between frames).
                 bracketed_paste.store(backend.bracketed_paste(), Ordering::Relaxed);
+                alt_screen.store(backend.alt_screen_active(), Ordering::Relaxed);
                 if last_snapshot.elapsed() >= FRAME_INTERVAL {
                     last_snapshot = Instant::now();
                     publish_snapshot(&mut backend, &latest, &event_tx);
+                    dirty = false;
+                } else {
+                    dirty = true;
                 }
             }
             WorkerMsg::Resize(c, r) => {
@@ -440,6 +539,22 @@ fn run_worker<B: VtBackend>(
                 // may be no PTY output to otherwise trigger a redraw.
                 last_snapshot = Instant::now();
                 publish_snapshot(&mut backend, &latest, &event_tx);
+                dirty = false;
+            }
+            WorkerMsg::Scroll(delta_lines) => {
+                backend.scroll_display(delta_lines);
+                // Always snapshot: a scroll is a discrete, user-visible
+                // action that typically has no PTY output of its own to
+                // otherwise trigger a redraw -- same reasoning as Resize.
+                last_snapshot = Instant::now();
+                publish_snapshot(&mut backend, &latest, &event_tx);
+                dirty = false;
+            }
+            WorkerMsg::ScrollToBottom => {
+                backend.scroll_to_bottom();
+                last_snapshot = Instant::now();
+                publish_snapshot(&mut backend, &latest, &event_tx);
+                dirty = false;
             }
             WorkerMsg::Eof => {
                 // Force a final snapshot regardless of throttle, so the last

@@ -313,6 +313,165 @@ fn bracketed_paste_mode_reflects_decset_2004() {
     );
 }
 
+/// A fresh session has no scrollback yet: `scroll_offset`/`scrollback_len`
+/// both start at `0` (the live tail, nothing to scroll into).
+#[test]
+fn fresh_session_has_no_scrollback() {
+    let term =
+        Terminal::spawn_with_command(20, 5, Some("printf ready; sleep 0.2"), &[]).expect("spawn");
+    let snap = term.wait_for(TIMEOUT, |g| g.contains_text("ready"));
+    assert!(
+        snap.is_some(),
+        "expected output before asserting scroll state"
+    );
+    let latest = term.snapshot();
+    assert_eq!(latest.scroll_offset, 0);
+    assert_eq!(latest.scrollback_len, 0);
+}
+
+/// Flood more lines than fit on screen, then scroll back: a line that was
+/// pushed off the top of the live viewport becomes visible again, and
+/// `scroll_offset`/`scrollback_len` both reflect the move. This is the
+/// core scrollback contract `VtBackend::scroll_display` promises, exercised
+/// identically on whichever backend this test binary was built against.
+#[test]
+fn scrolling_up_reveals_history_pushed_off_the_live_viewport() {
+    // A 20x5 grid: print 40 numbered lines (well past 1000-line history
+    // cap concerns -- this only needs to overflow 5 *visible* rows), so
+    // "line 0" is long gone from the live viewport by the time we're done.
+    let term = Terminal::spawn_with_command(
+        20,
+        5,
+        Some("for i in $(seq 0 39); do echo \"line-$i\"; done; sleep 0.2"),
+        &[],
+    )
+    .expect("spawn");
+    let snap = term.wait_for(TIMEOUT, |g| g.contains_text("line-39"));
+    assert!(
+        snap.is_some(),
+        "expected the flood to finish, got:\n{}",
+        term.snapshot().to_text()
+    );
+
+    // Live tail: scrolled all the way down, "line-0" long since scrolled
+    // off, but real scrollback exists for it to have gone somewhere.
+    let live = term.snapshot();
+    assert_eq!(
+        live.scroll_offset, 0,
+        "fresh output starts at the live tail"
+    );
+    assert!(
+        live.scrollback_len > 0,
+        "40 lines into a 5-row viewport must have produced scrollback"
+    );
+    assert!(
+        !live.contains_text("line-0"),
+        "line-0 should have scrolled off the live viewport:\n{}",
+        live.to_text()
+    );
+
+    // Scroll all the way back (exactly `scrollback_len`, landing precisely
+    // at the top rather than guessing a delta) so "line-0" -- the very
+    // first line ever printed -- is visible again, then confirm both the
+    // content and the reported offset moved.
+    term.scroll(live.scrollback_len as i64);
+    let scrolled = term.wait_for(TIMEOUT, |g| {
+        g.contains_text("line-0") && g.scroll_offset > 0
+    });
+    assert!(
+        scrolled.is_some(),
+        "expected 'line-0' back in view after scrolling up, got:\n{}",
+        term.snapshot().to_text()
+    );
+    let scrolled = scrolled.unwrap();
+    assert!(
+        scrolled.scroll_offset > 0,
+        "scroll_offset should have moved off 0"
+    );
+    assert_eq!(
+        scrolled.scrollback_len, live.scrollback_len,
+        "scrolling shouldn't change how much history exists, only where we're looking"
+    );
+
+    // `scroll_to_bottom` snaps straight back to the live tail regardless of
+    // how far up we scrolled.
+    term.scroll_to_bottom();
+    let bottom = term.wait_for(TIMEOUT, |g| g.scroll_offset == 0);
+    assert!(
+        bottom.is_some(),
+        "expected scroll_to_bottom to return scroll_offset to 0"
+    );
+    assert!(
+        bottom.unwrap().contains_text("line-39"),
+        "the live tail should show the most recent output again"
+    );
+}
+
+/// `scroll_display`'s delta is clamped, not merely tolerated: scrolling by
+/// an absurdly large delta lands exactly at the top of history
+/// (`scroll_offset == scrollback_len`), never panics, and never exceeds it.
+#[test]
+fn scroll_delta_clamps_to_scrollback_length() {
+    let term = Terminal::spawn_with_command(
+        20,
+        5,
+        Some("for i in $(seq 0 39); do echo \"line-$i\"; done; sleep 0.2"),
+        &[],
+    )
+    .expect("spawn");
+    let snap = term.wait_for(TIMEOUT, |g| g.contains_text("line-39"));
+    assert!(snap.is_some(), "expected the flood to finish");
+    let scrollback_len = term.snapshot().scrollback_len;
+    assert!(
+        scrollback_len > 0,
+        "expected some scrollback to clamp against"
+    );
+
+    term.scroll(1_000_000);
+    let top = term.wait_for(TIMEOUT, |g| g.scroll_offset == scrollback_len);
+    assert!(
+        top.is_some(),
+        "expected an oversized scroll delta to clamp to scrollback_len ({scrollback_len}), got {}",
+        term.snapshot().scroll_offset
+    );
+
+    // And the opposite direction clamps at 0, not negative/underflowed.
+    term.scroll(-1_000_000);
+    let bottom = term.wait_for(TIMEOUT, |g| g.scroll_offset == 0);
+    assert!(
+        bottom.is_some(),
+        "expected an oversized negative delta to clamp to 0, got {}",
+        term.snapshot().scroll_offset
+    );
+}
+
+/// Entering the alternate screen (the mode `vim`/`less`/`htop` use) is
+/// visible via `Terminal::alt_screen_active()`, and leaving it clears the
+/// flag again -- the signal `labolabo-app`'s wheel handler uses to decide
+/// whether to scroll this crate's own viewport or send cursor keys instead.
+#[test]
+fn alt_screen_active_reflects_decset_1049() {
+    let term = Terminal::spawn_with_command(
+        40,
+        10,
+        Some(r#"printf '\033[?1049h'; sleep 0.3; printf '\033[?1049l'; sleep 0.3"#),
+        &[],
+    )
+    .expect("spawn");
+    assert!(
+        !term.alt_screen_active(),
+        "alt screen should be off before the child runs"
+    );
+    assert!(
+        wait_for_alt_screen(&term, TIMEOUT, true),
+        "expected alt screen to turn on after DECSET 1049h"
+    );
+    assert!(
+        wait_for_alt_screen(&term, TIMEOUT, false),
+        "expected alt screen to turn back off after DECSET 1049l"
+    );
+}
+
 /// Find the first cell whose text matches `needle` (a single grapheme, as
 /// printed by the tests above -- there's no ambiguity to resolve).
 fn find_cell<'a>(
@@ -350,6 +509,24 @@ fn wait_for_bracketed_paste(term: &Terminal, timeout: Duration, expected: bool) 
         };
         if term.recv_event(remaining.min(Duration::from_millis(50))) == Some(TermEvent::Exit) {
             return term.bracketed_paste() == expected;
+        }
+    }
+}
+
+/// Poll `term.alt_screen_active()` until it equals `expected` or `timeout`
+/// elapses -- same shape as [`wait_for_bracketed_paste`] (no dedicated event
+/// of its own; a plain flag refreshed alongside snapshot publishing).
+fn wait_for_alt_screen(term: &Terminal, timeout: Duration, expected: bool) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if term.alt_screen_active() == expected {
+            return true;
+        }
+        let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else {
+            return term.alt_screen_active() == expected;
+        };
+        if term.recv_event(remaining.min(Duration::from_millis(50))) == Some(TermEvent::Exit) {
+            return term.alt_screen_active() == expected;
         }
     }
 }
