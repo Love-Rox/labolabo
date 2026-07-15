@@ -33,12 +33,13 @@ const FALLBACK_FONT_FAMILY: &str = "Menlo";
 pub struct RenderSpec {
     pub font: Font,
     pub font_size: f32,
-    /// Measured advance width of one monospace cell, in pixels
-    /// (ceil-rounded so adjacent cell backgrounds tile without hairline
-    /// gaps).
+    /// Measured advance width of one monospace cell, in logical pixels,
+    /// snapped to a whole device pixel (see [`RenderSpec::resolve`] and
+    /// [`round_to_device_pixels`]) so adjacent cell backgrounds tile without
+    /// hairline gaps.
     pub cell_width: f32,
-    /// Measured line height (ascent + descent) of one cell, in pixels
-    /// (ceil-rounded, same reason).
+    /// Measured line height (ascent + descent) of one cell, in logical
+    /// pixels, snapped the same way.
     pub cell_height: f32,
 }
 
@@ -69,6 +70,17 @@ impl RenderSpec {
     /// metric, so `cell_height` is ascent + descent -- Ghostty itself
     /// additionally adds the font's line gap, so rows here can be slightly
     /// tighter than Ghostty.app's for fonts with a non-zero line gap.
+    ///
+    /// The measured advance/height are snapped to whole **device** pixels
+    /// by rounding, mirroring Ghostty's own metrics derivation
+    /// (`src/font/Metrics.zig`: `cell_width = @round(face_width)` in device
+    /// pixels, with a comment explaining that rounding tracks the font's
+    /// authorial intent better than ceiling). Ceiling in *logical* pixels
+    /// -- what this function originally did -- inflates the grid pitch by
+    /// up to almost a full logical pixel: MonaspiceKr Nerd Font Mono at
+    /// 13pt has an advance of 8.06px, which `ceil` turns into a 9px pitch
+    /// (+12% letter spacing, visibly "airy" text -- reported on-device)
+    /// where Ghostty renders an 8px pitch (16.12 device px rounds to 16).
     pub fn resolve(families: &[String], font_size: f32, window: &mut Window) -> Self {
         let font_size = if font_size.is_finite() && font_size >= 1.0 {
             font_size
@@ -115,10 +127,12 @@ impl RenderSpec {
         let shaped = window
             .text_system()
             .shape_line(text, px(font_size), &[run], None);
-        let cell_width = f32::from(shaped.width).ceil().max(1.0);
-        let cell_height = (f32::from(shaped.ascent) + f32::from(shaped.descent))
-            .ceil()
-            .max(1.0);
+        let scale_factor = window.scale_factor();
+        let cell_width = round_to_device_pixels(f32::from(shaped.width), scale_factor);
+        let cell_height = round_to_device_pixels(
+            f32::from(shaped.ascent) + f32::from(shaped.descent),
+            scale_factor,
+        );
 
         Self {
             font: font_obj,
@@ -127,6 +141,19 @@ impl RenderSpec {
             cell_height,
         }
     }
+}
+
+/// Snap a logical-pixel measurement to the nearest whole **device** pixel
+/// (Ghostty's `@round(face_width)` semantics -- see [`RenderSpec::resolve`]'s
+/// doc comment), clamped to at least one device pixel so a degenerate
+/// measurement can never produce a zero-width/height cell.
+fn round_to_device_pixels(logical: f32, scale_factor: f32) -> f32 {
+    let scale = if scale_factor.is_finite() && scale_factor > 0.0 {
+        scale_factor
+    } else {
+        1.0
+    };
+    (logical * scale).round().max(1.0) / scale
 }
 
 fn to_hsla(color: Rgb) -> Hsla {
@@ -230,4 +257,35 @@ fn paint_cursor(
         Bounds::new(point(x, y), size(px(spec.cell_width), px(spec.cell_height))),
         color,
     ));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::round_to_device_pixels;
+
+    #[test]
+    fn rounds_in_device_pixels_not_logical() {
+        // The reported case: MonaspiceKr Nerd Font Mono @13pt = 8.06px
+        // advance on a 2x display. 16.12 device px rounds to 16 = 8.0
+        // logical -- the old logical-pixel ceil gave 9.0 (+12% pitch).
+        assert_eq!(round_to_device_pixels(8.06, 2.0), 8.0);
+        // On a 1x display the same measurement rounds to 8.0 as well.
+        assert_eq!(round_to_device_pixels(8.06, 1.0), 8.0);
+        // A half-device-pixel fraction rounds up: 7.8 * 2 = 15.6 -> 16.
+        assert_eq!(round_to_device_pixels(7.8, 2.0), 8.0);
+        // ...but a smaller fraction rounds down: 7.7 * 2 = 15.4 -> 15 -> 7.5.
+        assert_eq!(round_to_device_pixels(7.7, 2.0), 7.5);
+    }
+
+    #[test]
+    fn degenerate_inputs_clamp_to_one_device_pixel() {
+        assert_eq!(round_to_device_pixels(0.0, 2.0), 0.5);
+        assert_eq!(round_to_device_pixels(-3.0, 2.0), 0.5);
+    }
+
+    #[test]
+    fn bogus_scale_factor_falls_back_to_one() {
+        assert_eq!(round_to_device_pixels(8.06, 0.0), 8.0);
+        assert_eq!(round_to_device_pixels(8.06, f32::NAN), 8.0);
+    }
 }
