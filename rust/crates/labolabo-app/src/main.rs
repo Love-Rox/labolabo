@@ -23,6 +23,7 @@ mod grid;
 mod hooks;
 mod ime;
 mod keys;
+mod motion;
 mod mouse_report;
 mod new_task;
 mod paste;

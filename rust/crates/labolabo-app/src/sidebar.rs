@@ -20,7 +20,7 @@ use gpui::{
     MouseDownEvent, Render, SharedString, Window,
 };
 
-use labolabo_core::{Task, TaskKind};
+use labolabo_core::{AgentStatus, Task, TaskKind};
 
 use crate::app::LaboLaboApp;
 use crate::task_workspace::status_dot_color;
@@ -186,7 +186,11 @@ fn icon_button(
         .child(glyph)
 }
 
-pub fn render(app: &LaboLaboApp, cx: &mut Context<LaboLaboApp>) -> impl IntoElement {
+pub fn render(
+    app: &LaboLaboApp,
+    breathing_enabled: bool,
+    cx: &mut Context<LaboLaboApp>,
+) -> impl IntoElement {
     let groups = group_tasks_by_repo(app.tasks());
     let selected = app.selected_task_id().map(str::to_string);
 
@@ -201,7 +205,18 @@ pub fn render(app: &LaboLaboApp, cx: &mut Context<LaboLaboApp>) -> impl IntoElem
         );
         for task in group.tasks {
             let is_selected = selected.as_deref() == Some(task.id.as_str());
-            let status_color = app.task_agent_status(&task.id).and_then(status_dot_color);
+            let status = app.task_agent_status(&task.id);
+            let status_color = status.and_then(status_dot_color);
+            let is_running = status == Some(AgentStatus::Running);
+            let dot_el = app.task_dot_anim(&task.id).and_then(|anim| {
+                crate::motion::status_dot_element(
+                    format!("sidebar-dot-{}", task.id),
+                    status_color,
+                    is_running,
+                    breathing_enabled,
+                    anim,
+                )
+            });
             // Cross-session conflict warning (`plans` wave 5i §2): another
             // Task in the same repo has changed one of the same files, per
             // whatever Git status each has cached so far -- see
@@ -236,13 +251,19 @@ pub fn render(app: &LaboLaboApp, cx: &mut Context<LaboLaboApp>) -> impl IntoElem
                 .py_1()
                 .rounded_sm()
                 .when(is_selected, |el| el.bg(rgb(theme::surface::ACTIVE)))
+                // Hover feedback (`plans/014` M5, scoped down -- see that
+                // plan's doc comment for why this is an instant `.hover()`
+                // tint rather than an eased transition) only applies to
+                // unselected rows, so hovering a selected row can never
+                // read as "losing the selection".
+                .when(!is_selected, |el| {
+                    el.hover(|el| el.bg(rgb(theme::surface::RAISED)))
+                })
                 .text_color(rgb(theme::text::PRIMARY))
                 .text_size(px(theme::font_size::LABEL))
                 .child(kind_marker(&task.kind))
                 .child(SharedString::from(task.title.clone()))
-                .when_some(status_color, |el, color| {
-                    el.child(div().w(px(6.0)).h(px(6.0)).rounded_full().bg(rgb(color)))
-                })
+                .children(dot_el)
                 .when(has_conflict, move |el| {
                     el.child(
                         div()

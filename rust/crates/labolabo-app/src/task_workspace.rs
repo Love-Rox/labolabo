@@ -27,10 +27,10 @@ use std::time::Duration;
 use futures::channel::mpsc;
 use futures::StreamExt;
 use gpui::{
-    canvas, div, prelude::*, px, relative, rgb, rgba, AnyElement, Bounds, Context, CursorStyle,
-    DragMoveEvent, ElementInputHandler, ExternalPaths, FocusHandle, IntoElement, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollWheelEvent, SharedString,
-    Task as GpuiTask, Window,
+    canvas, div, prelude::*, px, relative, rgb, rgba, Animation, AnimationExt, AnyElement, Bounds,
+    Context, CursorStyle, DragMoveEvent, ElementInputHandler, ExternalPaths, FocusHandle,
+    IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render,
+    ScrollWheelEvent, SharedString, Task as GpuiTask, Window,
 };
 
 use labolabo_core::{
@@ -42,6 +42,7 @@ use labolabo_term::{TermEvent, Terminal};
 use crate::app::{LaboLaboApp, PreeditState};
 use crate::git_pane::GitPaneState;
 use crate::grid;
+use crate::motion::{self, DotAnimState};
 use crate::render::RenderSpec;
 use crate::selection::Selection;
 use crate::theme;
@@ -265,6 +266,11 @@ pub struct PaneRuntime {
     /// comment) -- kept so pane removal can unregister the routing table
     /// entry (`crate::hooks::HookRuntime::unregister_pane`).
     pub pane_uuid: String,
+    /// This pane's tab-chip status-dot crossfade state (`plans/014` M1) --
+    /// `Cell`-wrapped for the same "mutate from a plain `&` render pass"
+    /// reason as `last_size`/`last_bounds` above (see `motion::
+    /// status_dot_element`'s doc comment for the full mechanism).
+    pub dot_anim: Cell<DotAnimState>,
     /// Keeps the redraw-bridge task alive for the pane's lifetime; dropping
     /// it (on pane close) is the signal the bridge thread uses to stop.
     _redraw_task: GpuiTask<()>,
@@ -307,6 +313,11 @@ pub struct TaskWorkspace {
     /// `deactivate_git_pane`), so a freshly constructed `TaskWorkspace` here
     /// starts with none attached.
     pub git: GitPaneState,
+    /// This Task's sidebar-row status-dot crossfade state (`plans/014` M1)
+    /// -- the Task-level *aggregate* status
+    /// (`LaboLaboApp::task_agent_status`), as opposed to `PaneRuntime::
+    /// dot_anim`'s per-pane one. Same `Cell`-for-render-time-mutation shape.
+    pub dot_anim: Cell<DotAnimState>,
 }
 
 impl TaskWorkspace {
@@ -342,6 +353,7 @@ impl TaskWorkspace {
             pane_usage: HashMap::new(),
             pane_drag_hover: None,
             git,
+            dot_anim: Cell::new(DotAnimState::default()),
         }
     }
 }
@@ -461,6 +473,7 @@ pub fn insert_runtime(
             reporting_drag: false,
             pending_scroll: 0.0,
             pane_uuid,
+            dot_anim: Cell::new(DotAnimState::default()),
             _redraw_task: redraw_task,
         },
     );
@@ -496,6 +509,7 @@ pub fn render_tile(
     active_preedit: Option<&PreeditState>,
     pane_drag_hover: Option<PaneDragHover>,
     divider_drag_active: bool,
+    breathing_enabled: bool,
     cx: &mut Context<LaboLaboApp>,
 ) -> AnyElement {
     if node.is_leaf() {
@@ -511,6 +525,7 @@ pub fn render_tile(
             active_preedit,
             pane_drag_hover,
             divider_drag_active,
+            breathing_enabled,
             cx,
         );
     }
@@ -531,6 +546,7 @@ pub fn render_tile(
             active_preedit,
             pane_drag_hover,
             divider_drag_active,
+            breathing_enabled,
             cx,
         );
     };
@@ -553,6 +569,7 @@ pub fn render_tile(
         active_preedit,
         pane_drag_hover,
         divider_drag_active,
+        breathing_enabled,
         cx,
     );
     let second_el = render_tile(
@@ -567,6 +584,7 @@ pub fn render_tile(
         active_preedit,
         pane_drag_hover,
         divider_drag_active,
+        breathing_enabled,
         cx,
     );
 
@@ -683,6 +701,7 @@ fn render_leaf(
     active_preedit: Option<&PreeditState>,
     pane_drag_hover: Option<PaneDragHover>,
     divider_drag_active: bool,
+    breathing_enabled: bool,
     cx: &mut Context<LaboLaboApp>,
 ) -> AnyElement {
     let is_focused_leaf = node.panes.iter().any(|p| p.id == focused_pane);
@@ -908,10 +927,12 @@ fn render_leaf(
     let tab_bar = render_pane_tab_bar(
         task_id,
         node,
+        runtimes,
         pane_status,
         pane_usage,
         spec,
         is_focused_leaf,
+        breathing_enabled,
         cx,
     );
 
@@ -989,7 +1010,11 @@ fn render_leaf(
 
         if let Some(hover) = pane_drag_hover {
             if hover.target_pane_id == anchor_pane_id {
-                leaf = leaf.child(move_drop_highlight_overlay(hover.edge));
+                leaf = leaf.child(move_drop_highlight_overlay(
+                    task_id,
+                    anchor_pane_id,
+                    hover.edge,
+                ));
             }
         }
     }
@@ -1004,7 +1029,21 @@ fn render_leaf(
 /// not pixel bounds, so it needs no separate knowledge of the leaf's actual
 /// on-screen size -- it just fills the right quadrant of whatever the
 /// parent (a `.relative()` leaf div) currently measures.
-fn move_drop_highlight_overlay(edge: DropEdge) -> impl IntoElement {
+///
+/// Fades in over [`motion::DROP_ZONE_FADE_IN`] (`plans/014` M3) -- this
+/// element only exists in the tree while a drag is actively hovering this
+/// exact `(anchor_pane_id, edge)` combination, so an id keyed on both
+/// (`target_pane_id`/`edge`, mixed into the element id below) means a
+/// zone change mounts a genuinely new element and restarts the fade from
+/// scratch (`plans/014` M3's "対象ゾーンが変わったら新ゾーンで再スタート
+/// （単発アニメの掛け直しで可）"). Disappearance is instant (the element
+/// is simply removed once `pane_drag_hover` no longer matches), matching
+/// M3's "消滅は即時でよい（ドロップ/キャンセルの応答は snappy に）".
+fn move_drop_highlight_overlay(
+    task_id: &str,
+    target_pane_id: PaneId,
+    edge: DropEdge,
+) -> impl IntoElement {
     let (left, top, width, height): (f32, f32, f32, f32) = match edge {
         DropEdge::Left => (0.0, 0.0, 0.5, 1.0),
         DropEdge::Right => (0.5, 0.0, 0.5, 1.0),
@@ -1012,6 +1051,7 @@ fn move_drop_highlight_overlay(edge: DropEdge) -> impl IntoElement {
         DropEdge::Bottom => (0.0, 0.5, 1.0, 0.5),
         DropEdge::Center => (0.0, 0.0, 1.0, 1.0),
     };
+    let id: SharedString = format!("drop-hover-{task_id}-{target_pane_id:?}-{edge:?}").into();
     div()
         .absolute()
         .left(relative(left))
@@ -1019,20 +1059,36 @@ fn move_drop_highlight_overlay(edge: DropEdge) -> impl IntoElement {
         .w(relative(width))
         .h(relative(height))
         .bg(rgba(MOVE_DROP_HIGHLIGHT_COLOR))
+        .with_animation(
+            id,
+            Animation::new(motion::DROP_ZONE_FADE_IN).with_easing(motion::ease_out_strong()),
+            |el, t| el.opacity(t),
+        )
 }
 
 /// One leaf's tab bar. Identical to wave 5b-2's `app::render_pane_tab_bar`
 /// other than threading `task_id` through both click handlers, plus
-/// (`plans/013` §4) the selected tab's `ACCENT` top border and the usage
-/// label's terminal-font `CAPTION` styling (needs `spec`).
+/// (`plans/013`/`plans/014`) the selected tab's `ACCENT` top border, the
+/// usage label's terminal-font `CAPTION` styling (needs `spec`), and the
+/// status dot's crossfade/breathing (needs each pane's own `PaneRuntime::
+/// dot_anim` from `runtimes`, and `breathing_enabled` -- see
+/// `motion::status_dot_element`'s doc comment).
+///
+/// Deliberately **no** hover/press feedback on the chip itself or the tab
+/// switch it triggers (`plans/014` principle 2: "タブ切替...には遷移を
+/// 足さない" -- a keyboard-frequency, high-repetition action stays
+/// intentionally unadorned) -- only its `×`/`+` sub-actions (closing/
+/// opening a tab, not switching one) get the M5 hover/press treatment.
 #[allow(clippy::too_many_arguments)]
 fn render_pane_tab_bar(
     task_id: &str,
     node: &TileNode,
+    runtimes: &HashMap<PaneId, PaneRuntime>,
     pane_status: &HashMap<PaneId, AgentStatus>,
     pane_usage: &HashMap<PaneId, AgentUsage>,
     spec: &RenderSpec,
     is_focused: bool,
+    breathing_enabled: bool,
     cx: &mut Context<LaboLaboApp>,
 ) -> impl IntoElement {
     let anchor = node.selected_pane().map(|p| p.id);
@@ -1056,10 +1112,18 @@ fn render_pane_tab_bar(
             let title: SharedString = pane.title.clone().into();
             let select_task_id = task_id.to_string();
             let close_task_id = task_id.to_string();
-            let status_color = pane_status
-                .get(&pane_id)
-                .copied()
-                .and_then(status_dot_color);
+            let status = pane_status.get(&pane_id).copied();
+            let status_color = status.and_then(status_dot_color);
+            let is_running = status == Some(AgentStatus::Running);
+            let dot_el = runtimes.get(&pane_id).and_then(|runtime| {
+                motion::status_dot_element(
+                    format!("tab-dot-{task_id}-{pane_id:?}"),
+                    status_color,
+                    is_running,
+                    breathing_enabled,
+                    &runtime.dot_anim,
+                )
+            });
             let usage_label: Option<SharedString> = pane_usage
                 .get(&pane_id)
                 .and_then(format_usage_compact)
@@ -1091,9 +1155,7 @@ fn render_pane_tab_bar(
                         .border_color(rgb(theme::ACCENT))
                 })
                 .when(!selected, |el| el.bg(rgb(theme::surface::RAISED)))
-                .when_some(status_color, |el, color| {
-                    el.child(div().w(px(6.0)).h(px(6.0)).rounded_full().bg(rgb(color)))
-                })
+                .children(dot_el)
                 .when_some(usage_label, |el, label| {
                     el.child(
                         div()
@@ -1126,8 +1188,14 @@ fn render_pane_tab_bar(
                 )
                 .child(
                     div()
+                        .id(SharedString::from(format!(
+                            "tab-close-{task_id}-{pane_id:?}"
+                        )))
                         .px_1()
+                        .rounded_sm()
                         .text_color(rgb(theme::text::SECONDARY))
+                        .hover(|el| el.bg(rgb(theme::surface::ACTIVE)))
+                        .active(|el| el.opacity(0.7))
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, _: &MouseDownEvent, window, cx| {
@@ -1141,8 +1209,12 @@ fn render_pane_tab_bar(
         .child({
             let add_task_id = task_id.to_string();
             div()
+                .id(SharedString::from(format!("tab-add-{task_id}")))
                 .px_2()
+                .rounded_sm()
                 .text_color(rgb(theme::text::PRIMARY))
+                .hover(|el| el.bg(rgb(theme::surface::ACTIVE)))
+                .active(|el| el.opacity(0.7))
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _: &MouseDownEvent, window, cx| {
