@@ -45,11 +45,17 @@ pub trait VtBackend: 'static {
     /// config, as read by `labolabo-app`). Fields left unset in `colors`
     /// keep the backend's own built-in default -- a `ColorScheme::default()`
     /// session renders identically to before this parameter existed.
+    ///
+    /// `max_scrollback` caps how many lines of history the grid retains
+    /// past the live viewport (both backends previously hardcoded `1000`
+    /// here; `labolabo-app`'s settings screen now makes this user-
+    /// configurable -- see `TermSession::spawn_with_scrollback_options`).
     fn new(
         cols: u16,
         rows: u16,
         pty_writer: SharedWriter,
         colors: &ColorScheme,
+        max_scrollback: usize,
     ) -> anyhow::Result<Self>
     where
         Self: Sized;

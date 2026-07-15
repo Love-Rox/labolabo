@@ -130,16 +130,22 @@ running the **same** integration tests as ghostty (`tests/backend_common.rs`).
     `scroll_offset`/`scrollback_len` from `total`/`offset`/`len` internally,
     so nothing above this crate ever needs to know the two backends
     disagree.
-  - **History size stays 1000 lines** (unchanged from before this feature:
-    `scrolling_history: 1000` / `max_scrollback: 1000`) -- the spike's M3
-    milestone measured `scrolling_history: 10_000` (alacritty's own
-    default) costing ~21% lower steady-state throughput than 1000, with 0
-    and 1000 performing about the same (see `labolabo-spikes/term-poc/
+  - **History size defaults to 1000 lines, and is now caller-configurable**
+    (`DEFAULT_MAX_SCROLLBACK` in `session.rs`; `VtBackend::new`'s
+    `max_scrollback: usize` parameter, threaded through by both backends'
+    `Config.scrolling_history` / `TerminalOptions.max_scrollback`). The
+    spike's M3 milestone measured `scrolling_history: 10_000` (alacritty's
+    own default) costing ~21% lower steady-state throughput than 1000, with
+    0 and 1000 performing about the same (see `labolabo-spikes/term-poc/
     README.md`, "M3: frame-pacing + throughput efficiency" ->
-    "Throughput efficiency: `scrolling_history`"). 1000 was chosen there
-    specifically to leave headroom for scrollback viewing without paying
-    the 10k cost -- this feature is exactly that headroom being spent, so
-    the constant itself didn't need to change.
+    "Throughput efficiency: `scrolling_history`"). 1000 stays the default
+    for exactly that reason, but `TermSession::spawn_with_scrollback_options`
+    (added for `labolabo-app`'s Cmd+, settings screen, `plans` wave 5i §3)
+    lets a caller opt into a different cap per spawn -- every pre-existing
+    `spawn_*` entry point (`spawn_with_command`/`spawn_with_options`/
+    `spawn_with_cwd_options`) is unchanged and still funnels down to
+    `DEFAULT_MAX_SCROLLBACK`, so this is purely additive: a caller who never
+    heard of the new method sees identical behavior to before it existed.
   - **Alt screen has no scrollback of its own on either backend**
     (alacritty: `Term::new`'s inactive/alternate grid is constructed with
     `max_scroll_limit: 0`; ghostty-vt's alternate screen is not part of the
@@ -258,8 +264,12 @@ Also covered, backend-agnostically: a fresh session reports `scroll_offset`/
 scrolling back reveals a line that had scrolled off (and `scroll_to_bottom`
 returns to the live tail); an oversized `scroll` delta clamps to
 `scrollback_len` (and an oversized negative one clamps to `0`) rather than
-panicking or drifting; and `alt_screen_active()` reflects DECSET `1049`
-(entering/leaving the alternate screen, the mode `vim`/`less`/`htop` use).
+panicking or drifting; `alt_screen_active()` reflects DECSET `1049`
+(entering/leaving the alternate screen, the mode `vim`/`less`/`htop` use);
+and (via `spawn_with_scrollback_options`) a small explicit `max_scrollback`
+actually caps the backend's retained history -- flooding far more lines
+than the cap leaves `scrollback_len` at or under it, not silently ignoring
+the parameter and falling back to `DEFAULT_MAX_SCROLLBACK`.
 
 ## Building the ghostty-vt backend
 

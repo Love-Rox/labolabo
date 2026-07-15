@@ -852,6 +852,34 @@ Three independent DnD systems, all built on gpui 0.2's `on_drag`/
   see `.github/workflows/ci.yml`'s comment on that job for why: gpui's Linux
   system-dependency footprint is heavier to provision than this wave wanted
   to take on).
+- **Cross-session conflict detection only sees Tasks whose Git status has
+  already been fetched at least once this run** (`LaboLaboApp::
+  task_conflicts`/`changed_files_cache`, `app.rs`). The Git pane's
+  `FileWatcher` — and therefore `git status` — is only ever active for the
+  *selected* Task (see "The Task model" above), so a Task that has never
+  been selected has no entry in the cache and neither contributes to nor
+  triggers a conflict warning, even if it really is editing the same file.
+  This is a deliberate wave-5i scope decision (no all-Tasks background
+  polling) rather than an oversight: the warning badge (sidebar row, an
+  orange ⚠) only ever reflects the *last-known* status of whichever Tasks
+  happen to have been visited, refreshed on the selected Task's own Git
+  pane refresh cadence (FSEvents-debounced, not polled).
+- **Transcript usage display is best-effort and per-tab, not per-Task.**
+  `TaskWorkspace::pane_usage` re-reads a pane's transcript
+  (`labolabo_core::transcript_usage::read`) only when that pane's own hook
+  status transitions to `Idle`/`Ended` — never polled — and is shown as a
+  compact `"1.2k tok · $0.08"` label on that pane's own tab chip (no
+  popover/tooltip surface exists yet to show the fuller per-field
+  breakdown Swift's `UsagePopover` does). A Task with several tabs shows
+  one usage figure per tab, not a combined total for the Task.
+- **The settings screen (`Cmd+,`) is an in-window overlay, not a native
+  macOS window** — gpui has no `Settings`-scene equivalent to SwiftUI's,
+  so `crate::settings::render_settings_overlay` paints a backdrop + panel
+  over the existing window instead. There is no click-outside-to-close
+  (see that function's doc comment for why); use the panel's own "×" or
+  toggle `Cmd+,` again. The Git-pane-default-visible and scrollback-lines
+  settings only affect Tasks/panes loaded *after* the change — see
+  `crate::settings`'s module doc comment.
 
 ## What was and wasn't verified
 
@@ -1229,3 +1257,90 @@ features, so (like drag & drop above) this gap is larger than usual here:**
 - **The selection highlight's visual legibility has not been screenshotted**
   -- the chosen alpha (`render::SELECTION_HIGHLIGHT_ALPHA`) is a judgment
   call, not measured against real terminal content on a real display.
+
+### Agent usage / cross-session conflicts / settings screen (wave 5i)
+
+Landed: three small parity items wiring already-ported `labolabo-core`
+logic (and one Rust-only addition) into the UI --
+
+- **Agent usage** (`task_workspace.rs`'s `pane_usage`/`format_usage_compact`,
+  `app.rs`'s `handle_agent_event`/`refresh_pane_usage`/`apply_pane_usage`):
+  a compact `"1.2k tok · $0.08"` label on a pane's tab chip, re-read from
+  its transcript (`labolabo_core::transcript_usage::read`) only when that
+  pane's hook status transitions to `Idle`/`Ended` -- never polled.
+- **Cross-session conflicts** (`git_pane::changed_paths`, `app.rs`'s
+  `changed_files_cache`/`task_conflicts`/`compute_task_conflicts`,
+  `sidebar.rs`'s ⚠ badge): an orange ⚠ on a Task's sidebar row when another
+  Task in the same repo has changed one of the same files, per the
+  last-fetched Git status each has cached -- see "Known limitations" above
+  for the "only status-fetched Tasks participate" scope decision.
+- **Settings screen** (`crate::settings`, `Cmd+,`): an in-window overlay
+  (auto-resume toggle, Git-pane-default-visibility toggle, scrollback-lines
+  stepper), persisted through three new `TaskDatabase` `appState` methods
+  (`auto_resume_enabled`/`git_pane_default_visible`/`scrollback_lines` and
+  their `set_*` counterparts). Scrollback itself required threading a new
+  `max_scrollback: usize` parameter through `labolabo_term`'s `VtBackend::
+  new` (both backends) and a new `TermSession::spawn_with_scrollback_options`
+  entry point -- see `crates/labolabo-term/README.md`/this crate's own
+  "Design" section for that wiring; existing `spawn_with_cwd_options` and
+  every pre-existing call site/test are unchanged (they now delegate to the
+  new method with `labolabo_term::DEFAULT_MAX_SCROLLBACK`).
+
+Verified locally:
+
+- `cargo build`/`cargo clippy --all-targets -- -D warnings`/`cargo test`/
+  `cargo fmt --check` at the workspace root (`default-members`:
+  `labolabo-core` + `labolabo-term`) all pass, including a new
+  `labolabo-term` integration test (`spawn_with_scrollback_options_caps_
+  history_length`, `tests/backend_common.rs`) that floods far more lines
+  than a small explicit `max_scrollback` and asserts the backend's reported
+  `scrollback_len` actually stays at or under that cap -- not just that the
+  new parameter compiles and is accepted.
+- Three new `labolabo-core::store::task_database` tests confirm the
+  `appState`-backed settings round-trip and default to `None` (not some
+  hardcoded value) until first written, and one confirms unparseable
+  stored text for `scrollback_lines` degrades to `None` rather than
+  erroring.
+- `cargo build -p labolabo-app`, `cargo clippy -p labolabo-app --all-targets
+  -- -D warnings`, and `cargo test -p labolabo-app` all pass: new unit
+  tests cover `format_usage_compact`/`format_compact_count` (small/
+  thousands/millions token-count formatting, known- vs. unknown-model cost
+  display, the empty-usage/zero-tokens-but-one-turn edge case),
+  `git_pane::changed_paths` (staged/unstaged/untracked union, ignored
+  entries excluded, unmerged entries *included* unlike `build_changed_items`,
+  both sides of a rename), `compute_task_conflicts` (same-repo overlap
+  detected, different-repo/never-fetched/unknown-Task-id/empty-Tasks all
+  correctly yield no conflicts), and `crate::settings`'s `AppSettings::
+  default`/`load` (fresh-database defaults, persisted overrides, per-field
+  fallback -- not "any key present skips every default") and
+  `adjust_scrollback_lines`'s floor/ceiling clamping.
+- `cargo run -p labolabo-app` smoke run (`LABOLABO_RS_DATA_DIR=$(mktemp
+  -d)`, ~5 seconds, then killed): no panic/crash output, `tasks.db` created
+  under the isolated data dir (confirming `AppSettings::load` ran during
+  startup), process exited cleanly on kill.
+
+**Not verified -- no synthetic keyboard/mouse input, on explicit
+instruction, same as every wave above:**
+
+- **The settings overlay itself has not been opened/clicked through a real
+  window.** `Cmd+,` toggling `settings_open`, the toggle rows' click
+  targets, and the -/+ scrollback steppers are each straightforward gpui
+  wiring (same shapes already exercised elsewhere in this codebase -- see
+  each function's doc comment for which existing pattern it copies), but
+  no human has actually opened the panel, clicked a toggle, and confirmed
+  the label/checkbox glyph flips and a newly spawned tab picks up the
+  change.
+- **The tab-chip usage label and sidebar conflict badge have not been seen
+  rendered against a real Claude Code session / a real two-Task same-repo
+  conflict.** Both are driven by unit-tested pure functions
+  (`format_usage_compact`, `compute_task_conflicts`) fed real
+  `AgentStatusEvent`/Git-status data in a live run, but no human has driven
+  an actual `claude` session to `Idle` and watched the token label appear,
+  or opened two worktree Tasks on the same repo and edited the same file in
+  both to watch the ⚠ badge appear.
+- **`backend-ghostty-vt`'s scrollback-cap wiring was not built or tested**
+  -- same Zig-toolchain gap as wave 5g's entry above; the `max_scrollback`
+  parameter was threaded through by close reading of the vendored
+  `libghostty-vt` crate's `TerminalOptions::max_scrollback` field (confirmed
+  `usize`, matching this parameter's type exactly, so no cast was needed),
+  but has not actually compiled or run against that backend.

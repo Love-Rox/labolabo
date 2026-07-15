@@ -71,7 +71,7 @@
 //! [`render_git_pane`] shows, so toggling is instant (no extra fetch) --
 //! ported in full, not left as a TODO.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -216,6 +216,26 @@ pub fn build_changed_items(
     }
 
     items
+}
+
+/// The full set of paths `status` reports as changed -- every entry whose
+/// `kind` isn't [`Kind::Ignored`] (matching the Swift app's
+/// `SessionStore.refreshChangedFiles`: `status.entries.filter { $0.kind !=
+/// .ignored }`), including both sides of a rename/copy (`path` *and*
+/// `original_path`, mirroring Swift's `[entry.path, entry.originalPath]
+/// .compactMap { $0 }`). Deliberately broader than [`build_changed_items`]'s
+/// display rows (which drop unmerged/conflicted entries from the unstaged
+/// section) -- this is the *input* to cross-session conflict detection
+/// (`crate::app::LaboLaboApp::task_conflicts`,
+/// `labolabo_core::cross_session_conflicts`), where a conflicted path is
+/// exactly the kind of overlap worth flagging, not one to hide.
+pub fn changed_paths(status: &GitStatus) -> HashSet<String> {
+    status
+        .entries
+        .iter()
+        .filter(|e| e.kind != Kind::Ignored)
+        .flat_map(|e| std::iter::once(e.path.clone()).chain(e.original_path.clone()))
+        .collect()
 }
 
 // ============================================================================
@@ -1060,6 +1080,105 @@ mod tests {
     #[test]
     fn no_entries_yields_no_items() {
         assert!(build_changed_items(&GitStatus::default(), &[], &[]).is_empty());
+    }
+
+    // MARK: - changed_paths (cross-session conflict detection input)
+
+    #[test]
+    fn changed_paths_collects_staged_unstaged_and_untracked() {
+        let status = GitStatus {
+            entries: vec![
+                entry(
+                    Kind::Ordinary,
+                    "staged.txt",
+                    Change::Modified,
+                    Change::Unmodified,
+                ),
+                entry(
+                    Kind::Ordinary,
+                    "unstaged.txt",
+                    Change::Unmodified,
+                    Change::Modified,
+                ),
+                entry(
+                    Kind::Untracked,
+                    "new.txt",
+                    Change::Unmodified,
+                    Change::Unmodified,
+                ),
+            ],
+            ..Default::default()
+        };
+        let paths = changed_paths(&status);
+        assert_eq!(
+            paths,
+            ["staged.txt", "unstaged.txt", "new.txt"]
+                .into_iter()
+                .map(String::from)
+                .collect()
+        );
+    }
+
+    #[test]
+    fn changed_paths_excludes_ignored_entries() {
+        let status = GitStatus {
+            entries: vec![entry(
+                Kind::Ignored,
+                "target/",
+                Change::Unmodified,
+                Change::Unmodified,
+            )],
+            ..Default::default()
+        };
+        assert!(changed_paths(&status).is_empty());
+    }
+
+    #[test]
+    fn changed_paths_includes_unmerged_entries_unlike_build_changed_items() {
+        // Unlike `build_changed_items` (which drops conflicted paths from
+        // the display list), `changed_paths` must keep them -- a conflict
+        // is exactly the kind of overlap cross-session detection exists to
+        // flag.
+        let status = GitStatus {
+            entries: vec![entry(
+                Kind::Unmerged,
+                "conflict.txt",
+                Change::UpdatedButUnmerged,
+                Change::UpdatedButUnmerged,
+            )],
+            ..Default::default()
+        };
+        assert_eq!(
+            changed_paths(&status),
+            ["conflict.txt"].into_iter().map(String::from).collect()
+        );
+    }
+
+    #[test]
+    fn changed_paths_includes_both_sides_of_a_rename() {
+        let mut renamed = entry(
+            Kind::RenamedOrCopied,
+            "new_name.txt",
+            Change::Renamed,
+            Change::Unmodified,
+        );
+        renamed.original_path = Some("old_name.txt".to_string());
+        let status = GitStatus {
+            entries: vec![renamed],
+            ..Default::default()
+        };
+        assert_eq!(
+            changed_paths(&status),
+            ["new_name.txt", "old_name.txt"]
+                .into_iter()
+                .map(String::from)
+                .collect()
+        );
+    }
+
+    #[test]
+    fn changed_paths_of_empty_status_is_empty() {
+        assert!(changed_paths(&GitStatus::default()).is_empty());
     }
 
     // MARK: - GitPaneState::select (default view-mode rule)

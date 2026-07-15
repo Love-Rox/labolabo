@@ -445,6 +445,45 @@ fn scroll_delta_clamps_to_scrollback_length() {
     );
 }
 
+/// `spawn_with_scrollback_options`'s `max_scrollback` actually caps the
+/// backend's retained history, not just a documented-but-ignored parameter:
+/// flooding far more lines than a small configured cap leaves
+/// `scrollback_len` at or under that cap, never growing unbounded the way
+/// the (much larger) `DEFAULT_MAX_SCROLLBACK` default would. This is the
+/// regression test for `labolabo-app`'s scrollback-lines setting (`plans`'
+/// wave 5i) actually reaching the VT core at spawn time.
+#[test]
+fn spawn_with_scrollback_options_caps_history_length() {
+    use labolabo_term::ColorScheme;
+
+    let max_scrollback = 5;
+    let term = Terminal::spawn_with_scrollback_options(
+        20,
+        5,
+        Some("for i in $(seq 0 99); do echo \"line-$i\"; done; sleep 0.2"),
+        &[],
+        &ColorScheme::default(),
+        None,
+        max_scrollback,
+    )
+    .expect("spawn_with_scrollback_options");
+
+    let snap = term.wait_for(TIMEOUT, |g| g.contains_text("line-99"));
+    assert!(snap.is_some(), "expected the flood to finish");
+
+    // Give the worker a moment to settle on its final, post-flood snapshot
+    // (scrollback_len can only shrink from a transient higher reading as
+    // more lines arrive and the cap keeps trimming, never grow past it).
+    std::thread::sleep(Duration::from_millis(200));
+    let scrollback_len = term.snapshot().scrollback_len;
+    assert!(
+        scrollback_len <= max_scrollback,
+        "expected scrollback_len ({scrollback_len}) capped at max_scrollback \
+         ({max_scrollback}) after flooding 100 lines, got:\n{}",
+        term.snapshot().to_text()
+    );
+}
+
 /// Entering the alternate screen (the mode `vim`/`less`/`htop` use) is
 /// visible via `Terminal::alt_screen_active()`, and leaving it clears the
 /// flag again -- the signal `labolabo-app`'s wheel handler uses to decide

@@ -48,7 +48,7 @@
 //! defaults to its tree's first leaf's selected tab, see
 //! `TaskWorkspace::new`'s doc comment).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
@@ -59,9 +59,10 @@ use gpui::{
 };
 
 use labolabo_core::{
-    claude_resume_command, quote_dropped_paths, reorder_task_ids, shell_quote, AgentBindings,
-    AgentStatus, AgentStatusEvent, ControlCommand, ControlResponse, DropEdge, PaneId, PaneItem,
-    PaneKind, PaneTilingModel, Task, TaskDatabase, TaskStatus, TileNode, TileOrientation,
+    claude_resume_command, cross_session_conflicts, quote_dropped_paths, reorder_task_ids,
+    shell_quote, AgentBindings, AgentStatus, AgentStatusEvent, AgentUsage, ControlCommand,
+    ControlResponse, DropEdge, PaneId, PaneItem, PaneKind, PaneTilingModel, Task, TaskDatabase,
+    TaskStatus, TileNode, TileOrientation,
 };
 use labolabo_term::{ColorScheme, Terminal};
 
@@ -77,6 +78,7 @@ use crate::new_task;
 use crate::paste;
 use crate::render::RenderSpec;
 use crate::selection::{self, CellPos};
+use crate::settings::{self, AppSettings};
 use crate::sidebar;
 use crate::task_workspace::{self, PaneDragHover, PaneRuntime, TabDragPayload, TaskWorkspace};
 
@@ -114,6 +116,7 @@ actions!(
         SelectTab8,
         SelectTab9,
         ToggleGitPane,
+        ToggleSettings,
     ]
 );
 
@@ -164,6 +167,26 @@ pub struct LaboLaboApp {
     /// the full IME design. `None` whenever no composition is in progress
     /// (the common case: plain typing never sets this).
     active_preedit: Option<PreeditState>,
+    /// The Cmd+, settings screen's persisted values -- see `crate::settings`'s
+    /// module doc comment. Loaded once at startup (`AppSettings::load`) and
+    /// kept in sync with `db`'s `appState` table by every `set_*`/`adjust_*`
+    /// method below.
+    settings: AppSettings,
+    /// Whether the settings overlay (`crate::settings::render_settings_overlay`)
+    /// is currently shown -- purely transient UI state, never persisted
+    /// (unlike `settings` itself).
+    settings_open: bool,
+    /// Cache of each Task's most-recently-fetched Git status changed paths,
+    /// keyed by `Task::id` -- the input to [`Self::task_conflicts`]
+    /// (`labolabo_core::cross_session_conflicts`). Populated by
+    /// [`Self::apply_git_refresh`], which today only ever runs for the
+    /// *selected* Task (the Git pane's `FileWatcher` is only ever attached
+    /// there -- see `crate::git_pane`'s module doc comment), so a Task that
+    /// has never been selected simply has no entry here and never
+    /// contributes to (or triggers) a conflict on its own -- the wave
+    /// brief's explicitly accepted "status 取得済みのタスク間のみで検出"
+    /// limitation (see `crates/labolabo-app/README.md`).
+    changed_files_cache: HashMap<String, HashSet<String>>,
 }
 
 /// The focused pane's in-progress IME composition, tracked by
@@ -228,6 +251,13 @@ impl LaboLaboApp {
             .filter(|id| tasks.iter().any(|t| &t.id == id))
             .or_else(|| tasks.first().map(|t| t.id.clone()));
 
+        // Cmd+, settings screen (`plans` wave 5i §3) -- loaded once here so
+        // every field below that depends on a setting (the Git pane's
+        // default visibility, the resume-at-spawn gate, the scrollback cap)
+        // sees the persisted value from the very first Task load, not just
+        // after the settings panel is opened once.
+        let settings = AppSettings::load(&db);
+
         // Claude Code hooks integration (docs/hooks-protocol.md): one shared
         // socket/bus for the whole app process (see `hooks`'s module doc
         // comment for why, vs. Swift's one-per-session design), bridged into
@@ -275,6 +305,9 @@ impl LaboLaboApp {
             control: control_runtime,
             _control_bridge_task: control_bridge_task,
             active_preedit: None,
+            settings,
+            settings_open: false,
+            changed_files_cache: HashMap::new(),
         };
 
         if let Some(id) = selected_task_id {
@@ -307,6 +340,14 @@ impl LaboLaboApp {
 
     pub(crate) fn focus_handle(&self) -> &FocusHandle {
         &self.focus_handle
+    }
+
+    pub(crate) fn settings(&self) -> &AppSettings {
+        &self.settings
+    }
+
+    pub(crate) fn settings_open(&self) -> bool {
+        self.settings_open
     }
 
     /// The terminal grid size for the window's current viewport (full
@@ -368,8 +409,10 @@ impl LaboLaboApp {
             .map(|p| p.id)
             .collect();
 
-        self.workspaces
-            .insert(task_id.to_string(), TaskWorkspace::new(model));
+        self.workspaces.insert(
+            task_id.to_string(),
+            TaskWorkspace::new(model, self.settings.git_pane_default_visible),
+        );
 
         for pane_id in pane_ids {
             self.spawn_runtime_for_task(task_id, pane_id, cols, rows, None, cx);
@@ -405,7 +448,17 @@ impl LaboLaboApp {
     ///   Swift app's `triggerAutoResumeIfNeeded` (which instead types the
     ///   resume command into an already-running shell after the fact;
     ///   spawning it directly is simpler here and avoids the "was the shell
-    ///   ready yet" race that approach has to guard against).
+    ///   ready yet" race that approach has to guard against). Gated on
+    ///   `self.settings.auto_resume_enabled` (`plans` wave 5i §3's settings
+    ///   screen) -- when disabled, every pane spawns a plain shell
+    ///   regardless of what's recorded, app-wide rather than per-call.
+    /// - **Scrollback cap**: every pane spawns with
+    ///   `self.settings.scrollback_lines` (`plans` wave 5i §3), not the VT
+    ///   backends' own hardcoded default -- see `labolabo_term::TermSession::
+    ///   spawn_with_scrollback_options`'s doc comment. A change to this
+    ///   setting only affects panes spawned *after* it (an already-running
+    ///   pane's VT core isn't resized retroactively), matching the settings
+    ///   panel's own footer copy.
     ///
     /// `override_command`, when `Some`, always wins over the resume-at-spawn
     /// command above -- the control protocol's `tab_open --` command
@@ -424,6 +477,8 @@ impl LaboLaboApp {
         let task = self.tasks.iter().find(|t| t.id == task_id)?;
         let cwd = task.working_directory().to_string();
         let colors = self.colors.clone();
+        let auto_resume_enabled = self.settings.auto_resume_enabled;
+        let scrollback_lines = self.settings.scrollback_lines;
 
         let pane_snapshot = self.workspaces.get(task_id).and_then(|workspace| {
             workspace
@@ -434,6 +489,9 @@ impl LaboLaboApp {
                 .cloned()
         });
         let command = override_command.or_else(|| {
+            if !auto_resume_enabled {
+                return None;
+            }
             pane_snapshot.as_ref().and_then(|pane| {
                 let transcript_exists = pane
                     .agent_transcript_path
@@ -455,13 +513,14 @@ impl LaboLaboApp {
             ),
         ];
 
-        let session = match Terminal::spawn_with_cwd_options(
+        let session = match Terminal::spawn_with_scrollback_options(
             cols,
             rows,
             command.as_deref(),
             &env,
             &colors,
             Some(Path::new(&cwd)),
+            scrollback_lines,
         ) {
             Ok(session) => std::sync::Arc::new(session),
             Err(err) => {
@@ -564,6 +623,85 @@ impl LaboLaboApp {
             }
         }
 
+        // Transcript usage (`plans` wave 5i §1) -- best-effort token/cost
+        // aggregation, re-read only on hook-event arrival, never polled
+        // (mirrors Swift's `AgentSessionModel.refreshUsage`'s identical
+        // "応答完了/終了時に transcript から使用量を集計" trigger): once a
+        // pane's agent turn completes (`Idle`) or its session ends
+        // (`Ended`), re-read and re-parse its transcript file in the
+        // background. The transcript path prefers this event's own
+        // `transcript_path`, falling back to whatever was already recorded
+        // for the pane (mirrors Swift's `lastTranscriptPath`, which
+        // persists across events that don't carry a fresh path of their
+        // own -- most `Idle`/`Stop` events do carry one, but this guards
+        // against a malformed/older hook payload that doesn't).
+        if matches!(event.status, AgentStatus::Idle | AgentStatus::Ended) {
+            if let Some(route) = &route {
+                let transcript_path = event.transcript_path.clone().or_else(|| {
+                    self.workspaces.get(&route.task_id).and_then(|workspace| {
+                        workspace
+                            .model
+                            .panes()
+                            .into_iter()
+                            .find(|p| p.id == route.pane_id)
+                            .and_then(|p| p.agent_transcript_path.clone())
+                    })
+                });
+                if let Some(path) = transcript_path {
+                    self.refresh_pane_usage(route.task_id.clone(), route.pane_id, path, cx);
+                }
+            }
+        }
+
+        cx.notify();
+    }
+
+    /// Kicks off a background read+parse of `transcript_path`
+    /// (`labolabo_core::transcript_usage::read`, real file I/O -- never run
+    /// on gpui's main thread, same `cx.background_spawn`-then-`this.update`
+    /// shape as `Self::request_git_refresh`) and applies the result to
+    /// `task_id`'s `pane_id` on completion. A transcript that doesn't parse
+    /// to any usage (`read`'s `None` -- e.g. the file doesn't exist yet, or
+    /// has no `assistant` turns) leaves `pane_usage` untouched rather than
+    /// clearing a previously observed value, since a later event for the
+    /// same pane always supersedes it via the same path.
+    fn refresh_pane_usage(
+        &mut self,
+        task_id: String,
+        pane_id: PaneId,
+        transcript_path: String,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |this, cx| {
+            let usage = cx
+                .background_spawn(async move {
+                    labolabo_core::transcript_usage::read(std::path::Path::new(&transcript_path))
+                })
+                .await;
+            if let Some(usage) = usage {
+                let _ = this.update(cx, |app, cx| {
+                    app.apply_pane_usage(&task_id, pane_id, usage, cx)
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// Applies a freshly parsed [`AgentUsage`] to `task_id`'s `pane_id` --
+    /// see [`Self::refresh_pane_usage`]. A no-op (no `cx.notify()`) if the
+    /// Task's workspace vanished while the background read was in flight
+    /// (Task closed/switched away mid-refresh).
+    fn apply_pane_usage(
+        &mut self,
+        task_id: &str,
+        pane_id: PaneId,
+        usage: AgentUsage,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workspace) = self.workspaces.get_mut(task_id) else {
+            return;
+        };
+        workspace.pane_usage.insert(pane_id, usage);
         cx.notify();
     }
 
@@ -2030,18 +2168,146 @@ impl LaboLaboApp {
     /// A background refresh (`Self::request_git_refresh`) completed:
     /// applies its snapshot and, if another trigger arrived while it was in
     /// flight, immediately spawns exactly one more (`GitPaneState::
-    /// finish_refresh`'s coalescing contract).
+    /// finish_refresh`'s coalescing contract). Also updates
+    /// `changed_files_cache` for `task_id` -- see [`Self::task_conflicts`]
+    /// and that field's doc comment for why this is the *only* place the
+    /// cache is written (today: only ever the selected Task, since that's
+    /// the only Task whose Git pane ever refreshes).
     fn apply_git_refresh(&mut self, task_id: &str, snapshot: GitSnapshot, cx: &mut Context<Self>) {
         let Some(workspace) = self.workspaces.get_mut(task_id) else {
             return;
         };
+        let changed = snapshot.status.as_ref().map(git_pane::changed_paths);
         workspace.git.apply(snapshot);
         let refresh_again = workspace.git.finish_refresh();
+        match changed {
+            Some(paths) => {
+                self.changed_files_cache.insert(task_id.to_string(), paths);
+            }
+            None => {
+                // `git status` itself failed this round (e.g. an
+                // `attached`-kind Task whose directory isn't a repo) --
+                // drop any stale entry rather than keeping it forever
+                // (Swift's `refreshChangedFiles` does the same: a Task
+                // that no longer needs conflict tracking gets its record
+                // removed, not left stale).
+                self.changed_files_cache.remove(task_id);
+            }
+        }
         cx.notify();
         if refresh_again {
             self.request_git_refresh(task_id, cx);
         }
     }
+
+    /// The [`cross_session_conflicts::Conflict`]s for `task_id`: paths it
+    /// has changed that at least one other Task in the *same* repo
+    /// (`Task::repo_key`) has also changed, per the last-fetched Git status
+    /// cached for each (`changed_files_cache`) -- see that field's doc
+    /// comment for the "only status-fetched Tasks participate" limitation
+    /// this wave's brief explicitly accepts. Thin wrapper around the pure,
+    /// unit-tested [`compute_task_conflicts`] -- kept separate so the
+    /// conflict-matching logic itself doesn't need a real `LaboLaboApp`
+    /// (gpui `Context`/window) to test.
+    pub(crate) fn task_conflicts(&self, task_id: &str) -> Vec<cross_session_conflicts::Conflict> {
+        compute_task_conflicts(&self.tasks, &self.changed_files_cache, task_id)
+    }
+
+    // MARK: - Settings (`crate::settings` -- Cmd+, overlay, `plans` wave 5i §3)
+
+    fn action_toggle_settings(
+        &mut self,
+        _: &ToggleSettings,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings_open = !self.settings_open;
+        cx.notify();
+    }
+
+    pub(crate) fn close_settings(&mut self, cx: &mut Context<Self>) {
+        if !self.settings_open {
+            return;
+        }
+        self.settings_open = false;
+        cx.notify();
+    }
+
+    /// Toggles "Claude セッションの自動 resume" and persists it immediately
+    /// (`TaskDatabase::set_auto_resume_enabled`) -- takes effect on the
+    /// *next* pane spawn (`spawn_runtime_for_task`'s `auto_resume_enabled`
+    /// gate reads `self.settings` fresh every call), not retroactively for
+    /// already-running panes.
+    pub(crate) fn set_auto_resume_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.settings.auto_resume_enabled == enabled {
+            return;
+        }
+        self.settings.auto_resume_enabled = enabled;
+        if let Err(err) = self.db.set_auto_resume_enabled(enabled) {
+            eprintln!("labolabo-app: failed to persist auto_resume_enabled: {err}");
+        }
+        cx.notify();
+    }
+
+    /// Toggles "Git ペインを既定で表示" and persists it -- seeds `GitPaneState::
+    /// visible` for every Task workspace loaded *after* this call
+    /// (`ensure_workspace_loaded` reads `self.settings.git_pane_default_visible`
+    /// fresh); already-loaded workspaces are unaffected (use `Cmd+Shift+G`
+    /// or the pane's own close button for those, same as before this
+    /// setting existed).
+    pub(crate) fn set_git_pane_default_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        if self.settings.git_pane_default_visible == visible {
+            return;
+        }
+        self.settings.git_pane_default_visible = visible;
+        if let Err(err) = self.db.set_git_pane_default_visible(visible) {
+            eprintln!("labolabo-app: failed to persist git_pane_default_visible: {err}");
+        }
+        cx.notify();
+    }
+
+    /// Steps `self.settings.scrollback_lines` by `delta` (the settings
+    /// panel's -/+ buttons pass `±settings::SCROLLBACK_STEP`), clamped by
+    /// `settings::adjust_scrollback_lines`, and persists the result. Takes
+    /// effect at the *next* pane spawn only (`spawn_runtime_for_task`'s
+    /// `scrollback_lines` capture) -- a live VT core's history buffer isn't
+    /// resizable, matching the settings panel's own footer copy.
+    pub(crate) fn adjust_scrollback_lines(&mut self, delta: i64, cx: &mut Context<Self>) {
+        let next = settings::adjust_scrollback_lines(self.settings.scrollback_lines, delta);
+        if next == self.settings.scrollback_lines {
+            return;
+        }
+        self.settings.scrollback_lines = next;
+        if let Err(err) = self.db.set_scrollback_lines(next) {
+            eprintln!("labolabo-app: failed to persist scrollback_lines: {err}");
+        }
+        cx.notify();
+    }
+}
+
+/// Pure conflict computation behind [`LaboLaboApp::task_conflicts`]: builds
+/// one [`cross_session_conflicts::Session`] per Task (its `repo_key` and
+/// whatever `changed_files` has cached for it -- an empty set for a Task
+/// never fetched, which `cross_session_conflicts::conflicts` already
+/// treats as "no conflicts from this Task's own side" and, symmetrically,
+/// never causes *another* Task to see a conflict against it either), then
+/// delegates to `labolabo_core::cross_session_conflicts::conflicts`.
+fn compute_task_conflicts(
+    tasks: &[Task],
+    changed_files: &HashMap<String, HashSet<String>>,
+    task_id: &str,
+) -> Vec<cross_session_conflicts::Conflict> {
+    let sessions: Vec<cross_session_conflicts::Session> = tasks
+        .iter()
+        .map(|t| {
+            cross_session_conflicts::Session::new(
+                t.id.clone(),
+                Some(t.repo_key.clone()),
+                changed_files.get(&t.id).cloned().unwrap_or_default(),
+            )
+        })
+        .collect();
+    cross_session_conflicts::conflicts(task_id, &sessions)
 }
 
 /// IME (input method) integration: gpui's platform-agnostic surface over
@@ -2234,6 +2500,7 @@ impl Render for LaboLaboApp {
                     &workspace.model.root,
                     &workspace.runtimes,
                     &workspace.pane_status,
+                    &workspace.pane_usage,
                     focused_pane,
                     &spec,
                     &focus_handle,
@@ -2260,6 +2527,11 @@ impl Render for LaboLaboApp {
                 .map(|workspace| git_pane::render_git_pane(&task_id, &workspace.git, cx))
         });
 
+        // The Cmd+, settings overlay (`crate::settings`) -- `None` (no
+        // extra child) unless `settings_open`, painted last so it's always
+        // on top of the sidebar/workspace/Git pane below it.
+        let settings_el = settings::render_settings_overlay(self, cx);
+
         div()
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(Self::key_down))
@@ -2281,6 +2553,8 @@ impl Render for LaboLaboApp {
             .on_action(cx.listener(Self::action_select_tab_8))
             .on_action(cx.listener(Self::action_select_tab_9))
             .on_action(cx.listener(Self::action_toggle_git_pane))
+            .on_action(cx.listener(Self::action_toggle_settings))
+            .relative()
             .flex()
             .flex_row()
             .size_full()
@@ -2288,6 +2562,7 @@ impl Render for LaboLaboApp {
             .child(sidebar_el)
             .child(workspace_el)
             .children(git_pane_el)
+            .children(settings_el)
     }
 }
 
@@ -2300,4 +2575,85 @@ fn empty_state(message: &'static str) -> gpui::AnyElement {
         .text_color(rgb(0x8a8a8a))
         .child(message)
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use labolabo_core::TileLayout;
+
+    // MARK: - compute_task_conflicts (cross-session conflict detection,
+    // `plans` wave 5i §2)
+
+    fn worktree_task(repo_key: &str, id_suffix: &str) -> Task {
+        let mut t = Task::new_worktree(
+            repo_key,
+            repo_key,
+            repo_key,
+            format!("branch-{id_suffix}"),
+            "main",
+            format!("/tmp/{id_suffix}"),
+            TileLayout::default(),
+            0,
+        );
+        // `Task::new_worktree` mints a fresh random id -- pin a
+        // deterministic one so the tests below can build `changed_files`
+        // maps keyed by a value they control, not a UUID they'd have to
+        // read back out of `t` first.
+        t.id = id_suffix.to_string();
+        t
+    }
+
+    fn changed(pairs: &[(&str, &[&str])]) -> HashMap<String, HashSet<String>> {
+        pairs
+            .iter()
+            .map(|(id, paths)| {
+                (
+                    id.to_string(),
+                    paths.iter().map(|p| p.to_string()).collect(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn no_conflict_when_only_one_task_has_fetched_status() {
+        // `changed_files_cache` has no entry at all for "b" (never
+        // selected/refreshed) -- must not spuriously conflict with "a".
+        let tasks = vec![worktree_task("R", "a"), worktree_task("R", "b")];
+        let changed_files = changed(&[("a", &["src/foo.rs"])]);
+        assert!(compute_task_conflicts(&tasks, &changed_files, "a").is_empty());
+    }
+
+    #[test]
+    fn conflict_detected_once_both_tasks_have_fetched_status() {
+        let tasks = vec![worktree_task("R", "a"), worktree_task("R", "b")];
+        let changed_files = changed(&[
+            ("a", &["src/foo.rs", "a-only.rs"]),
+            ("b", &["src/foo.rs", "b-only.rs"]),
+        ]);
+        let result = compute_task_conflicts(&tasks, &changed_files, "a");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].path, "src/foo.rs");
+        assert_eq!(result[0].others, vec!["b".to_string()]);
+    }
+
+    #[test]
+    fn no_conflict_across_different_repos() {
+        let tasks = vec![worktree_task("R1", "a"), worktree_task("R2", "b")];
+        let changed_files = changed(&[("a", &["foo.rs"]), ("b", &["foo.rs"])]);
+        assert!(compute_task_conflicts(&tasks, &changed_files, "a").is_empty());
+    }
+
+    #[test]
+    fn unknown_task_id_yields_no_conflicts() {
+        let tasks = vec![worktree_task("R", "a")];
+        let changed_files = changed(&[("a", &["foo.rs"])]);
+        assert!(compute_task_conflicts(&tasks, &changed_files, "does-not-exist").is_empty());
+    }
+
+    #[test]
+    fn empty_tasks_yields_no_conflicts() {
+        assert!(compute_task_conflicts(&[], &HashMap::new(), "a").is_empty());
+    }
 }

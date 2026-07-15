@@ -34,7 +34,7 @@ use gpui::{
 };
 
 use labolabo_core::{
-    AgentStatus, DropEdge, PaneId, PaneKind, PaneTilingModel, TileNode, TileOrientation,
+    AgentStatus, AgentUsage, DropEdge, PaneId, PaneKind, PaneTilingModel, TileNode, TileOrientation,
 };
 use labolabo_term::{TermEvent, Terminal};
 
@@ -132,6 +132,43 @@ pub(crate) fn status_dot_color(status: AgentStatus) -> Option<u32> {
     }
 }
 
+/// A short, compact summary of `usage` for a tab chip -- e.g. `"1.2k tok ·
+/// $0.08"`, or `"532 tok"` when the model's pricing is unknown
+/// (`AgentUsage::estimated_cost_usd`'s `None`, mirrors Swift's
+/// `UsagePopover`'s "価格未知（トークンのみ）" fallback, just folded into one
+/// line instead of a separate popover row -- this port has no tab-chip
+/// tooltip/popover surface yet, see `crate::hooks`'s module doc comment on
+/// what *is* ported this wave). `None` if `usage.is_empty()` (nothing
+/// observed yet -- same as no dot for [`status_dot_color`]).
+pub(crate) fn format_usage_compact(usage: &AgentUsage) -> Option<String> {
+    if usage.is_empty() {
+        return None;
+    }
+    let tokens = format_compact_count(usage.total_tokens());
+    Some(match usage.estimated_cost_usd() {
+        Some(cost) => format!("{tokens} tok \u{b7} ${cost:.2}"),
+        None => format!("{tokens} tok"),
+    })
+}
+
+/// `1234 -> "1.2k"`, `1_234_567 -> "1.2M"`, else the plain decimal --
+/// deliberately coarse (one decimal place) since this only ever feeds a
+/// space-constrained tab chip, not a precise accounting display (the exact
+/// counts remain available via `AgentUsage`'s own fields for any future
+/// fuller view). Negative input (shouldn't happen -- token counts are
+/// always non-negative sums) is clamped to `0` rather than producing a
+/// confusing `"-1.2k"`.
+fn format_compact_count(n: i64) -> String {
+    let n = n.max(0);
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}k", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
+    }
+}
+
 /// What the per-pane bridge thread forwards to its gpui-side task.
 enum BridgeMsg {
     Wakeup,
@@ -202,6 +239,16 @@ pub struct TaskWorkspace {
     /// with no entry (never received an event, or was just spawned) shows
     /// no dot -- same as `AgentStatus::None`'s Swift label ("—").
     pub pane_status: HashMap<PaneId, AgentStatus>,
+    /// Per-pane transcript usage (tokens/estimated cost), from hooks events
+    /// routed to this Task -- mirrors `pane_status` in every respect
+    /// (populated by `crate::app::LaboLaboApp::handle_agent_event`, read by
+    /// the tab chip via `format_usage_compact`) except that it only ever
+    /// updates on an `Idle`/`Ended` status event with a resolvable
+    /// transcript path, not on every event (see `handle_agent_event`'s doc
+    /// comment: transcript re-reads are hooks-event-triggered, never
+    /// polled). A pane with no entry shows no usage label, same as
+    /// `pane_status`'s "no dot" default.
+    pub pane_usage: HashMap<PaneId, AgentUsage>,
     /// This Task's live tab-drag drop-target highlight, if a tab drag is
     /// currently hovering one of its leaves -- see [`PaneDragHover`]'s doc
     /// comment. Purely UI/render state (never persisted, never affects
@@ -224,8 +271,13 @@ impl TaskWorkspace {
     /// the plan explicitly scopes persisting *which* leaf had keyboard
     /// focus across restarts out of this wave -- only the tile/tab
     /// structure and each leaf's selected tab round-trip through
-    /// `TileLayout`).
-    pub fn new(model: PaneTilingModel) -> Self {
+    /// `TileLayout`). `git_pane_default_visible` seeds `git.visible` --
+    /// `crate::settings::AppSettings::git_pane_default_visible`'s persisted
+    /// value, threaded in by every caller rather than always defaulting to
+    /// `true` (`GitPaneState::default()`'s own default, still used by
+    /// [`GitPaneState::new`] directly for callers -- e.g. tests -- that
+    /// don't care about the setting).
+    pub fn new(model: PaneTilingModel, git_pane_default_visible: bool) -> Self {
         let focused_pane = model
             .root
             .leaves()
@@ -234,13 +286,16 @@ impl TaskWorkspace {
             .map(|p| p.id)
             .or_else(|| model.panes().first().map(|p| p.id))
             .expect("a PaneTilingModel always has at least one pane");
+        let mut git = GitPaneState::new();
+        git.visible = git_pane_default_visible;
         Self {
             model,
             runtimes: HashMap::new(),
             focused_pane,
             pane_status: HashMap::new(),
+            pane_usage: HashMap::new(),
             pane_drag_hover: None,
-            git: GitPaneState::new(),
+            git,
         }
     }
 }
@@ -346,6 +401,7 @@ pub fn render_tile(
     node: &TileNode,
     runtimes: &HashMap<PaneId, PaneRuntime>,
     pane_status: &HashMap<PaneId, AgentStatus>,
+    pane_usage: &HashMap<PaneId, AgentUsage>,
     focused_pane: PaneId,
     spec: &RenderSpec,
     focus_handle: &FocusHandle,
@@ -359,6 +415,7 @@ pub fn render_tile(
             node,
             runtimes,
             pane_status,
+            pane_usage,
             focused_pane,
             spec,
             focus_handle,
@@ -377,6 +434,7 @@ pub fn render_tile(
             first_child,
             runtimes,
             pane_status,
+            pane_usage,
             focused_pane,
             spec,
             focus_handle,
@@ -394,6 +452,7 @@ pub fn render_tile(
         first_child,
         runtimes,
         pane_status,
+        pane_usage,
         focused_pane,
         spec,
         focus_handle,
@@ -406,6 +465,7 @@ pub fn render_tile(
         second_child,
         runtimes,
         pane_status,
+        pane_usage,
         focused_pane,
         spec,
         focus_handle,
@@ -449,6 +509,7 @@ fn render_leaf(
     node: &TileNode,
     runtimes: &HashMap<PaneId, PaneRuntime>,
     pane_status: &HashMap<PaneId, AgentStatus>,
+    pane_usage: &HashMap<PaneId, AgentUsage>,
     focused_pane: PaneId,
     spec: &RenderSpec,
     focus_handle: &FocusHandle,
@@ -592,7 +653,7 @@ fn render_leaf(
 
     let canvas_area = canvas_area.child(canvas_el);
 
-    let tab_bar = render_pane_tab_bar(task_id, node, pane_status, is_focused_leaf, cx);
+    let tab_bar = render_pane_tab_bar(task_id, node, pane_status, pane_usage, is_focused_leaf, cx);
 
     let mut leaf = div()
         // A positioning context for the absolutely-positioned drop-zone
@@ -706,6 +767,7 @@ fn render_pane_tab_bar(
     task_id: &str,
     node: &TileNode,
     pane_status: &HashMap<PaneId, AgentStatus>,
+    pane_usage: &HashMap<PaneId, AgentUsage>,
     is_focused: bool,
     cx: &mut Context<LaboLaboApp>,
 ) -> impl IntoElement {
@@ -730,6 +792,10 @@ fn render_pane_tab_bar(
                 .get(&pane_id)
                 .copied()
                 .and_then(status_dot_color);
+            let usage_label: Option<SharedString> = pane_usage
+                .get(&pane_id)
+                .and_then(format_usage_compact)
+                .map(SharedString::from);
             // `.id(..)` promotes this chip to `Stateful<Div>`, the only
             // element kind `.on_drag` (`StatefulInteractiveElement`) is
             // available on -- mirrors Swift's `PaneTabChip.onDrag`, one drag
@@ -749,6 +815,14 @@ fn render_pane_tab_bar(
                 .when(!selected, |el| el.bg(rgb(0x333333)))
                 .when_some(status_color, |el, color| {
                     el.child(div().w(px(6.0)).h(px(6.0)).rounded_full().bg(rgb(color)))
+                })
+                .when_some(usage_label, |el, label| {
+                    el.child(
+                        div()
+                            .text_size(px(9.0))
+                            .text_color(rgb(0x8a8a8a))
+                            .child(label),
+                    )
                 })
                 .on_drag(
                     TabDragPayload {
@@ -799,4 +873,82 @@ fn render_pane_tab_bar(
                 )
                 .child("+")
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // MARK: - format_usage_compact / format_compact_count (tab-chip label)
+
+    #[test]
+    fn empty_usage_has_no_label() {
+        assert_eq!(format_usage_compact(&AgentUsage::default()), None);
+    }
+
+    #[test]
+    fn small_token_counts_are_shown_verbatim() {
+        let usage = AgentUsage {
+            input_tokens: 100,
+            output_tokens: 32,
+            ..Default::default()
+        };
+        assert_eq!(format_usage_compact(&usage).as_deref(), Some("132 tok"));
+    }
+
+    #[test]
+    fn thousands_are_compacted_with_one_decimal() {
+        let usage = AgentUsage {
+            input_tokens: 1_234,
+            ..Default::default()
+        };
+        assert_eq!(format_usage_compact(&usage).as_deref(), Some("1.2k tok"));
+    }
+
+    #[test]
+    fn millions_are_compacted_with_one_decimal() {
+        let usage = AgentUsage {
+            input_tokens: 2_500_000,
+            ..Default::default()
+        };
+        assert_eq!(format_usage_compact(&usage).as_deref(), Some("2.5M tok"));
+    }
+
+    #[test]
+    fn known_model_pricing_appends_estimated_cost() {
+        let usage = AgentUsage {
+            input_tokens: 1_000_000,
+            output_tokens: 1_000_000,
+            model: Some("claude-opus-4-8".to_string()),
+            ..Default::default()
+        };
+        // opus: $15 input + $75 output per Mtok = $90 for 1M/1M.
+        assert_eq!(
+            format_usage_compact(&usage).as_deref(),
+            Some("2.0M tok \u{b7} $90.00")
+        );
+    }
+
+    #[test]
+    fn unknown_model_pricing_omits_cost() {
+        let usage = AgentUsage {
+            input_tokens: 500,
+            model: Some("some-unknown-model".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(format_usage_compact(&usage).as_deref(), Some("500 tok"));
+    }
+
+    #[test]
+    fn turns_only_with_zero_tokens_is_not_empty_and_shows_zero() {
+        // `AgentUsage::is_empty()` requires *both* turns == 0 and
+        // total_tokens() == 0 -- a turn with all-zero usage fields (e.g. a
+        // parse edge case) still counts as "something observed", matching
+        // `AgentUsage::is_empty`'s own contract.
+        let usage = AgentUsage {
+            turns: 1,
+            ..Default::default()
+        };
+        assert_eq!(format_usage_compact(&usage).as_deref(), Some("0 tok"));
+    }
 }

@@ -314,6 +314,63 @@ impl TaskDatabase {
         self.app_state("selectedTask")
     }
 
+    // MARK: - App state (settings screen, `plans` wave 5i §3)
+    //
+    // Three `appState` keys backing `labolabo-app::settings::AppSettings` --
+    // the Rust port's minimal Cmd+, settings screen. Each getter returns
+    // `None` when the key has never been written (a fresh database, or one
+    // from before this wave), leaving the caller (`AppSettings::load`) to
+    // apply the same default the field would have had before a settings UI
+    // existed at all -- so an existing user's database needs no migration
+    // to keep behaving exactly as before until they actually change a
+    // setting.
+
+    /// `appState` key backing "Claude セッションの自動 resume".
+    const KEY_AUTO_RESUME: &'static str = "autoResumeAgentOnRestore";
+    /// `appState` key backing "Git ペインの既定表示".
+    const KEY_GIT_PANE_DEFAULT_VISIBLE: &'static str = "gitPaneDefaultVisible";
+    /// `appState` key backing "スクロールバック行数".
+    const KEY_SCROLLBACK_LINES: &'static str = "scrollbackLines";
+
+    /// `None` if never set (caller should apply the pre-settings-screen
+    /// default: `true`, matching the Swift app's `autoResumeAgentOnRestore`
+    /// `@AppStorage` default and this port's prior always-on behavior).
+    pub fn auto_resume_enabled(&self) -> StoreResult<Option<bool>> {
+        Ok(self.app_state(Self::KEY_AUTO_RESUME)?.map(|v| v != "0"))
+    }
+
+    pub fn set_auto_resume_enabled(&self, enabled: bool) -> StoreResult<()> {
+        self.set_app_state(Some(bool_flag(enabled)), Self::KEY_AUTO_RESUME)
+    }
+
+    /// `None` if never set (caller should apply `true`, matching
+    /// `GitPaneState::default().visible` -- this port's prior
+    /// always-visible-by-default behavior).
+    pub fn git_pane_default_visible(&self) -> StoreResult<Option<bool>> {
+        Ok(self
+            .app_state(Self::KEY_GIT_PANE_DEFAULT_VISIBLE)?
+            .map(|v| v != "0"))
+    }
+
+    pub fn set_git_pane_default_visible(&self, visible: bool) -> StoreResult<()> {
+        self.set_app_state(Some(bool_flag(visible)), Self::KEY_GIT_PANE_DEFAULT_VISIBLE)
+    }
+
+    /// `None` if never set, or if the stored text somehow isn't a valid
+    /// `usize` (treated the same as "never set" -- this crate's usual
+    /// "unknown/invalid persisted data degrades gracefully" posture, see
+    /// e.g. `TaskStatus::parse`). Caller should apply
+    /// `labolabo_term::DEFAULT_MAX_SCROLLBACK` (`1000`) when `None`.
+    pub fn scrollback_lines(&self) -> StoreResult<Option<usize>> {
+        Ok(self
+            .app_state(Self::KEY_SCROLLBACK_LINES)?
+            .and_then(|v| v.parse().ok()))
+    }
+
+    pub fn set_scrollback_lines(&self, lines: usize) -> StoreResult<()> {
+        self.set_app_state(Some(&lines.to_string()), Self::KEY_SCROLLBACK_LINES)
+    }
+
     fn set_app_state(&self, value: Option<&str>, key: &str) -> StoreResult<()> {
         self.conn.execute(
             "INSERT INTO appState(key, value) VALUES(?1, ?2) \
@@ -332,6 +389,20 @@ impl TaskDatabase {
             Some(row) => Ok(row.get::<_, Option<String>>(0)?),
             None => Ok(None),
         }
+    }
+}
+
+/// `"1"`/`"0"` -- the `appState` boolean-setting encoding every
+/// `set_*_enabled`/`set_*_visible` method above shares. A plain ASCII digit
+/// (rather than `"true"`/`"false"`) keeps the stored text trivial to eyeball
+/// in a `sqlite3` shell, and the decode side's `v != "0"` treats *any* other
+/// stored text (including a stray `"true"` from some future caller) as
+/// `true` rather than silently downgrading to the default.
+fn bool_flag(value: bool) -> &'static str {
+    if value {
+        "1"
+    } else {
+        "0"
     }
 }
 
@@ -511,6 +582,48 @@ mod tests {
         assert_eq!(db.selected_task_id().unwrap(), Some("t1".to_string()));
         db.set_selected_task_id(None).unwrap();
         assert_eq!(db.selected_task_id().unwrap(), None);
+    }
+
+    // MARK: - App state (settings screen, `plans` wave 5i §3)
+
+    #[test]
+    fn auto_resume_enabled_defaults_to_none_until_set() {
+        let db = TaskDatabase::open_in_memory().unwrap();
+        assert_eq!(db.auto_resume_enabled().unwrap(), None);
+        db.set_auto_resume_enabled(false).unwrap();
+        assert_eq!(db.auto_resume_enabled().unwrap(), Some(false));
+        db.set_auto_resume_enabled(true).unwrap();
+        assert_eq!(db.auto_resume_enabled().unwrap(), Some(true));
+    }
+
+    #[test]
+    fn git_pane_default_visible_defaults_to_none_until_set() {
+        let db = TaskDatabase::open_in_memory().unwrap();
+        assert_eq!(db.git_pane_default_visible().unwrap(), None);
+        db.set_git_pane_default_visible(false).unwrap();
+        assert_eq!(db.git_pane_default_visible().unwrap(), Some(false));
+        db.set_git_pane_default_visible(true).unwrap();
+        assert_eq!(db.git_pane_default_visible().unwrap(), Some(true));
+    }
+
+    #[test]
+    fn scrollback_lines_round_trips_and_defaults_to_none() {
+        let db = TaskDatabase::open_in_memory().unwrap();
+        assert_eq!(db.scrollback_lines().unwrap(), None);
+        db.set_scrollback_lines(2500).unwrap();
+        assert_eq!(db.scrollback_lines().unwrap(), Some(2500));
+    }
+
+    /// Corrupt/foreign `appState` text (e.g. hand-edited, or from some
+    /// future incompatible writer) degrades to `None`, not a parse error --
+    /// same "unknown/invalid persisted data degrades gracefully" posture as
+    /// `TaskStatus::parse`/`AgentBindings::from_json`.
+    #[test]
+    fn scrollback_lines_ignores_unparseable_stored_text() {
+        let db = TaskDatabase::open_in_memory().unwrap();
+        db.set_app_state(Some("not-a-number"), TaskDatabase::KEY_SCROLLBACK_LINES)
+            .unwrap();
+        assert_eq!(db.scrollback_lines().unwrap(), None);
     }
 
     #[test]

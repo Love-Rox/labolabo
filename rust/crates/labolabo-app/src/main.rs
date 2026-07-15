@@ -27,6 +27,7 @@ mod new_task;
 mod paste;
 mod render;
 mod selection;
+mod settings;
 mod sidebar;
 mod task_workspace;
 
@@ -37,7 +38,7 @@ use gpui::{
 use app::{
     CloseTab, Copy, FocusNextPane, FocusPrevPane, LaboLaboApp, NewTab, Paste, SelectTab1,
     SelectTab2, SelectTab3, SelectTab4, SelectTab5, SelectTab6, SelectTab7, SelectTab8, SelectTab9,
-    SplitDown, SplitRight, ToggleGitPane,
+    SplitDown, SplitRight, ToggleGitPane, ToggleSettings,
 };
 
 /// Initial window size -- purely a starting point. The initial terminal
@@ -84,6 +85,9 @@ fn main() {
             // Git pane (`crate::git_pane`) visibility toggle -- the task
             // brief's own suggested binding ("Cmd+Shift+G 等").
             KeyBinding::new("cmd-shift-g", ToggleGitPane, None),
+            // Settings overlay (`crate::settings`) -- matches the Swift
+            // app's `Cmd+,` (macOS's conventional "Preferences" shortcut).
+            KeyBinding::new("cmd-,", ToggleSettings, None),
         ]);
 
         let bounds = Bounds::centered(None, size(px(INITIAL_WIDTH), px(INITIAL_HEIGHT)), cx);
