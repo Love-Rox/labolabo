@@ -11,7 +11,7 @@
 use std::io::Write;
 
 use alacritty_terminal::event::{Event, EventListener};
-use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{
@@ -143,6 +143,8 @@ impl VtBackend for AlacrittyBackend {
 
         let mut cells = vec![CellSnapshot::blank(); cols as usize * rows as usize];
         let content = self.term.renderable_content();
+        let display_offset = content.display_offset;
+        let scrollback_len = self.term.grid().history_size();
 
         let cursor = {
             let c = content.cursor;
@@ -154,13 +156,21 @@ impl VtBackend for AlacrittyBackend {
             }
         };
 
+        // `display_iter` yields absolute grid lines in
+        // `[-(display_offset), -(display_offset) + rows - 1]` (see
+        // `Grid::display_iter`'s doc comment upstream) -- i.e. viewport row
+        // 0 is always at `line == -display_offset`, not `line == 0`, once
+        // scrolled back. `+ display_offset` re-bases that back to a plain
+        // `0..rows` viewport row, so this loop (and the `GridSnapshot` it
+        // builds) never has to know about the absolute/scrollback
+        // coordinate space at all -- unchanged from before scrolling
+        // existed when `display_offset == 0`.
         for indexed in content.display_iter {
-            let line = indexed.point.line.0;
-            if line < 0 {
-                // Scrollback above the viewport; we only render the live screen.
+            let row = indexed.point.line.0 + display_offset as i32;
+            if row < 0 {
                 continue;
             }
-            let row = line as usize;
+            let row = row as usize;
             let col = indexed.point.column.0;
             if row >= rows as usize || col >= cols as usize {
                 continue;
@@ -201,11 +211,33 @@ impl VtBackend for AlacrittyBackend {
             background,
             cells,
             cursor,
+            scroll_offset: display_offset,
+            scrollback_len,
         })
     }
 
     fn bracketed_paste(&self) -> bool {
         self.term.mode().contains(TermMode::BRACKETED_PASTE)
+    }
+
+    fn scroll_display(&mut self, delta_lines: i64) {
+        // Alacritty's own `Scroll::Delta` already matches this trait
+        // method's sign convention (positive = up/into history) directly --
+        // see `VtBackend::scroll_display`'s doc comment -- so this is a
+        // straight passthrough, just clamped into `i32`'s range (realistic
+        // per-event deltas are at most a few dozen lines; `Grid::
+        // scroll_display` itself clamps the *result* into `[0,
+        // history_size()]` regardless of how large a delta is passed in).
+        let delta = delta_lines.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+        self.term.scroll_display(Scroll::Delta(delta));
+    }
+
+    fn scroll_to_bottom(&mut self) {
+        self.term.scroll_display(Scroll::Bottom);
+    }
+
+    fn alt_screen_active(&self) -> bool {
+        self.term.mode().contains(TermMode::ALT_SCREEN)
     }
 }
 
