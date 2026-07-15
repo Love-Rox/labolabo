@@ -50,7 +50,7 @@
 
 use std::collections::HashMap;
 use std::ops::Range;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use gpui::{
     actions, div, point, prelude::*, px, rgb, size, Bounds, ClipboardItem, Context, DragMoveEvent,
@@ -68,6 +68,7 @@ use labolabo_term::{ColorScheme, Terminal};
 use crate::control::{self, ControlRuntime};
 use crate::focus;
 use crate::ghostty_config::FontConfig;
+use crate::git_pane::{self, FileViewMode, GitSnapshot};
 use crate::grid;
 use crate::hooks::{self, HookRuntime};
 use crate::ime;
@@ -112,6 +113,7 @@ actions!(
         SelectTab7,
         SelectTab8,
         SelectTab9,
+        ToggleGitPane,
     ]
 );
 
@@ -278,6 +280,7 @@ impl LaboLaboApp {
         if let Some(id) = selected_task_id {
             let (cols, rows) = this.viewport_grid_size(window);
             this.ensure_workspace_loaded(&id, cols, rows, cx);
+            this.activate_git_pane(&id, cx);
         }
 
         cx.observe_window_bounds(window, |_this, _window, cx| {
@@ -621,8 +624,17 @@ impl LaboLaboApp {
         if self.selected_task_id.as_deref() == Some(task_id.as_str()) {
             return;
         }
+        let previously_selected = self.selected_task_id.clone();
         let (cols, rows) = self.viewport_grid_size(window);
         self.ensure_workspace_loaded(&task_id, cols, rows, cx);
+
+        // Only the *selected* Task's Git pane watches live -- see
+        // `crate::git_pane`'s module doc comment ("非フォーカスタスクの監視
+        // は止める"). Stop the outgoing Task's before starting the
+        // incoming one's below.
+        if let Some(previous) = previously_selected {
+            self.deactivate_git_pane(&previous);
+        }
 
         self.selected_task_id = Some(task_id.clone());
         if let Err(err) = self.db.set_selected_task_id(Some(&task_id)) {
@@ -632,6 +644,7 @@ impl LaboLaboApp {
             task.last_active_at = chrono::Utc::now();
             let _ = self.db.upsert_task(task);
         }
+        self.activate_git_pane(&task_id, cx);
 
         window.focus(&self.focus_handle);
         cx.notify();
@@ -1038,8 +1051,12 @@ impl LaboLaboApp {
         let id = task.id.clone();
         self.tasks.push(task);
         self.ensure_workspace_loaded(&id, DEFAULT_PANE_COLS, DEFAULT_PANE_ROWS, cx);
+        if let Some(previous) = self.selected_task_id.clone() {
+            self.deactivate_git_pane(&previous);
+        }
         self.selected_task_id = Some(id.clone());
         let _ = self.db.set_selected_task_id(Some(&id));
+        self.activate_git_pane(&id, cx);
         cx.notify();
     }
 
@@ -1853,6 +1870,178 @@ impl LaboLaboApp {
             self.select_tab_index(&task_id, index, window, cx);
         }
     }
+
+    // MARK: - Git pane (`crate::git_pane` -- see its module doc comment for
+    // the fixed-right-pane design and the refresh/watch lifecycle this
+    // section wires up)
+
+    fn action_toggle_git_pane(
+        &mut self,
+        _: &ToggleGitPane,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(task_id) = self.selected_task_id.clone() else {
+            return;
+        };
+        self.set_git_pane_visible(
+            &task_id,
+            !self
+                .workspaces
+                .get(&task_id)
+                .map(|w| w.git.visible)
+                .unwrap_or(true),
+            cx,
+        );
+    }
+
+    /// Shows/hides `task_id`'s Git pane, starting or stopping its
+    /// `FileWatcher` to match (see [`Self::activate_git_pane`]/
+    /// [`Self::deactivate_git_pane`]) -- called by both the `Cmd+Shift+G`
+    /// action and the pane's own header "×" close button.
+    pub(crate) fn set_git_pane_visible(
+        &mut self,
+        task_id: &str,
+        visible: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workspace) = self.workspaces.get_mut(task_id) else {
+            return;
+        };
+        if workspace.git.visible == visible {
+            return;
+        }
+        workspace.git.visible = visible;
+        cx.notify();
+        if visible {
+            self.activate_git_pane(task_id, cx);
+        } else {
+            self.deactivate_git_pane(task_id);
+        }
+    }
+
+    /// Starts `task_id`'s Git pane watching (if it's visible and isn't
+    /// already) and kicks off an initial refresh -- a no-op if the Task has
+    /// no loaded workspace, is already watching, or is currently hidden.
+    /// Called whenever `task_id` becomes the *selected* Task (`select_task`/
+    /// `LaboLaboApp::new`/`add_task_and_select`) and when its pane is made
+    /// visible ([`Self::set_git_pane_visible`]) -- see `crate::git_pane`'s
+    /// module doc comment for why this is scoped to the selected Task only.
+    pub(crate) fn activate_git_pane(&mut self, task_id: &str, cx: &mut Context<Self>) {
+        let Some(workspace) = self.workspaces.get(task_id) else {
+            return;
+        };
+        if !workspace.git.visible || workspace.git.is_watching() {
+            return;
+        }
+        let Some(task) = self.tasks.iter().find(|t| t.id == task_id) else {
+            return;
+        };
+        let working_directory = PathBuf::from(task.working_directory());
+
+        if let Some(handle) =
+            git_pane::spawn_git_watch_bridge(task_id.to_string(), working_directory, cx)
+        {
+            if let Some(workspace) = self.workspaces.get_mut(task_id) {
+                workspace.git.attach_watch(handle);
+            }
+        }
+        self.request_git_refresh(task_id, cx);
+    }
+
+    /// Stops `task_id`'s Git pane watching, if it was -- called when
+    /// switching away from the selected Task, or hiding its pane. Cached
+    /// status/items/diff are left in place so re-activating shows the last-
+    /// known snapshot immediately, refreshed shortly after.
+    pub(crate) fn deactivate_git_pane(&mut self, task_id: &str) {
+        if let Some(workspace) = self.workspaces.get_mut(task_id) {
+            workspace.git.detach_watch();
+        }
+    }
+
+    /// A file row was clicked in `task_id`'s Git pane: selects it (picking
+    /// the default Diff/Whole view per `GitPaneState::select`'s rule) and
+    /// kicks off a refresh to fetch that file's diff/whole-file contents
+    /// (the currently cached snapshot may not have them yet, or they may be
+    /// stale for a just-changed file).
+    pub(crate) fn select_git_file(&mut self, task_id: &str, path: String, cx: &mut Context<Self>) {
+        let Some(workspace) = self.workspaces.get_mut(task_id) else {
+            return;
+        };
+        workspace.git.select(path);
+        cx.notify();
+        self.request_git_refresh(task_id, cx);
+    }
+
+    /// The Diff/Whole pill toggle: no fetch needed -- both are already kept
+    /// in sync on every refresh (see `crate::git_pane`'s module doc
+    /// comment's "Diff ⇄ Whole file" section).
+    pub(crate) fn set_git_view_mode(
+        &mut self,
+        task_id: &str,
+        mode: FileViewMode,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(workspace) = self.workspaces.get_mut(task_id) {
+            if workspace.git.view_mode != mode {
+                workspace.git.view_mode = mode;
+                cx.notify();
+            }
+        }
+    }
+
+    /// Kicks off (or coalesces into an in-flight one, see
+    /// `GitPaneState::begin_refresh`) a background refresh of `task_id`'s
+    /// Git pane. The actual `git status`/`numstat`/`diff`/file-read calls
+    /// (`git_pane::compute_git_snapshot`) run on gpui's background thread
+    /// pool (`cx.background_spawn`), never this (UI) thread, per this
+    /// wave's brief.
+    pub(crate) fn request_git_refresh(&mut self, task_id: &str, cx: &mut Context<Self>) {
+        let Some(workspace) = self.workspaces.get_mut(task_id) else {
+            return;
+        };
+        if !workspace.git.begin_refresh() {
+            return; // coalesced into the refresh already in flight
+        }
+        let Some(task) = self.tasks.iter().find(|t| t.id == task_id) else {
+            // Task vanished mid-flight (shouldn't happen in practice) --
+            // undo the flag so a future call isn't coalesced forever
+            // against a refresh that will never complete.
+            if let Some(workspace) = self.workspaces.get_mut(task_id) {
+                workspace.git.finish_refresh();
+            }
+            return;
+        };
+        let working_directory = PathBuf::from(task.working_directory());
+        let selected_path = workspace.git.selected_path.clone();
+        let task_id = task_id.to_string();
+
+        cx.spawn(async move |this, cx| {
+            let snapshot = cx
+                .background_spawn(async move {
+                    git_pane::compute_git_snapshot(&working_directory, selected_path.as_deref())
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| app.apply_git_refresh(&task_id, snapshot, cx));
+        })
+        .detach();
+    }
+
+    /// A background refresh (`Self::request_git_refresh`) completed:
+    /// applies its snapshot and, if another trigger arrived while it was in
+    /// flight, immediately spawns exactly one more (`GitPaneState::
+    /// finish_refresh`'s coalescing contract).
+    fn apply_git_refresh(&mut self, task_id: &str, snapshot: GitSnapshot, cx: &mut Context<Self>) {
+        let Some(workspace) = self.workspaces.get_mut(task_id) else {
+            return;
+        };
+        workspace.git.apply(snapshot);
+        let refresh_again = workspace.git.finish_refresh();
+        cx.notify();
+        if refresh_again {
+            self.request_git_refresh(task_id, cx);
+        }
+    }
 }
 
 /// IME (input method) integration: gpui's platform-agnostic surface over
@@ -2059,6 +2248,18 @@ impl Render for LaboLaboApp {
             empty_state("No task selected. Use \"+ Attached\" or \"+ Worktree\" to start one.")
         };
 
+        // The selected Task's Git pane -- a fixed pane to the right of the
+        // tile tree, not part of it (see `crate::git_pane`'s module doc
+        // comment). `None` whenever no Task is selected or its pane is
+        // currently hidden, in which case `.children(..)` below simply adds
+        // no third child.
+        let git_pane_el = self.selected_task_id.clone().and_then(|task_id| {
+            self.workspaces
+                .get(&task_id)
+                .filter(|workspace| workspace.git.visible)
+                .map(|workspace| git_pane::render_git_pane(&task_id, &workspace.git, cx))
+        });
+
         div()
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(Self::key_down))
@@ -2079,12 +2280,14 @@ impl Render for LaboLaboApp {
             .on_action(cx.listener(Self::action_select_tab_7))
             .on_action(cx.listener(Self::action_select_tab_8))
             .on_action(cx.listener(Self::action_select_tab_9))
+            .on_action(cx.listener(Self::action_toggle_git_pane))
             .flex()
             .flex_row()
             .size_full()
             .bg(rgb(0x000000))
             .child(sidebar_el)
             .child(workspace_el)
+            .children(git_pane_el)
     }
 }
 

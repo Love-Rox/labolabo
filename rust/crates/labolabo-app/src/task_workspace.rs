@@ -39,6 +39,7 @@ use labolabo_core::{
 use labolabo_term::{TermEvent, Terminal};
 
 use crate::app::{LaboLaboApp, PreeditState};
+use crate::git_pane::GitPaneState;
 use crate::grid;
 use crate::render::RenderSpec;
 use crate::selection::Selection;
@@ -206,6 +207,13 @@ pub struct TaskWorkspace {
     /// comment. Purely UI/render state (never persisted, never affects
     /// `model`), rebuilt continuously while a drag is in flight.
     pub pane_drag_hover: Option<PaneDragHover>,
+    /// This Task's Git pane state (branch/status, changed-files list,
+    /// selected file's diff/whole-file contents) -- see `crate::git_pane`'s
+    /// module doc comment. Its `FileWatcher` is only ever live while this
+    /// Task is selected (`LaboLaboApp::activate_git_pane`/
+    /// `deactivate_git_pane`), so a freshly constructed `TaskWorkspace` here
+    /// starts with none attached.
+    pub git: GitPaneState,
 }
 
 impl TaskWorkspace {
@@ -232,6 +240,7 @@ impl TaskWorkspace {
             focused_pane,
             pane_status: HashMap::new(),
             pane_drag_hover: None,
+            git: GitPaneState::new(),
         }
     }
 }

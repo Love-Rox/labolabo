@@ -43,6 +43,19 @@ rusqlite = { version = "0.40.1", features = ["bundled"] }
 # only feature needed (random IDs, no MAC-address/timestamp-based variants).
 uuid = { version = "1", features = ["v4"] }
 
+# Wave 5h (Git pane): `file_watcher::FileWatcher` -- a cross-platform port of
+# `Sources/LaboLaboEngine/Git/FileWatcher.swift` (macOS-only FSEvents). This
+# crate has no async runtime (see `process.rs`'s module doc comment) and no
+# existing OS-notification primitive, so a new runtime dependency is
+# unavoidable to cover Linux/Windows too -- `notify` is the de facto
+# standard for this in the Rust ecosystem (FSEvents on macOS, inotify on
+# Linux, ReadDirectoryChangesW on Windows behind one API), which is exactly
+# the cross-platform (including the `rust` CI job's `windows-latest` leg)
+# requirement this wave's brief calls for. Default features only -- no
+# crossbeam-channel/kqueue/serde features, since `file_watcher.rs` only
+# needs the plain `std::sync::mpsc`-based watch API.
+notify = "8"
+
 # Wave 4b: `hooks::UnixSocketEventTransport::stop()` needs `shutdown(2)` on a
 # raw fd (to unblock the accept-loop thread's blocking `accept()` call from
 # another thread) -- std's `UnixListener` exposes no such method. Unix-only
