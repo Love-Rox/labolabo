@@ -53,15 +53,15 @@ use std::ops::Range;
 use std::path::Path;
 
 use gpui::{
-    actions, div, point, prelude::*, px, rgb, size, Bounds, Context, EntityInputHandler,
-    FocusHandle, IntoElement, KeyDownEvent, PathPromptOptions, Pixels, Point, Render,
-    Task as GpuiTask, UTF16Selection, Window,
+    actions, div, point, prelude::*, px, rgb, size, Bounds, Context, DragMoveEvent,
+    EntityInputHandler, ExternalPaths, FocusHandle, IntoElement, KeyDownEvent, PathPromptOptions,
+    Pixels, Point, Render, Task as GpuiTask, UTF16Selection, Window,
 };
 
 use labolabo_core::{
-    claude_resume_command, shell_quote, AgentBindings, AgentStatus, AgentStatusEvent,
-    ControlCommand, ControlResponse, PaneId, PaneItem, PaneKind, PaneTilingModel, Task,
-    TaskDatabase, TaskStatus, TileNode, TileOrientation,
+    claude_resume_command, quote_dropped_paths, reorder_task_ids, shell_quote, AgentBindings,
+    AgentStatus, AgentStatusEvent, ControlCommand, ControlResponse, DropEdge, PaneId, PaneItem,
+    PaneKind, PaneTilingModel, Task, TaskDatabase, TaskStatus, TileNode, TileOrientation,
 };
 use labolabo_term::{ColorScheme, Terminal};
 
@@ -76,7 +76,7 @@ use crate::new_task;
 use crate::paste;
 use crate::render::RenderSpec;
 use crate::sidebar;
-use crate::task_workspace::{self, PaneRuntime, TaskWorkspace};
+use crate::task_workspace::{self, PaneDragHover, PaneRuntime, TabDragPayload, TaskWorkspace};
 
 /// Initial grid size for a pane created after startup with no viewport to
 /// measure yet (new tab / split within an already-rendered Task, or the
@@ -1041,6 +1041,257 @@ impl LaboLaboApp {
         cx.notify();
     }
 
+    // MARK: - drag & drop (`plans/012-task-model-and-control-cli.md` §3)
+
+    /// Tracks a tab-chip drag's current drop-zone highlight for `task_id`,
+    /// as it moves over one of that Task's leaves
+    /// (`task_workspace::render_leaf`'s `.on_drag_move::<TabDragPayload>`,
+    /// one registration per leaf -- see that call site's doc comment).
+    /// `anchor_pane_id` identifies *which* leaf this registration belongs
+    /// to (its selected/anchor pane); `event.bounds` is that same leaf's
+    /// own on-screen bounds this frame, and `event.event.position` is the
+    /// live cursor position -- both handed to us fresh by gpui on every
+    /// mouse-move while a `TabDragPayload` drag is active, regardless of
+    /// whether the pointer is actually over *this* particular leaf (every
+    /// leaf's registration fires on every move -- see `DragMoveEvent`'s doc
+    /// comment), hence the explicit bounds-contains check below rather than
+    /// relying on hit-testing.
+    ///
+    /// Mirrors `PaneFrameView.update(_:)`'s "same-leaf, meaningless-edge"
+    /// guard: dropping a tab onto its own group's center (already merged)
+    /// or onto its own group's edge when it's the group's only tab is a
+    /// no-op, so those cases clear the highlight instead of showing one
+    /// (matching Swift's `highlight.isHidden = true` early return there).
+    pub(crate) fn update_pane_drag_hover(
+        &mut self,
+        task_id: &str,
+        anchor_pane_id: PaneId,
+        leaf_pane_ids: &[PaneId],
+        event: &DragMoveEvent<TabDragPayload>,
+        cx: &mut Context<Self>,
+    ) {
+        let local_x = f32::from(event.event.position.x) - f32::from(event.bounds.origin.x);
+        let local_y = f32::from(event.event.position.y) - f32::from(event.bounds.origin.y);
+        let width = f32::from(event.bounds.size.width);
+        let height = f32::from(event.bounds.size.height);
+        let within = local_x >= 0.0 && local_y >= 0.0 && local_x <= width && local_y <= height;
+
+        let Some(workspace) = self.workspaces.get_mut(task_id) else {
+            return;
+        };
+
+        if !within {
+            let hovering_this_leaf = matches!(
+                workspace.pane_drag_hover,
+                Some(hover) if hover.target_pane_id == anchor_pane_id
+            );
+            if hovering_this_leaf {
+                workspace.pane_drag_hover = None;
+                cx.notify();
+            }
+            return;
+        }
+
+        let edge = labolabo_core::drop_edge_for_point(width, height, local_x, local_y);
+        let source_id = event
+            .dragged_item()
+            .downcast_ref::<TabDragPayload>()
+            .map(|payload| payload.source_pane_id);
+        let meaningless = match source_id {
+            Some(source_id) => {
+                leaf_pane_ids.contains(&source_id)
+                    && (edge == DropEdge::Center || leaf_pane_ids.len() == 1)
+            }
+            None => false,
+        };
+        let new_hover = if meaningless {
+            None
+        } else {
+            Some(PaneDragHover {
+                target_pane_id: anchor_pane_id,
+                edge,
+            })
+        };
+        if workspace.pane_drag_hover != new_hover {
+            workspace.pane_drag_hover = new_hover;
+            cx.notify();
+        }
+    }
+
+    /// Completes a tab-chip drop onto `anchor_pane_id`'s leaf: resolves the
+    /// drop edge from whatever `update_pane_drag_hover` last computed for
+    /// this leaf (falling back to `DropEdge::Center` -- a plain merge -- if
+    /// somehow no hover was recorded, e.g. a drop that arrives without a
+    /// preceding move event), then delegates to
+    /// `PaneTilingModel::move_pane` -- the same core op `plans/012`'s brief
+    /// says the UI must not reimplement. Mirrors
+    /// `TilingCoordinator.handleDrop`: only steals keyboard focus for the
+    /// moved tab when it actually moved *and* is a terminal pane (matching
+    /// Swift's "端末なら" condition -- moving a diff/files/commits pane
+    /// shouldn't yank focus away from whatever terminal the user was
+    /// typing into).
+    pub(crate) fn finish_pane_drag_drop(
+        &mut self,
+        task_id: &str,
+        anchor_pane_id: PaneId,
+        payload: &TabDragPayload,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let edge = self
+            .workspaces
+            .get(task_id)
+            .and_then(|w| w.pane_drag_hover)
+            .filter(|h| h.target_pane_id == anchor_pane_id)
+            .map(|h| h.edge)
+            .unwrap_or(DropEdge::Center);
+
+        let Some(workspace) = self.workspaces.get_mut(task_id) else {
+            return;
+        };
+        workspace.pane_drag_hover = None;
+        let moved = workspace
+            .model
+            .move_pane(payload.source_pane_id, anchor_pane_id, edge);
+        if moved {
+            let is_terminal = workspace
+                .model
+                .panes()
+                .into_iter()
+                .find(|p| p.id == payload.source_pane_id)
+                .map(|p| p.kind == PaneKind::Terminal)
+                .unwrap_or(false);
+            if is_terminal {
+                workspace.focused_pane = payload.source_pane_id;
+            }
+        }
+        window.focus(&self.focus_handle);
+        self.persist_workspace(task_id);
+        cx.notify();
+    }
+
+    /// Completes an OS file/folder drop onto `anchor_pane_id`'s terminal
+    /// pane (`plans/012` §3.1): shell-quotes and space-joins every dropped
+    /// path (`labolabo_core::quote_dropped_paths`) and writes the
+    /// resulting text directly to the pane's PTY -- no newline, so nothing
+    /// runs until the user presses Enter themselves (§3.1). A silent no-op
+    /// if the leaf's anchor pane isn't a terminal (shouldn't happen --
+    /// `render_leaf`'s `can_drop` already restricts the drop to terminal
+    /// leaves -- but this is cheap, load-bearing insurance against acting
+    /// on a non-terminal pane if that guard is ever loosened) or has no
+    /// live runtime yet.
+    pub(crate) fn handle_file_drop(
+        &mut self,
+        task_id: &str,
+        anchor_pane_id: PaneId,
+        paths: &ExternalPaths,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workspace) = self.workspaces.get(task_id) else {
+            return;
+        };
+        let is_terminal = workspace
+            .model
+            .panes()
+            .into_iter()
+            .any(|p| p.id == anchor_pane_id && p.kind == PaneKind::Terminal);
+        if !is_terminal {
+            return;
+        }
+        let Some(runtime) = workspace.runtimes.get(&anchor_pane_id) else {
+            return;
+        };
+        let path_strings: Vec<String> = paths
+            .paths()
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        let text = quote_dropped_paths(&path_strings);
+        if !text.is_empty() {
+            runtime.session.write_input(text.as_bytes());
+        }
+        cx.notify();
+    }
+
+    // MARK: - sidebar drag & drop (`plans/012` §3: Task reorder, folder drop)
+
+    /// Reorders the sidebar's Task list (`crate::sidebar`'s row DnD):
+    /// dragging `moved_id` to just before `before_id` within its repo
+    /// group (see `labolabo_core::reorder_task_ids`'s doc comment for the
+    /// exact rule -- cross-repo drops and self-drops are no-ops).
+    /// Renumbers every Task's `sort_order` densely (0, 1, 2, ...) in the
+    /// new order and persists each row -- simpler than trying to preserve
+    /// fractional gaps, and `sort_order`'s only contract is relative
+    /// order, not specific values.
+    pub(crate) fn reorder_tasks_in_sidebar(
+        &mut self,
+        moved_id: String,
+        before_id: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let new_order = reorder_task_ids(&self.tasks, &moved_id, before_id.as_deref());
+        let unchanged = new_order
+            .iter()
+            .zip(self.tasks.iter())
+            .all(|(id, task)| id == &task.id);
+        if unchanged {
+            return;
+        }
+
+        let mut reordered = Vec::with_capacity(self.tasks.len());
+        for id in &new_order {
+            if let Some(pos) = self.tasks.iter().position(|t| &t.id == id) {
+                reordered.push(self.tasks.remove(pos));
+            }
+        }
+        for (index, task) in reordered.iter_mut().enumerate() {
+            task.sort_order = index as i64;
+            if let Err(err) = self.db.upsert_task(task) {
+                eprintln!("labolabo-app: failed to persist task order: {err}");
+            }
+        }
+        self.tasks = reordered;
+        cx.notify();
+    }
+
+    /// A folder dropped on the sidebar (`plans/012` §3: "フォルダをサイド
+    /// バー/ウィンドウへドロップ → ... 「新しい作業」の開始"): starts a
+    /// new `attached`-kind Task at that directory, exactly like
+    /// "+ Attached"'s tail (`finish_new_attached_task`) but skipping the
+    /// file-picker (the directory is already known). Every *directory*
+    /// among the dropped paths becomes its own Task (multi-drop support);
+    /// plain files are silently skipped (§3 only specifies folder drops
+    /// here -- dropping a bare file onto the sidebar has no defined
+    /// meaning). No confirmation UI (deferred per this wave's brief -- see
+    /// the crate README's TODO list): a dropped folder just becomes a
+    /// Task, matching "+ Attached"'s own no-confirmation flow.
+    pub(crate) fn handle_sidebar_folder_drop(
+        &mut self,
+        paths: &ExternalPaths,
+        cx: &mut Context<Self>,
+    ) {
+        let dirs: Vec<std::path::PathBuf> = paths
+            .paths()
+            .iter()
+            .filter(|p| p.is_dir())
+            .cloned()
+            .collect();
+        for dir in dirs {
+            cx.spawn(async move |this, cx| {
+                let (directory, (repo_key, repo_root, repo_name)) = cx
+                    .background_spawn(async move {
+                        let repo = new_task::resolve_attached_repo(&dir);
+                        (dir.to_string_lossy().into_owned(), repo)
+                    })
+                    .await;
+                let _ = this.update(cx, |app, cx| {
+                    app.finish_new_attached_task(directory, repo_key, repo_root, repo_name, cx)
+                });
+            })
+            .detach();
+        }
+    }
+
     // MARK: - control protocol (docs/control-protocol.md, `plans/012` §2)
 
     /// Executes one control-protocol request and returns the serialized
@@ -1584,6 +1835,7 @@ impl Render for LaboLaboApp {
                 let focus_handle = self.focus_handle.clone();
                 let active_preedit = self.active_preedit.clone();
                 let focused_pane = workspace.focused_pane;
+                let pane_drag_hover = workspace.pane_drag_hover;
                 task_workspace::render_tile(
                     &task_id,
                     &workspace.model.root,
@@ -1593,6 +1845,7 @@ impl Render for LaboLaboApp {
                     &spec,
                     &focus_handle,
                     active_preedit.as_ref(),
+                    pane_drag_hover,
                     cx,
                 )
             } else {

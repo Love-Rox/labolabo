@@ -48,6 +48,38 @@ pub fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
+/// Encodes a set of dropped file/folder paths for insertion into a
+/// terminal pane -- `plans/012-task-model-and-control-cli.md` §3.1's "端末
+/// へのファイル D&D" spec: each path is POSIX-shell-quoted (reusing
+/// [`shell_quote`], the same escaping `AgentAdapter.shellQuoted` documents
+/// on the Swift side), the quoted paths are joined with a single space, and
+/// a single trailing space is appended so the user can keep typing a
+/// command around the inserted path(s) -- **no trailing newline** (§3.1:
+/// "改行は送らない。ユーザーが自分でコマンドを組み立てられる状態にする"),
+/// so nothing is executed until the user presses Enter themselves.
+///
+/// `paths` is taken in caller-supplied order and never reordered/deduped --
+/// a drop's path order (as reported by the platform) is preserved verbatim.
+/// An empty slice encodes to an empty string (no bytes to send -- not even
+/// the trailing space), matching "drop nothing -> do nothing".
+///
+/// POSIX-only: the Swift-side spec also covers Windows PowerShell/cmd
+/// quoting (§3.1's "Windows のネイティブシェル" branch), which this port's
+/// current macOS-only app has no shell-kind metadata to select between yet
+/// -- see this function's callers for the current scope note.
+pub fn quote_dropped_paths<S: AsRef<str>>(paths: &[S]) -> String {
+    if paths.is_empty() {
+        return String::new();
+    }
+    let mut joined = paths
+        .iter()
+        .map(|p| shell_quote(p.as_ref()))
+        .collect::<Vec<_>>()
+        .join(" ");
+    joined.push(' ');
+    joined
+}
+
 /// The command string for one hook's `command` field: `'<binary>' --hook
 /// '<socket>'`, timeout applied separately by the entry that embeds this
 /// (see [`merge_hooks`]). Port of `AgentSessionModel.hookEntry`'s command
@@ -181,6 +213,41 @@ mod tests {
     #[test]
     fn shell_quote_empty_string() {
         assert_eq!(shell_quote(""), "''");
+    }
+
+    // MARK: - quote_dropped_paths
+
+    #[test]
+    fn quote_dropped_paths_single_path_is_quoted_with_one_trailing_space() {
+        assert_eq!(quote_dropped_paths(&["/a/b.txt"]), "'/a/b.txt' ");
+    }
+
+    #[test]
+    fn quote_dropped_paths_multiple_paths_are_space_joined_then_one_trailing_space() {
+        assert_eq!(
+            quote_dropped_paths(&["/a/b.txt", "/c/d e.txt"]),
+            "'/a/b.txt' '/c/d e.txt' "
+        );
+    }
+
+    #[test]
+    fn quote_dropped_paths_empty_slice_is_empty_string() {
+        assert_eq!(quote_dropped_paths::<&str>(&[]), "");
+    }
+
+    #[test]
+    fn quote_dropped_paths_escapes_embedded_single_quotes_per_path() {
+        assert_eq!(quote_dropped_paths(&["it's/a.txt"]), "'it'\\''s/a.txt' ");
+    }
+
+    #[test]
+    fn quote_dropped_paths_never_contains_a_newline() {
+        let encoded = quote_dropped_paths(&["/a.txt", "/b.txt"]);
+        assert!(!encoded.contains('\n'), "must not send a newline (§3.1)");
+        assert!(
+            encoded.ends_with(' ') && !encoded.ends_with("  "),
+            "exactly one trailing space"
+        );
     }
 
     // MARK: - hook_command / claude_resume_command

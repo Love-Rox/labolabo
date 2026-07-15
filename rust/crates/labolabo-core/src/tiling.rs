@@ -680,6 +680,47 @@ pub enum DropEdge {
     Center,
 }
 
+/// Resolves a drop point within a `width` x `height` rectangle into a
+/// [`DropEdge`] zone: a drop in the outer 25% margin on a side is that
+/// side's edge (a split), and the inner 50% x 50% is [`DropEdge::Center`]
+/// (a tab merge). `x`/`y` are relative to the rectangle's own top-left
+/// origin.
+///
+/// This is `plans/012-task-model-and-control-cli.md` §3's ported-behavior
+/// geometry: `app/Sources/PaneTiling.swift`'s `PaneFrameView.edge(at:)` used
+/// the same 25%/75% thresholds, but against AppKit's default *flipped*
+/// view coordinates (Y increases upward, so "top" was the *high*-Y branch).
+/// gpui (like most compositors -- and this function) uses top-left-origin,
+/// Y-increases-downward coordinates instead, so "top" here is the low-Y
+/// branch. The zone *names* and thresholds are what's ported; the raw axis
+/// direction deliberately isn't (there's nothing to port there -- it's just
+/// each platform's own coordinate convention), matching this wave's brief
+/// that pixel-for-pixel AppKit fidelity isn't the goal.
+///
+/// Degenerate rectangles (`width <= 0.0` or `height <= 0.0`) resolve to
+/// [`DropEdge::Center`] -- there's no meaningful edge to compute a fraction
+/// against, and a whole-pane tab-merge is the least surprising fallback.
+pub fn drop_edge_for_point(width: f32, height: f32, x: f32, y: f32) -> DropEdge {
+    if width <= 0.0 || height <= 0.0 {
+        return DropEdge::Center;
+    }
+    let rx = x / width;
+    let ry = y / height;
+    if rx < 0.25 {
+        return DropEdge::Left;
+    }
+    if rx > 0.75 {
+        return DropEdge::Right;
+    }
+    if ry < 0.25 {
+        return DropEdge::Top;
+    }
+    if ry > 0.75 {
+        return DropEdge::Bottom;
+    }
+    DropEdge::Center
+}
+
 /// Operations the model asks the UI (coordinator) to perform: sending text
 /// to a terminal, and requesting that a pane receive key focus after the
 /// next rebuild. Mirrors the Swift `PaneTilingActions` protocol (kept
@@ -1833,5 +1874,97 @@ mod tests {
             "missing transcript blocks resume"
         );
         assert!(pane.is_resumable(true), "existing transcript allows resume");
+    }
+
+    // MARK: - drop_edge_for_point
+
+    #[test]
+    fn drop_edge_for_point_center_is_the_inner_50_percent() {
+        assert_eq!(
+            drop_edge_for_point(100.0, 100.0, 50.0, 50.0),
+            DropEdge::Center
+        );
+        // Just inside the 25%/75% boundaries on every side.
+        assert_eq!(
+            drop_edge_for_point(100.0, 100.0, 26.0, 26.0),
+            DropEdge::Center
+        );
+        assert_eq!(
+            drop_edge_for_point(100.0, 100.0, 74.0, 74.0),
+            DropEdge::Center
+        );
+    }
+
+    #[test]
+    fn drop_edge_for_point_left_and_right_are_the_outer_25_percent_columns() {
+        assert_eq!(drop_edge_for_point(100.0, 100.0, 0.0, 50.0), DropEdge::Left);
+        assert_eq!(
+            drop_edge_for_point(100.0, 100.0, 24.0, 50.0),
+            DropEdge::Left
+        );
+        assert_eq!(
+            drop_edge_for_point(100.0, 100.0, 76.0, 50.0),
+            DropEdge::Right
+        );
+        assert_eq!(
+            drop_edge_for_point(100.0, 100.0, 100.0, 50.0),
+            DropEdge::Right
+        );
+    }
+
+    #[test]
+    fn drop_edge_for_point_top_and_bottom_are_checked_only_within_the_center_column() {
+        // Left/right take priority over top/bottom -- a corner point resolves
+        // to the horizontal edge, matching `PaneFrameView.edge(at:)`'s
+        // `if rx < 0.25 { .left } else if rx > 0.75 { .right } else if ...`
+        // check ordering.
+        assert_eq!(drop_edge_for_point(100.0, 100.0, 50.0, 0.0), DropEdge::Top);
+        assert_eq!(drop_edge_for_point(100.0, 100.0, 50.0, 24.0), DropEdge::Top);
+        assert_eq!(
+            drop_edge_for_point(100.0, 100.0, 50.0, 76.0),
+            DropEdge::Bottom
+        );
+        assert_eq!(
+            drop_edge_for_point(100.0, 100.0, 50.0, 100.0),
+            DropEdge::Bottom
+        );
+        assert_eq!(
+            drop_edge_for_point(100.0, 100.0, 0.0, 0.0),
+            DropEdge::Left,
+            "top-left corner resolves to left, not top (x-axis checked first)"
+        );
+    }
+
+    #[test]
+    fn drop_edge_for_point_is_not_symmetric_with_appkits_flipped_convention() {
+        // gpui's Y increases downward: a point near y=0 (top of the rect in
+        // screen terms) is `Top`, not `Bottom` -- the opposite of what
+        // `PaneFrameView.edge(at:)` returned for the same fraction under
+        // AppKit's flipped view coordinates. See this function's doc comment.
+        assert_eq!(drop_edge_for_point(100.0, 100.0, 50.0, 5.0), DropEdge::Top);
+    }
+
+    #[test]
+    fn drop_edge_for_point_non_square_rectangle_uses_each_axis_own_fraction() {
+        // A wide, short rectangle: the same absolute x that would be "left"
+        // in a square rect is well within the center 50% here.
+        assert_eq!(
+            drop_edge_for_point(400.0, 100.0, 150.0, 50.0),
+            DropEdge::Center
+        );
+        assert_eq!(
+            drop_edge_for_point(400.0, 100.0, 50.0, 50.0),
+            DropEdge::Left
+        );
+    }
+
+    #[test]
+    fn drop_edge_for_point_degenerate_rectangle_falls_back_to_center() {
+        assert_eq!(drop_edge_for_point(0.0, 100.0, 0.0, 50.0), DropEdge::Center);
+        assert_eq!(drop_edge_for_point(100.0, 0.0, 50.0, 0.0), DropEdge::Center);
+        assert_eq!(
+            drop_edge_for_point(-1.0, 100.0, 0.0, 50.0),
+            DropEdge::Center
+        );
     }
 }
