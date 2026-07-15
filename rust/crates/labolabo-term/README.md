@@ -94,6 +94,111 @@ running the **same** integration tests as ghostty (`tests/backend_common.rs`).
   the same final-snapshot + `TermEvent::Exit` path as a natural exit.
   Idempotent; see the method docs for the (inherited) stale-pid caveat and
   the fact that only the direct child is signalled, not its descendants.
+- **Scrollback via `TermSession::scroll`/`scroll_to_bottom` +
+  `GridSnapshot::{scroll_offset, scrollback_len}`** (added for the gpui
+  shell's trackpad/wheel scrolling and text selection over history):
+  `VtBackend` gained `scroll_display(delta_lines: i64)`,
+  `scroll_to_bottom()`, and `alt_screen_active() -> bool`. Both backends
+  already have native scrollback + viewport support -- **the "fall back to
+  our own N-line ring buffer" design this feature's brief flagged as a
+  possibility was not needed**: `alacritty_terminal::Grid` has
+  `display_offset`/`scroll_display(Scroll::Delta/Top/Bottom)` built in, and
+  `libghostty-vt`'s `Terminal::scroll_viewport(ScrollViewport::Delta/Top/
+  Bottom)` + `Terminal::scrollbar()` turned out to be an equally complete,
+  independently-discovered native API (confirmed by reading
+  `libghostty-vt-0.2.0/src/terminal.rs` directly, not assumed) -- so both
+  backends wrap their own native mechanism instead.
+  - **Sign convention, unified across both backends and
+    `GridSnapshot::scroll_offset`**: positive `delta_lines` scrolls *up*,
+    into history; negative scrolls *down*, toward the live tail;
+    `scroll_offset` is `0` at the live tail and increases toward
+    `scrollback_len` (fully scrolled back). This matches
+    `alacritty_terminal`'s own native `Scroll::Delta` convention directly
+    (verified against its `Grid::scroll_display`/`Term::scroll_to_point`
+    source) and is also the convention real Ghostty's own apprt layer
+    normalizes trackpad/wheel deltas to before touching its VT core
+    (verified against the vendored Ghostty source's `Surface.zig`
+    `ScrollAmount` doc comment, "positive is up, right", and
+    `SurfaceView_AppKit.swift`'s unmodified forwarding of
+    `NSEvent.scrollingDeltaY`) -- so `labolabo-app`'s wheel handler can feed
+    gpui's raw platform delta straight through with no sign flip.
+    `libghostty-vt`'s own `ScrollViewport::Delta` is the *opposite*
+    convention ("up is negative", its own doc comment) and its
+    `Scrollbar { total, offset, len }` reports offset from the *top* of
+    scrollback (`0` = fully scrolled back) rather than from the live tail
+    -- `backend/ghostty.rs` negates the delta and re-derives
+    `scroll_offset`/`scrollback_len` from `total`/`offset`/`len` internally,
+    so nothing above this crate ever needs to know the two backends
+    disagree.
+  - **History size stays 1000 lines** (unchanged from before this feature:
+    `scrolling_history: 1000` / `max_scrollback: 1000`) -- the spike's M3
+    milestone measured `scrolling_history: 10_000` (alacritty's own
+    default) costing ~21% lower steady-state throughput than 1000, with 0
+    and 1000 performing about the same (see `labolabo-spikes/term-poc/
+    README.md`, "M3: frame-pacing + throughput efficiency" ->
+    "Throughput efficiency: `scrolling_history`"). 1000 was chosen there
+    specifically to leave headroom for scrollback viewing without paying
+    the 10k cost -- this feature is exactly that headroom being spent, so
+    the constant itself didn't need to change.
+  - **Alt screen has no scrollback of its own on either backend**
+    (alacritty: `Term::new`'s inactive/alternate grid is constructed with
+    `max_scroll_limit: 0`; ghostty-vt's alternate screen is not part of the
+    primary screen's scrollback page list) -- `scroll_display` is a
+    harmless no-op while `alt_screen_active()` is true, on both backends,
+    without either needing special-case code for it.
+  - **`GridSnapshot`'s row-index math already generalizes**: `display_iter`
+    (alacritty) / the row iterator (ghostty-vt, described in its own docs
+    as tracking "a visible screen (a viewport), which changes when
+    scrolled") both already iterate whatever the *current* viewport is;
+    `build_snapshot` re-bases their absolute/viewport-relative line numbers
+    into a plain `0..rows` grid the same way regardless of `scroll_offset`,
+    so no separate "scrolled" vs. "live" code path exists in either
+    backend's cell-walk.
+  - **Not independently verified against real `libghostty-vt`**: this
+    development machine has Zig 0.15.2 only (the `backend-ghostty-vt`
+    feature needs 0.16, see "Building the ghostty-vt backend" below), so
+    `backend/ghostty.rs`'s scroll/alt-screen/scrollbar code is reviewed
+    carefully against the vendored crate's own doc comments and source
+    (not guessed), and compiles logically against its API shape, but has
+    not been built or run. Flagged for whoever next has the 0.16 toolchain
+    available -- `tests/backend_common.rs`'s scrollback/alt-screen tests
+    are written backend-agnostically specifically so they're ready to run
+    the moment that's possible.
+  - **`Terminal::scrollbar()` cost caveat, inherited from libghostty-vt's
+    own doc comment**: "may be expensive to calculate depending on where
+    the viewport is (arbitrary pins are expensive)." Called once per
+    `build_snapshot` (already throttled to `FRAME_INTERVAL`, ~60fps, by
+    `session.rs` -- never per PTY byte), which should be fine at this
+    crate's scale, but is a real, vendor-flagged cost worth remembering if
+    scrollback ever needs to scale beyond the current 1000-line cap.
+  - **A worker-thread throttle bug found and fixed while building this
+    feature**: `run_worker`'s snapshot-publish throttle (`FRAME_INTERVAL`)
+    previously had a real gap -- if an entire burst of PTY output landed
+    within one `FRAME_INTERVAL` window (routine: anything that prints a lot
+    at once, since the reader thread's `read()`s typically return
+    microseconds apart) and the child then went quiet (idled at a prompt,
+    inside a long `sleep`, ...), the burst's *last* `Bytes` message could
+    hit the "already snapshotted within this frame" branch and skip
+    publishing -- and since nothing else was arriving to trigger a
+    recheck, that final, truest state of the burst would never reach a
+    published `GridSnapshot` until *something else* eventually nudged it
+    (a keypress, a resize, or the child finally exiting). Found via this
+    feature's own tests (a fast 40-line flood followed by an idle `sleep`,
+    to leave the session alive long enough to scroll) reliably hanging;
+    root-caused with temporary tracing before being fixed, not
+    guessed. Fixed by tracking a `dirty` flag across throttled messages and
+    switching the worker's blocking `rx.recv()` to a bounded
+    `rx.recv_timeout()` once something is pending, so the worker wakes
+    itself up and force-publishes right when the throttle window ends, even
+    with zero new incoming messages -- see `run_worker`'s doc comments for
+    the full mechanism. An idle session (no pending change) still blocks
+    on a plain `recv()`, so this costs nothing when nothing is happening.
+  - **Alt-screen scroll-to-cursor-keys translation lives in `labolabo-app`,
+    not here** (`app::LaboLaboApp::handle_pane_scroll`) -- this crate only
+    exposes `alt_screen_active()` as a plain query; converting a wheel
+    delta into `ESC[A`/`ESC[B` sequences is an input-handling policy, the
+    same layer `keys.rs`'s keystroke-to-bytes translation already lives in,
+    not a VT-core concern.
 - **Bracketed-paste mode query via `TermSession::bracketed_paste()`**
   (added for the gpui shell's Cmd+V paste handler, `labolabo-app`'s
   `app::LaboLaboApp::action_paste`): a small `bracketed_paste(&self) ->
@@ -147,6 +252,14 @@ the child ends; and (via `spawn_with_options`) a configured `background`
 shows up as `GridSnapshot::background`, a configured `foreground` shows up
 as the fg color of an unstyled cell, and a `palette` override shows up as
 the fg color of an SGR-colored cell.
+
+Also covered, backend-agnostically: a fresh session reports `scroll_offset`/
+`scrollback_len` of `0`/`0`; flooding more lines than fit the viewport then
+scrolling back reveals a line that had scrolled off (and `scroll_to_bottom`
+returns to the live tail); an oversized `scroll` delta clamps to
+`scrollback_len` (and an oversized negative one clamps to `0`) rather than
+panicking or drifting; and `alt_screen_active()` reflects DECSET `1049`
+(entering/leaving the alternate screen, the mode `vim`/`less`/`htop` use).
 
 ## Building the ghostty-vt backend
 

@@ -25,8 +25,9 @@ use std::io::Write;
 
 use anyhow::anyhow;
 use libghostty_vt::render::{CellIterator, RenderState, RowIterator};
+use libghostty_vt::screen::Screen;
 use libghostty_vt::style::{RgbColor, Underline};
-use libghostty_vt::terminal::Mode;
+use libghostty_vt::terminal::{Mode, ScrollViewport};
 use libghostty_vt::{Terminal, TerminalOptions};
 
 use crate::backend::VtBackend;
@@ -168,6 +169,36 @@ impl VtBackend for GhosttyBackend {
         let background = rgb(colors.background);
         let default_fg = rgb(colors.foreground);
 
+        // `scrollbar()` reports `{ total, offset, len }` in libghostty-vt's
+        // own "row space" (its doc comment: `offset` is "into the total
+        // area that the viewport is at", `0` = the very top of scrollback --
+        // the *opposite* end from this crate's own `GridSnapshot::
+        // scroll_offset` convention, which is `0` at the live tail, matching
+        // `VtBackend::scroll_display`'s doc comment). Re-based here so
+        // nothing above this backend ever has to know libghostty-vt's
+        // convention differs from alacritty's:
+        //
+        //   scrollback_len = total - len        (the max distance from the
+        //                                         live tail, i.e. the same
+        //                                         quantity alacritty's
+        //                                         `Grid::history_size()`
+        //                                         reports)
+        //   scroll_offset  = scrollback_len - offset
+        //
+        // `terminal.scrollbar()`'s own doc comment warns it "may be
+        // expensive to calculate depending on where the viewport is" --
+        // acceptable here since `build_snapshot` is already throttled to
+        // `FRAME_INTERVAL` (~60fps) by `session.rs`, not called per PTY
+        // byte.
+        let (scroll_offset, scrollback_len) = match self.terminal.scrollbar() {
+            Ok(bar) => {
+                let scrollback_len = (bar.total as usize).saturating_sub(bar.len as usize);
+                let scroll_offset = scrollback_len.saturating_sub(bar.offset as usize);
+                (scroll_offset, scrollback_len)
+            }
+            Err(_) => (0, 0),
+        };
+
         // Read cursor state before we borrow the snapshot for row iteration.
         let cursor = {
             let visible = snapshot.cursor_visible().unwrap_or(false);
@@ -259,11 +290,38 @@ impl VtBackend for GhosttyBackend {
             background,
             cells,
             cursor,
+            scroll_offset,
+            scrollback_len,
         })
     }
 
     fn bracketed_paste(&self) -> bool {
         self.terminal.mode(Mode::BRACKETED_PASTE).unwrap_or(false)
+    }
+
+    fn scroll_display(&mut self, delta_lines: i64) {
+        // libghostty-vt's `ScrollViewport::Delta` convention is "up is
+        // negative" -- the *opposite* of this trait method's own convention
+        // (positive = up/into history, matching alacritty's native
+        // behavior; see `VtBackend::scroll_display`'s doc comment) -- so the
+        // sign is flipped here, once, and nowhere else needs to know.
+        //
+        // Clamped to a *symmetric* `isize` range (not simply `isize::MIN
+        // ..=isize::MAX`) before negating: negating `isize::MIN` itself
+        // would overflow. Realistic per-event deltas are at most a few
+        // dozen lines either way, so this bound is never actually reached
+        // in practice -- it only guards the theoretical extreme.
+        let bound = isize::MAX as i64;
+        let delta = delta_lines.clamp(-bound, bound) as isize;
+        self.terminal.scroll_viewport(ScrollViewport::Delta(-delta));
+    }
+
+    fn scroll_to_bottom(&mut self) {
+        self.terminal.scroll_viewport(ScrollViewport::Bottom);
+    }
+
+    fn alt_screen_active(&self) -> bool {
+        matches!(self.terminal.active_screen(), Ok(Screen::Alternate))
     }
 }
 

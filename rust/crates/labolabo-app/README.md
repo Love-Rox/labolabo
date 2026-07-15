@@ -124,11 +124,12 @@ GHOSTTY_SOURCE_DIR=/path/to/ghostty-zig016-src \
 | `control.rs` | Control CLI wiring: `ControlRuntime` (the app-wide control socket/server) and the gpui bridge that routes each request through a `WindowHandle` into `LaboLaboApp::dispatch_control` (`app.rs`). See "Control CLI" below. |
 | `bin/labolabo.rs` | The `labolabo` CLI binary — a thin client for the control socket (argv parsing, `ControlRequest` construction, printing the response). See "Control CLI" below. |
 | `ghostty_config.rs` | Pure-ish loader for the user's Ghostty config (`font-family`/`font-size`, `background`/`foreground`/`cursor-color`/`palette`/`theme`, `config-file` includes). Fixture-tested; never reads `$HOME` in tests. |
-| `grid.rs` | Pure function: pixel area + cell size -> terminal column/row count. No gpui types — unit-tested without a gpui `Application`. |
+| `grid.rs` | Pure functions: pixel area + cell size -> terminal column/row count (`grid_size_for_area`/`_for_window`); pixel position -> `(col, row)` cell (`cell_at`); wheel/trackpad pixel delta -> whole scroll lines, with cross-event fractional carry (`accumulate_scroll_lines`). No gpui types — unit-tested without a gpui `Application`. |
 | `keys.rs` | Pure function: `gpui::Keystroke` -> PTY input bytes, for the keys that must bypass the platform's text-input/IME machinery (control keys, a bare Ctrl-<letter>) — everything else is `app.rs`'s `EntityInputHandler` impl's job. `Keystroke`/`Modifiers` are plain data, so this is unit-tested directly too. |
 | `ime.rs` | Pure IME helpers: `layout_preedit` (column layout of an in-progress composition string on the terminal grid, unicode-width-aware) and UTF-8/UTF-16 length/slice conversions gpui's `EntityInputHandler` trait needs. No gpui types — unit-tested directly. |
 | `paste.rs` | Pure function: a clipboard string -> the PTY bytes for a paste (`encode_paste`) — unsafe control byte stripping, newline normalization to `"\r"`, optional bracketed-paste wrapping. Unit-tested directly. |
-| `render.rs` | `RenderSpec` (font resolution + cell measurement) and painting one `labolabo_term::GridSnapshot` into a gpui canvas (background, glyphs, cursor, and — via `ime.rs` — the IME preedit overlay). |
+| `render.rs` | `RenderSpec` (font resolution + cell measurement) and painting one `labolabo_term::GridSnapshot` into a gpui canvas (background, glyphs, a selection highlight, cursor, and — via `ime.rs` — the IME preedit overlay). |
+| `selection.rs` | Pure text-selection geometry (`CellPos`/`Selection`) and cell-range -> string extraction (`selected_text`) over a `GridSnapshot`. No gpui types — unit-tested directly. See "Text selection, scroll & copy" below. |
 
 ### The Task model (wave 5b-3)
 
@@ -344,7 +345,8 @@ so there's no conflict with typing.
 | Cmd+1 .. Cmd+9 | Select the Nth tab in the focused pane (no-op if it has fewer tabs) |
 | Cmd+] | Focus the next pane (cycles leaves in tree order, wraps around) |
 | Cmd+[ | Focus the previous pane (cycles leaves in tree order, wraps around) |
-| Cmd+V | Paste the system clipboard's text into the focused pane (see "Clipboard paste" below) |
+| Cmd+V | Paste the system clipboard's text into the focused pane (see "Text selection, scroll & copy" below) |
+| Cmd+C | Copy the focused pane's current text selection to the system clipboard, if any (see "Text selection, scroll & copy" below) |
 
 "Next/previous pane" cycles the tree's leaves in depth-first order rather
 than true on-screen (left/right/up/down) adjacency — the simpler of the two
@@ -461,8 +463,9 @@ the IME side:
 
 - Cmd/Super combinations are never forwarded to a terminal (reserved for
   application-level shortcuts — see "Keybindings" above for what they're
-  bound to as of this wave), including Cmd+V (paste — see "Clipboard paste"
-  below, a separate path from either of the above).
+  bound to as of this wave), including Cmd+V/Cmd+C (paste/copy — see "Text
+  selection, scroll & copy" below, a separate path from either of the
+  above).
 
 **Not implemented:**
 
@@ -470,25 +473,106 @@ the IME side:
 - Ctrl combined with anything other than a single letter, and any
   Ctrl+Alt/Ctrl+Shift combination (falls to the `EntityInputHandler` path
   like any other `key_char`-carrying keystroke, same as a plain letter).
-- Text selection, and therefore copy (Cmd+C) and IME candidate-window
-  positioning that depends on an existing selection range —
-  `EntityInputHandler::selected_text_range` always reports an empty
-  selection at the composition's end, never an actual document selection
-  (there is no addressable "document" to select from — see the impl's doc
-  comment).
+- IME candidate-window positioning that depends on an existing selection
+  range — `EntityInputHandler::selected_text_range` always reports an empty
+  selection at the composition's end, never the terminal-grid text
+  selection described below (there is no addressable "document" to select
+  from in the IME sense — see the impl's doc comment). The two "selection"
+  concepts (IME's document-selection query, and mouse-driven terminal text
+  selection below) are unrelated despite the shared word.
 
-### Clipboard paste (Cmd+V)
+### Text selection, scroll & copy
 
-`app::LaboLaboApp::action_paste` reads the system clipboard
-(`cx.read_from_clipboard()`), and — if it has text — encodes it via
-`paste::encode_paste` (pure function, unit tested): unsafe control bytes
-stripped (in particular `ESC`, so a crafted clipboard payload can't embed a
-literal bracketed-paste end marker to break out early), line endings
-normalized to `"\r"` (a real terminal's Enter-key convention; `"\r\n"` and
-lone `"\n"` both collapse to it), and — when the focused pane's
-`Terminal::bracketed_paste()` reports the foreground program has enabled
-DECSET `2004` — wrapped in `ESC[200~...ESC[201~`. The mode query itself is
-a small addition to `labolabo-term`'s `VtBackend` trait
+**Scrollback** (`labolabo_term::Terminal::scroll`/`scroll_to_bottom`,
+`GridSnapshot::{scroll_offset, scrollback_len}` — see
+`crates/labolabo-term/README.md`'s own writeup for the backend-level design
+and sign convention): `task_workspace::render_leaf` registers
+`on_scroll_wheel` on each pane's canvas, routed to `app::LaboLaboApp::
+handle_pane_scroll`. A raw gpui `ScrollWheelEvent::delta` (either
+`ScrollDelta::Lines` or `::Pixels` — trackpad and traditional wheel both
+supported, unified via gpui's own `pixel_delta(line_height)` so both
+resolve through the same code path) is accumulated into whole lines via
+`grid::accumulate_scroll_lines` (a per-pane `PaneRuntime::pending_scroll`
+carries the fractional remainder across events, so a slow trackpad
+gesture's individual sub-cell-height deltas still eventually produce a
+scroll step instead of each rounding to zero). While the alternate screen
+is active (`vim`/`less`/`htop`, ...), the accumulated line count is instead
+converted into that many Up/Down (`ESC[A`/`ESC[B`) key sequences written to
+the PTY — mirroring real Ghostty's default "alternate scroll mode" behavior
+for full-screen TUI programs (see `VtBackend::alt_screen_active`'s doc
+comment for the source-level confirmation); this app does not track DECCKM
+(application cursor-key mode), same simplification `keys.rs`'s own literal
+arrow-key handling already makes. **Any keystroke that reaches a pane's PTY
+snaps that pane's scroll back to the live tail** (`Terminal::
+scroll_to_bottom`, called from the single `write_focused_pane_input` choke
+point both the control-key and IME-committed-text input paths write
+through) — the terminal-UI convention every mainstream terminal follows.
+Mouse-reporting TUIs (`vim -mouse`, ...) that would rather receive raw
+scroll-wheel button events instead of either of the above are **out of
+scope** — see "Known limitations".
+
+**Text selection** (`selection.rs`'s `CellPos`/`Selection`/`selected_text`,
+all pure/unit-tested; `app::LaboLaboApp::begin_selection`/
+`extend_selection`/`finish_selection` drive them from mouse events on a
+pane's canvas): mouse-down converts the click position into a grid cell
+(`grid::cell_at`, using the canvas's live paint bounds tracked in
+`PaneRuntime::last_bounds`) and starts a zero-length selection there (also
+still focusing the pane, unchanged from before selection existed);
+mouse-move while the left button is held (`MouseMoveEvent::dragging()`)
+extends the selection's cursor cell; mouse-up clears it back to `None` if
+it never grew past that zero-length start (a plain click, not a drag) so
+click-to-focus never leaves a stray highlight or blocks a later Cmd+C with
+an empty range. `render::paint_grid` paints a translucent highlight
+(`render::SELECTION_HIGHLIGHT_RGB`, the same accent hue as the
+focused-pane border) over every cell `Selection::contains` reports, under
+the glyph so selected text stays legible. Selection is character-based
+(not line or box/rectangular mode) and works over scrolled-back history
+exactly the same as the live view, since it just reads whatever's in the
+pane's *current* `GridSnapshot` — including one `VtBackend::scroll_display`
+scrolled back.
+
+**Known limitation, by design — a selection's coordinates aren't stable
+across a scroll or new output mid-drag.** A selection's endpoints are
+plain `(row, col)` cell coordinates within whichever snapshot was current
+when the mouse last moved, not a persistent per-line buffer identity. If
+the view scrolls (or new PTY output arrives) between two events of the
+*same* drag, or between finishing a drag and pressing Cmd+C, those
+coordinates are reinterpreted against whatever is at that position in the
+*next* snapshot — which can shift what ends up highlighted/copied. This is
+the simplest class of terminal-selection design (see `selection.rs`'s
+module doc comment for the fuller writeup); a persistent per-line-id design
+is future work if this proves to matter in practice.
+
+**Not implemented (flagged, not attempted this wave):** double-click
+word-select and triple-click line-select (a plain click-drag is the only
+gesture wired up); mouse reporting to TUI programs that request it (out of
+scope per this wave's brief — `vim -mouse` and similar always get the
+scroll-to-cursor-keys/text-selection behavior above, never raw mouse
+button/motion escape sequences); a visible scrollbar widget (`GridSnapshot`
+already carries `scroll_offset`/`scrollback_len` for one, but no UI element
+draws it yet).
+
+**Copy** (`app::LaboLaboApp::action_copy`, Cmd+C): extracts the focused
+pane's selection via `selection::selected_text` and writes it to the system
+clipboard (`cx.write_to_clipboard`) — a no-op with no selection, an empty
+one, or empty extracted text. Deliberately never touches the pane's PTY:
+`Ctrl+C` (a bare control byte via `keys::keystroke_to_bytes`) is the only
+way to send `SIGINT`; Cmd+C and Ctrl+C are different keystrokes entirely
+(the whole `platform` modifier is reserved for application shortcuts, so
+there's no ambiguity to resolve at dispatch time). The selection is left
+exactly as it was after copying — matching every mainstream terminal's
+"copy doesn't clear the selection" convention.
+
+**Paste** (`app::LaboLaboApp::action_paste`, Cmd+V): reads the system
+clipboard (`cx.read_from_clipboard()`), and — if it has text — encodes it
+via `paste::encode_paste` (pure function, unit tested): unsafe control
+bytes stripped (in particular `ESC`, so a crafted clipboard payload can't
+embed a literal bracketed-paste end marker to break out early), line
+endings normalized to `"\r"` (a real terminal's Enter-key convention;
+`"\r\n"` and lone `"\n"` both collapse to it), and — when the focused
+pane's `Terminal::bracketed_paste()` reports the foreground program has
+enabled DECSET `2004` — wrapped in `ESC[200~...ESC[201~`. The mode query
+itself is a small addition to `labolabo-term`'s `VtBackend` trait
 (`bracketed_paste(&self) -> bool`), implemented identically for both
 backends (`alacritty_terminal::Term::mode().contains(TermMode::
 BRACKETED_PASTE)`; `libghostty_vt::Terminal::mode(Mode::BRACKETED_PASTE)`)
@@ -499,10 +583,6 @@ the caller thread" shape `GridSnapshot` itself already uses, just for a
 single `bool`. Covered by a shared (`tests/backend_common.rs`) headless test
 on both backends: enabling/disabling DECSET `2004` via `printf` in the
 spawned shell is reflected in `bracketed_paste()`.
-
-**Copy is out of scope** for this wave (see "Not implemented" above — text
-selection isn't implemented yet, so there's nothing to copy); a future
-scrollback/selection wave is the natural place for it.
 
 ### Resize path (per pane)
 
@@ -716,8 +796,17 @@ Three independent DnD systems, all built on gpui 0.2's `on_drag`/
   convention), so this needs a human to actually type through a real IME
   before it's considered confirmed working, not just "compiles and the
   design traces correctly through gpui's platform backends".
-- **No text selection, and therefore no copy** (see "Keyboard input path"
-  above) — a future scrollback/selection wave's job.
+- **Scrollback, text selection & copy landed this wave** (see "Text
+  selection, scroll & copy" above), but: no double-click word-select or
+  triple-click line-select (plain click-drag only); no mouse reporting to
+  TUI programs (`vim -mouse` and similar always get scroll-to-cursor-keys /
+  text selection instead of raw button/motion escape sequences); no
+  scrollbar widget drawn yet (the data for one, `GridSnapshot::
+  scroll_offset`/`scrollback_len`, already exists); a selection's
+  coordinates are not stable across a scroll or new PTY output that lands
+  mid-drag (see that section's "known limitation, by design" for why); and
+  real interactive scroll/drag-select/Cmd+C behavior has not been verified
+  by an actual mouse — see "What was and wasn't verified" below.
 - **Colors: light/dark theme switching is out of scope.** Ghostty's `theme
   = light:NAME,dark:NAME` syntax picks a theme based on the desktop
   appearance; this port only ever resolves the **light** side and has no
@@ -1048,3 +1137,95 @@ feature, so this gap is larger than usual here:**
   and smoke run were macOS-only (see "macOS 専用" in the repo's top-level
   `CLAUDE.md`); the dispatch-code reading above covers all three platforms'
   source, but only macOS was actually run.
+
+### Scrollback, text selection & copy (wave 5g)
+
+Landed: `labolabo-term`'s scrollback API (`Terminal::scroll`/
+`scroll_to_bottom`, `GridSnapshot::{scroll_offset, scrollback_len}`,
+`VtBackend::{scroll_display, scroll_to_bottom, alt_screen_active}` on both
+backends -- see `crates/labolabo-term/README.md` for the backend-level
+design, sign convention, and a worker-thread throttle bug found and fixed
+along the way); wheel/trackpad scroll wiring on each pane's canvas
+(`app::LaboLaboApp::handle_pane_scroll`, `grid::accumulate_scroll_lines`),
+including alt-screen -> cursor-key conversion; mouse-drag text selection
+(`selection.rs`'s `CellPos`/`Selection`/`selected_text`, `grid::cell_at`,
+`app::LaboLaboApp::begin_selection`/`extend_selection`/`finish_selection`,
+`render::paint_grid`'s highlight pass); and Cmd+C copy
+(`app::LaboLaboApp::action_copy`) alongside the existing Cmd+V paste. See
+"Text selection, scroll & copy" above for the full design and its
+by-design limitations (no word/line select, no mouse reporting, a
+selection's coordinates aren't stable across a scroll/new-output mid-drag).
+
+Verified locally:
+
+- `cargo build -p labolabo-term`, `cargo clippy -p labolabo-term
+  --all-targets -- -D warnings`, and `cargo test -p labolabo-term` (17
+  tests, default `backend-alacritty`) all pass, including the new
+  scrollback/alt-screen tests in the shared `tests/backend_common.rs`: a
+  fresh session reports `scroll_offset`/`scrollback_len` of `0`/`0`;
+  flooding more lines than fit the viewport then scrolling all the way back
+  reveals the very first line printed (and `scroll_to_bottom` returns to
+  the live tail showing the most recent line again); an oversized `scroll`
+  delta in either direction clamps to `[0, scrollback_len]` rather than
+  panicking; `alt_screen_active()` tracks DECSET `1049` on and back off. Run
+  repeatedly (not just once) to rule out flakiness after the throttle fix.
+- **`backend-ghostty-vt` was not built or tested this wave** -- this
+  development machine has Zig 0.15.2 only (the feature needs 0.16); the
+  ghostty backend's scroll/alt-screen/scrollbar code was written by close
+  reading of the vendored `libghostty-vt` crate's own source and doc
+  comments (not guessed), and is exercised by the same
+  backend-agnostic `tests/backend_common.rs` suite the alacritty backend
+  is, but has not actually compiled or run. Flagged prominently rather than
+  reported as done -- see the crate README's own note on this.
+- `cargo build -p labolabo-app`, `cargo clippy -p labolabo-app --all-targets
+  -- -D warnings`, and workspace-wide `cargo fmt --check` all pass.
+- `cargo test -p labolabo-app` (126 lib tests + 8 `control_cli` integration
+  tests): the new `grid` tests (`cell_at`'s exact-boundary/negative-clamp/
+  past-the-grid-clamp/degenerate-cell-size cases, `accumulate_scroll_lines`'s
+  sub-cell-delta accumulation/carry/negative-direction/degenerate-input
+  cases) and the new `selection` module's full suite (`Selection::
+  is_empty`/`normalized`/`contains` for single-row, multi-row, and
+  backward-dragged selections; `selected_text`'s single-row substring,
+  trailing-blank trimming, multi-row newline-joining, and out-of-range
+  row/column clamping without panicking) -- plus the full pre-existing
+  suite unchanged.
+- Root `cargo build`/`cargo test`/`cargo clippy -- -D warnings`/`cargo fmt
+  --check` (workspace `default-members`: `labolabo-core` + `labolabo-term`)
+  all pass.
+- `cargo run -p labolabo-app` smoke run (`LABOLABO_RS_DATA_DIR=$(mktemp
+  -d)`, ~5 seconds, then killed): no panic/crash output, process exited
+  cleanly on kill, no leftover process.
+
+**Not verified -- no synthetic keyboard/mouse input, on explicit
+instruction, same as every wave above. Scroll/selection/copy are gesture
+features, so (like drag & drop above) this gap is larger than usual here:**
+
+- **No actual wheel/trackpad scroll has been performed against a running
+  app.** The sign convention, pixel-to-line accumulation, and alt-screen
+  detection were each traced against the vendored Ghostty source and
+  `alacritty_terminal`'s own code (not assumed), and the underlying
+  `Terminal::scroll` mechanism is integration-tested headlessly, but the
+  actual gpui `ScrollWheelEvent` -> `handle_pane_scroll` -> visibly-scrolled
+  pane chain has not been watched happen on screen. **In particular, the
+  scroll *direction* (does scrolling up on a real trackpad actually reveal
+  older content, not newer) rests on reading macOS/Ghostty source, not on
+  physically testing a trackpad gesture -- flagged as the single highest-
+  value thing for a human to check first.**
+- **No actual mouse-drag text selection has been performed.** The highlight
+  paints (`render::paint_grid`'s new pass), the click-starts/drag-extends/
+  release-finalizes state machine, and `grid::cell_at`'s pixel-to-cell math
+  are each unit-tested or traced through gpui's own mouse-event dispatch,
+  but no real click-and-drag over a rendered terminal has been observed.
+- **Cmd+C copy has not been exercised against a real selection or a real
+  system clipboard.** `selection::selected_text`'s extraction logic is
+  unit-tested in isolation; whether a real drag-then-Cmd+C round-trips into
+  a paste-able clipboard entry has not been checked end to end.
+- **The alt-screen -> cursor-key conversion has not been exercised against
+  a real full-screen program** (e.g. scrolling while `vim` or `less` is
+  running) -- `alt_screen_active()` itself is integration-tested (DECSET
+  `1049` on/off), but scrolling the mouse wheel while actually inside one
+  of these programs and confirming it moves the cursor/pages the view
+  (rather than scrolling LaboLabo's own history) was not performed.
+- **The selection highlight's visual legibility has not been screenshotted**
+  -- the chosen alpha (`render::SELECTION_HIGHLIGHT_ALPHA`) is a judgment
+  call, not measured against real terminal content on a real display.

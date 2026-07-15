@@ -53,9 +53,9 @@ use std::ops::Range;
 use std::path::Path;
 
 use gpui::{
-    actions, div, point, prelude::*, px, rgb, size, Bounds, Context, DragMoveEvent,
+    actions, div, point, prelude::*, px, rgb, size, Bounds, ClipboardItem, Context, DragMoveEvent,
     EntityInputHandler, ExternalPaths, FocusHandle, IntoElement, KeyDownEvent, PathPromptOptions,
-    Pixels, Point, Render, Task as GpuiTask, UTF16Selection, Window,
+    Pixels, Point, Render, ScrollWheelEvent, Task as GpuiTask, UTF16Selection, Window,
 };
 
 use labolabo_core::{
@@ -75,6 +75,7 @@ use crate::keys::keystroke_to_bytes;
 use crate::new_task;
 use crate::paste;
 use crate::render::RenderSpec;
+use crate::selection::{self, CellPos};
 use crate::sidebar;
 use crate::task_workspace::{self, PaneDragHover, PaneRuntime, TabDragPayload, TaskWorkspace};
 
@@ -99,6 +100,7 @@ actions!(
         SplitRight,
         SplitDown,
         Paste,
+        Copy,
         FocusNextPane,
         FocusPrevPane,
         SelectTab1,
@@ -1502,9 +1504,19 @@ impl LaboLaboApp {
     /// Write `bytes` to the focused pane's PTY. Returns whether there was a
     /// focused pane to write to (used by [`Self::key_down`] to decide
     /// whether to claim the keystroke -- see that method's doc comment).
+    ///
+    /// Every call also snaps that pane's viewport back to the live tail
+    /// (`Terminal::scroll_to_bottom`) -- the terminal-UI convention this
+    /// app follows: typing while scrolled back returns you to the live
+    /// output, matching every mainstream terminal. This is the single
+    /// choke point both `key_down`'s direct keystroke bytes and the
+    /// `EntityInputHandler` impl's IME-committed text (`replace_text_in_
+    /// range`, below) already write through, so one change here covers
+    /// both input paths.
     fn write_focused_pane_input(&self, bytes: &[u8]) -> bool {
         if let Some(runtime) = self.focused_pane_runtime() {
             runtime.session.write_input(bytes);
+            runtime.session.scroll_to_bottom();
             true
         } else {
             false
@@ -1534,6 +1546,168 @@ impl LaboLaboApp {
         }
     }
 
+    // MARK: - text selection & wheel scroll (`task_workspace::render_leaf`'s
+    // mouse handlers on a leaf's canvas)
+
+    /// Convert a window-space mouse `position` into the `(col, row)` cell it
+    /// falls on within `pane_id`'s canvas -- `None` if the pane has no live
+    /// runtime. Shared by [`Self::begin_selection`]/[`Self::
+    /// extend_selection`]: both need "what cell is the mouse over right
+    /// now," just for different fields of a [`selection::Selection`].
+    fn pane_cell_at(
+        &self,
+        task_id: &str,
+        pane_id: PaneId,
+        position: Point<Pixels>,
+    ) -> Option<CellPos> {
+        let runtime = self.workspaces.get(task_id)?.runtimes.get(&pane_id)?;
+        let snapshot = runtime.session.snapshot();
+        let bounds = runtime.last_bounds.get();
+        let local_x = f32::from(position.x - bounds.origin.x);
+        let local_y = f32::from(position.y - bounds.origin.y);
+        let (col, row) = grid::cell_at(
+            local_x,
+            local_y,
+            self.spec.cell_width,
+            self.spec.cell_height,
+            snapshot.cols,
+            snapshot.rows,
+        );
+        Some(CellPos { row, col })
+    }
+
+    /// Begin (or restart) a text selection in `pane_id`'s canvas at
+    /// `position` (window-space pixels, `MouseDownEvent::position`): the
+    /// cell under the mouse becomes both the selection's anchor and cursor
+    /// (a zero-length selection -- [`Self::extend_selection`] grows it as
+    /// the drag continues). Any selection previously in progress in this
+    /// pane is replaced outright -- every desktop terminal's "a fresh click
+    /// starts a fresh selection" convention. Called alongside (not instead
+    /// of) `select_pane` from `render_leaf`'s mouse-down handler, so
+    /// starting a selection also focuses the pane it's in, same as before
+    /// selection existed.
+    pub(crate) fn begin_selection(
+        &mut self,
+        task_id: &str,
+        pane_id: PaneId,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pos) = self.pane_cell_at(task_id, pane_id, position) else {
+            return;
+        };
+        if let Some(runtime) = self
+            .workspaces
+            .get_mut(task_id)
+            .and_then(|w| w.runtimes.get_mut(&pane_id))
+        {
+            runtime.selection = Some(selection::Selection::at(pos));
+        }
+        cx.notify();
+    }
+
+    /// Extend `pane_id`'s in-progress selection's cursor to the cell under
+    /// `position` -- a no-op if that pane has no selection in progress
+    /// (e.g. the drag started outside any pane's canvas). Called from
+    /// `render_leaf`'s mouse-move handler only while the left button is
+    /// held (`MouseMoveEvent::dragging()`).
+    pub(crate) fn extend_selection(
+        &mut self,
+        task_id: &str,
+        pane_id: PaneId,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pos) = self.pane_cell_at(task_id, pane_id, position) else {
+            return;
+        };
+        let Some(runtime) = self
+            .workspaces
+            .get_mut(task_id)
+            .and_then(|w| w.runtimes.get_mut(&pane_id))
+        else {
+            return;
+        };
+        let Some(selection) = runtime.selection.as_mut() else {
+            return;
+        };
+        selection.cursor = pos;
+        cx.notify();
+    }
+
+    /// Finish `pane_id`'s selection on mouse-up: a selection that never
+    /// grew past its zero-length starting point (a plain click, no drag)
+    /// is cleared outright, so an ordinary click-to-focus never leaves a
+    /// stray "selected" highlight or blocks a later Cmd+C with an empty
+    /// range. A real (non-empty) selection is left exactly as dragged --
+    /// releasing the mouse doesn't change it further.
+    pub(crate) fn finish_selection(
+        &mut self,
+        task_id: &str,
+        pane_id: PaneId,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(runtime) = self
+            .workspaces
+            .get_mut(task_id)
+            .and_then(|w| w.runtimes.get_mut(&pane_id))
+        else {
+            return;
+        };
+        if runtime.selection.is_some_and(|s| s.is_empty()) {
+            runtime.selection = None;
+            cx.notify();
+        }
+    }
+
+    /// Route one wheel/trackpad scroll event over `pane_id`'s canvas: while
+    /// the alternate screen is active (`vim`/`less`/`htop`/...), converts
+    /// the accumulated line delta into that many Up/Down cursor-key escape
+    /// sequences written straight to the PTY (mirroring real Ghostty's
+    /// default "alternate scroll mode" behavior for alt-screen programs --
+    /// see `labolabo_term::backend::VtBackend::alt_screen_active`'s doc
+    /// comment); otherwise scrolls that pane's own `Terminal` viewport
+    /// (`Terminal::scroll`). Mouse-reporting TUIs (`vim -mouse`, ...) that
+    /// would rather receive raw scroll-wheel button events are out of
+    /// scope here -- see the crate README.
+    pub(crate) fn handle_pane_scroll(
+        &mut self,
+        task_id: &str,
+        pane_id: PaneId,
+        event: &ScrollWheelEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let cell_height = self.spec.cell_height;
+        let Some(runtime) = self
+            .workspaces
+            .get_mut(task_id)
+            .and_then(|w| w.runtimes.get_mut(&pane_id))
+        else {
+            return;
+        };
+        let pixel_delta = event.delta.pixel_delta(px(cell_height));
+        let delta_y = f32::from(pixel_delta.y);
+        let lines =
+            grid::accumulate_scroll_lines(&mut runtime.pending_scroll, delta_y, cell_height);
+        if lines == 0 {
+            return;
+        }
+        if runtime.session.alt_screen_active() {
+            // Up arrow for "scroll up" (positive lines, our shared
+            // convention -- see `VtBackend::scroll_display`'s doc
+            // comment), Down arrow otherwise. Same normal-mode `ESC[A`/
+            // `ESC[B` sequences `keys::keystroke_to_bytes` already sends
+            // for a literal arrow-key press -- this app doesn't track
+            // DECCKM (application cursor-key mode) for either path.
+            let seq: &[u8] = if lines > 0 { b"\x1b[A" } else { b"\x1b[B" };
+            let bytes = seq.repeat(lines.unsigned_abs() as usize);
+            runtime.session.write_input(&bytes);
+        } else {
+            runtime.session.scroll(lines);
+        }
+        cx.notify();
+    }
+
     // MARK: - action handlers (see the `actions!` list + main.rs's `bind_keys`)
 
     fn selected_task_and_focused_pane(&self) -> Option<(String, PaneId)> {
@@ -1547,9 +1721,7 @@ impl LaboLaboApp {
     /// reports DECSET `2004` is enabled) wrapped in `ESC[200~...ESC[201~` --
     /// see `paste::encode_paste`'s doc comment for the full contract. A
     /// clipboard with no text (empty, or an image-only entry) or no
-    /// currently focused pane is a silent no-op. Copy (selection -> system
-    /// clipboard) is out of this wave's scope -- text selection itself
-    /// isn't implemented yet.
+    /// currently focused pane is a silent no-op.
     fn action_paste(&mut self, _: &Paste, _window: &mut Window, cx: &mut Context<Self>) {
         let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
             return;
@@ -1562,6 +1734,38 @@ impl LaboLaboApp {
         };
         let bytes = paste::encode_paste(&text, runtime.session.bracketed_paste());
         runtime.session.write_input(&bytes);
+    }
+
+    /// Cmd+C: copies the focused pane's current text selection (if any) to
+    /// the system clipboard -- `selection::selected_text`'s extraction over
+    /// that pane's live snapshot. A no-op when there is no selection, or the
+    /// selection is empty (`Selection::is_empty`, e.g. a plain click that
+    /// never got extended -- see `finish_selection`, which already clears
+    /// those), or the extracted text happens to be empty. Deliberately does
+    /// **not** touch the pane's PTY at all -- `Ctrl+C` (a bare control byte
+    /// via `keys::keystroke_to_bytes`) is the only way to send `SIGINT`;
+    /// `Cmd+C` and `Ctrl+C` are different keystrokes entirely (`keys.rs`
+    /// reserves every `platform`-modified keystroke for application
+    /// shortcuts like this one, so there is no ambiguity to resolve here).
+    /// The selection itself is left exactly as it was -- copying doesn't
+    /// clear it, matching every mainstream terminal's convention of leaving
+    /// the highlight in place after a copy.
+    fn action_copy(&mut self, _: &Copy, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(runtime) = self.focused_pane_runtime() else {
+            return;
+        };
+        let Some(selection) = runtime.selection else {
+            return;
+        };
+        if selection.is_empty() {
+            return;
+        }
+        let snapshot = runtime.session.snapshot();
+        let text = selection::selected_text(&snapshot, &selection);
+        if text.is_empty() {
+            return;
+        }
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
     }
 
     fn action_new_tab(&mut self, _: &NewTab, window: &mut Window, cx: &mut Context<Self>) {
@@ -1863,6 +2067,7 @@ impl Render for LaboLaboApp {
             .on_action(cx.listener(Self::action_split_right))
             .on_action(cx.listener(Self::action_split_down))
             .on_action(cx.listener(Self::action_paste))
+            .on_action(cx.listener(Self::action_copy))
             .on_action(cx.listener(Self::action_focus_next_pane))
             .on_action(cx.listener(Self::action_focus_prev_pane))
             .on_action(cx.listener(Self::action_select_tab_1))

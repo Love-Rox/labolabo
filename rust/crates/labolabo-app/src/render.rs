@@ -22,6 +22,15 @@ use gpui::{
 use labolabo_term::{CursorSnapshot, GridSnapshot, Rgb};
 
 use crate::ime;
+use crate::selection::Selection;
+
+/// Selection highlight tint -- the same accent hue as the focused-pane
+/// border (`task_workspace::FOCUS_BORDER_COLOR`, `0x5e9eff`) so "this pane
+/// is focused" and "this is your selection" read as one visual family,
+/// alpha'd down so the glyph painted on top (see [`paint_grid`]) stays
+/// legible.
+const SELECTION_HIGHLIGHT_RGB: Rgb = Rgb::new(0x5e, 0x9e, 0xff);
+const SELECTION_HIGHLIGHT_ALPHA: f32 = 0.35;
 
 /// The fallback font family when the user's `font-family` (or an empty
 /// config) can't be resolved. Menlo ships with macOS; on Linux, gpui's own
@@ -171,10 +180,17 @@ fn to_hsla_with_alpha(color: Rgb, alpha: f32) -> Hsla {
 
 /// Paint `snapshot`'s grid within `bounds`: the base background first, then
 /// each cell's own background (only where it differs -- see
-/// `CellSnapshot::has_bg`), then non-blank glyphs, then a cursor overlay.
+/// `CellSnapshot::has_bg`), then a translucent highlight over any cell
+/// [`Selection::contains`]s (see `crate::selection`'s module doc comment for
+/// what a selection's coordinates mean against a possibly-scrolled
+/// `snapshot`), then non-blank glyphs (painted last, so selected text stays
+/// legible over the highlight), then a cursor overlay. `selection: None`
+/// paints no highlight at all -- the common case (most panes have no active
+/// selection most of the time).
 pub fn paint_grid(
     snapshot: &GridSnapshot,
     spec: &RenderSpec,
+    selection: Option<&Selection>,
     bounds: Bounds<Pixels>,
     window: &mut Window,
     cx: &mut App,
@@ -196,6 +212,13 @@ pub fn paint_grid(
             window.paint_quad(fill(
                 Bounds::new(point(x, y), size(px(spec.cell_width), px(spec.cell_height))),
                 to_hsla(cell.bg),
+            ));
+        }
+
+        if selection.is_some_and(|s| s.contains(row as u16, col as u16)) {
+            window.paint_quad(fill(
+                Bounds::new(point(x, y), size(px(spec.cell_width), px(spec.cell_height))),
+                to_hsla_with_alpha(SELECTION_HIGHLIGHT_RGB, SELECTION_HIGHLIGHT_ALPHA),
             ));
         }
 

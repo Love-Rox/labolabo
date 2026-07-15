@@ -27,9 +27,10 @@ use std::time::Duration;
 use futures::channel::mpsc;
 use futures::StreamExt;
 use gpui::{
-    canvas, div, prelude::*, px, relative, rgb, rgba, AnyElement, Context, DragMoveEvent,
+    canvas, div, prelude::*, px, relative, rgb, rgba, AnyElement, Bounds, Context, DragMoveEvent,
     ElementInputHandler, ExternalPaths, FocusHandle, IntoElement, MouseButton, MouseDownEvent,
-    Render, SharedString, Task as GpuiTask, Window,
+    MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollWheelEvent, SharedString, Task as GpuiTask,
+    Window,
 };
 
 use labolabo_core::{
@@ -40,6 +41,7 @@ use labolabo_term::{TermEvent, Terminal};
 use crate::app::{LaboLaboApp, PreeditState};
 use crate::grid;
 use crate::render::RenderSpec;
+use crate::selection::Selection;
 
 /// See `app::EVENT_POLL_TIMEOUT`'s Wave 5b-2 doc comment (unchanged):
 /// how long the redraw-bridge thread blocks on `recv_event` between checks
@@ -151,6 +153,29 @@ pub struct PaneRuntime {
     /// without a `&mut LaboLaboApp` borrow available to it -- see
     /// `render_leaf`'s doc comment.
     pub last_size: Rc<Cell<(u16, u16)>>,
+    /// This pane's canvas's own paint bounds, as of the most recent
+    /// prepaint -- same `Rc<Cell<_>>`-for-`Fn`-closure-access shape as
+    /// `last_size` (see its doc comment). Mouse handlers (registered via
+    /// `cx.listener`, which *does* get `&mut LaboLaboApp`) read this to
+    /// convert a window-space `MouseDownEvent`/`MouseMoveEvent` position
+    /// into a canvas-local one before calling `grid::cell_at` -- see
+    /// `app::LaboLaboApp::begin_selection`.
+    pub last_bounds: Rc<Cell<Bounds<Pixels>>>,
+    /// This pane's in-progress or finished text selection, if any -- `None`
+    /// is the common case (most panes have no active selection most of the
+    /// time). Mutated directly by the mouse handlers below (which have
+    /// `&mut LaboLaboApp` access, unlike the canvas element's own paint
+    /// closures) and read by `render_leaf` to paint the highlight
+    /// (`render::paint_grid`) and by `app::LaboLaboApp::action_copy` to
+    /// extract text. See `crate::selection`'s module doc comment for what
+    /// a selection's coordinates mean against a possibly-scrolled snapshot.
+    pub selection: Option<Selection>,
+    /// Fractional scroll-line remainder carried between wheel/trackpad
+    /// events for this pane -- see `grid::accumulate_scroll_lines`'s doc
+    /// comment for why this needs to persist across events (a slow
+    /// trackpad gesture's individual deltas are each smaller than one
+    /// cell height).
+    pub pending_scroll: f32,
     /// The `LABOLABO_PANE` value this pane's session was spawned with (a
     /// fresh UUID minted at spawn time, see `crate::hooks`'s module doc
     /// comment) -- kept so pane removal can unregister the routing table
@@ -294,6 +319,9 @@ pub fn insert_runtime(
         PaneRuntime {
             session,
             last_size: Rc::new(Cell::new((cols, rows))),
+            last_bounds: Rc::new(Cell::new(Bounds::default())),
+            selection: None,
+            pending_scroll: 0.0,
             pane_uuid,
             _redraw_task: redraw_task,
         },
@@ -432,7 +460,10 @@ fn render_leaf(
 
     let session_for_resize = runtime.map(|rt| rt.session.clone());
     let last_size = runtime.map(|rt| rt.last_size.clone());
+    let last_bounds = runtime.map(|rt| rt.last_bounds.clone());
+    let last_bounds_for_prepaint = last_bounds.clone();
     let snapshot = runtime.map(|rt| rt.session.snapshot());
+    let selection = runtime.and_then(|rt| rt.selection);
     let prepaint_spec = spec.clone();
     let paint_spec = spec.clone();
 
@@ -452,6 +483,9 @@ fn render_leaf(
 
     let canvas_el = canvas(
         move |bounds, _window, _cx| {
+            if let Some(last_bounds) = &last_bounds_for_prepaint {
+                last_bounds.set(bounds);
+            }
             if let (Some(session), Some(last_size)) = (&session_for_resize, &last_size) {
                 let (cols, rows) = grid::grid_size_for_area(
                     bounds.size.width.into(),
@@ -470,7 +504,14 @@ fn render_leaf(
                 window.handle_input(&focus_handle, ElementInputHandler::new(bounds, entity), cx);
             }
             if let Some(snapshot) = &snapshot {
-                crate::render::paint_grid(snapshot, &paint_spec, bounds, window, cx);
+                crate::render::paint_grid(
+                    snapshot,
+                    &paint_spec,
+                    selection.as_ref(),
+                    bounds,
+                    window,
+                    cx,
+                );
                 if let Some(text) = &preedit_text {
                     crate::render::paint_preedit(
                         text,
@@ -487,16 +528,59 @@ fn render_leaf(
     )
     .size_full();
 
+    // Mouse wiring for this leaf's canvas: click-to-focus (pre-existing)
+    // plus mouse-down/move/up for text selection and wheel/trackpad
+    // scroll, all keyed off `click_target` (this leaf's selected pane --
+    // the one a click or scroll here should act on) and `task_id` (so a
+    // handler fired later, on whichever Task happens to be selected then,
+    // still routes back to *this* leaf's own Task -- see this function's
+    // doc comment). Each handler needs its own `move` capture of `task_id`
+    // since `cx.listener` closures can't share one.
     let click_target = selected_id;
-    let click_task_id = task_id.to_string();
+    let mousedown_task_id = task_id.to_string();
     let canvas_area = div().flex_1().w_full().on_mouse_down(
         MouseButton::Left,
-        cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
             if let Some(id) = click_target {
-                this.select_pane(&click_task_id, id, window, cx);
+                this.select_pane(&mousedown_task_id, id, window, cx);
+                this.begin_selection(&mousedown_task_id, id, event.position, cx);
             }
         }),
     );
+
+    let move_task_id = task_id.to_string();
+    let canvas_area = canvas_area.on_mouse_move(cx.listener(
+        move |this, event: &MouseMoveEvent, _window, cx| {
+            // Only an active left-button drag extends a selection -- a
+            // plain hover (no button held) must not.
+            if !event.dragging() {
+                return;
+            }
+            if let Some(id) = click_target {
+                this.extend_selection(&move_task_id, id, event.position, cx);
+            }
+        },
+    ));
+
+    let mouseup_task_id = task_id.to_string();
+    let canvas_area = canvas_area.on_mouse_up(
+        MouseButton::Left,
+        cx.listener(move |this, _: &MouseUpEvent, _window, cx| {
+            if let Some(id) = click_target {
+                this.finish_selection(&mouseup_task_id, id, cx);
+            }
+        }),
+    );
+
+    let scroll_task_id = task_id.to_string();
+    let canvas_area = canvas_area.on_scroll_wheel(cx.listener(
+        move |this, event: &ScrollWheelEvent, _window, cx| {
+            if let Some(id) = click_target {
+                this.handle_pane_scroll(&scroll_task_id, id, event, cx);
+            }
+        },
+    ));
+
     let canvas_area = canvas_area.child(canvas_el);
 
     let tab_bar = render_pane_tab_bar(task_id, node, pane_status, is_focused_leaf, cx);
