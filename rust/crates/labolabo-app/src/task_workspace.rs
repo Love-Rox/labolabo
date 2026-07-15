@@ -44,6 +44,7 @@ use crate::git_pane::GitPaneState;
 use crate::grid;
 use crate::render::RenderSpec;
 use crate::selection::Selection;
+use crate::theme;
 
 /// See `app::EVENT_POLL_TIMEOUT`'s Wave 5b-2 doc comment (unchanged):
 /// how long the redraw-bridge thread blocks on `recv_event` between checks
@@ -55,21 +56,21 @@ const EVENT_POLL_TIMEOUT: Duration = Duration::from_millis(250);
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 
 /// Accent color for the focused pane's frame border.
-const FOCUS_BORDER_COLOR: u32 = 0x5e9eff;
+const FOCUS_BORDER_COLOR: u32 = theme::ACCENT;
 /// Frame border color for every other (unfocused) pane.
-const IDLE_BORDER_COLOR: u32 = 0x1c1c1c;
+const IDLE_BORDER_COLOR: u32 = theme::surface::STROKE;
 
 /// Drop-zone highlight for a tab/pane **move** (plan §3's "ドロップゾーンの
 /// ハイライト表示"), translucent blue -- the same hue as [`FOCUS_BORDER_COLOR`]
 /// so "this pane" and "the drop target" read as one visual family, alpha'd
 /// down (`4d` = ~30%) so terminal content underneath stays legible.
-const MOVE_DROP_HIGHLIGHT_COLOR: u32 = 0x5e9eff4d;
+const MOVE_DROP_HIGHLIGHT_COLOR: u32 = theme::with_alpha(theme::dnd::MOVE, 0x4d);
 /// Drop-zone highlight for an OS file/folder **insert** into a terminal
 /// (`plans/012` §3.1's "ファイル挿入" indicator) -- a distinct amber hue from
 /// [`MOVE_DROP_HIGHLIGHT_COLOR`] so "move a pane" and "insert a path" never
 /// look like the same affordance, per §3.1's explicit "別スタイルにして
 /// 「移動」と「ファイル挿入」を区別する" requirement.
-const FILE_DROP_HIGHLIGHT_COLOR: u32 = 0xffa5004d;
+const FILE_DROP_HIGHLIGHT_COLOR: u32 = theme::with_alpha(theme::dnd::FILE_INSERT, 0x4d);
 
 /// Payload of an in-progress tab-chip drag (`render_pane_tab_bar`'s
 /// `.on_drag`): identifies the dragged tab by [`PaneId`]. `move_pane` (the
@@ -95,9 +96,9 @@ impl Render for TabDragPreview {
             .px_2()
             .py_1()
             .rounded_sm()
-            .bg(rgb(0x454545))
-            .text_color(rgb(0xe5e5e5))
-            .text_size(px(11.0))
+            .bg(rgb(theme::surface::ACTIVE))
+            .text_color(rgb(theme::text::PRIMARY))
+            .text_size(px(theme::font_size::CAPTION))
             .child(self.0.clone())
     }
 }
@@ -155,11 +156,11 @@ pub struct PaneDragHover {
 pub(crate) fn status_dot_color(status: AgentStatus) -> Option<u32> {
     match status {
         AgentStatus::None => None,
-        AgentStatus::Starting => Some(0xffa500), // orange: starting up
-        AgentStatus::Running => Some(0x30d158),  // green: thinking/tool use
-        AgentStatus::WaitingForInput => Some(0xffd60a), // yellow: needs attention
-        AgentStatus::Idle => Some(0x8e8e93),     // gray: done, waiting
-        AgentStatus::Ended => Some(0x555555),    // dark gray: session ended
+        AgentStatus::Starting => Some(theme::status::STARTING),
+        AgentStatus::Running => Some(theme::status::RUNNING),
+        AgentStatus::WaitingForInput => Some(theme::status::WAITING),
+        AgentStatus::Idle => Some(theme::status::IDLE),
+        AgentStatus::Ended => Some(theme::status::ENDED),
     }
 }
 
@@ -612,7 +613,7 @@ pub fn render_tile(
             .ml(px(-(DIVIDER_HIT_WIDTH / 2.0)))
             .w(px(DIVIDER_HIT_WIDTH))
             .cursor(CursorStyle::ResizeLeftRight)
-            .hover(|el| el.bg(rgba(0x5e9eff66)))
+            .hover(|el| el.bg(rgba(theme::with_alpha(theme::ACCENT, 0x66))))
     } else {
         div()
             .id(divider_id)
@@ -623,7 +624,7 @@ pub fn render_tile(
             .mt(px(-(DIVIDER_HIT_WIDTH / 2.0)))
             .h(px(DIVIDER_HIT_WIDTH))
             .cursor(CursorStyle::ResizeUpDown)
-            .hover(|el| el.bg(rgba(0x5e9eff66)))
+            .hover(|el| el.bg(rgba(theme::with_alpha(theme::ACCENT, 0x66))))
     };
     let divider = divider.on_drag(
         DividerDragPayload {
@@ -904,7 +905,15 @@ fn render_leaf(
 
     let canvas_area = canvas_area.child(canvas_el);
 
-    let tab_bar = render_pane_tab_bar(task_id, node, pane_status, pane_usage, is_focused_leaf, cx);
+    let tab_bar = render_pane_tab_bar(
+        task_id,
+        node,
+        pane_status,
+        pane_usage,
+        spec,
+        is_focused_leaf,
+        cx,
+    );
 
     let mut leaf = div()
         // A positioning context for the absolutely-positioned drop-zone
@@ -1013,12 +1022,16 @@ fn move_drop_highlight_overlay(edge: DropEdge) -> impl IntoElement {
 }
 
 /// One leaf's tab bar. Identical to wave 5b-2's `app::render_pane_tab_bar`
-/// other than threading `task_id` through both click handlers.
+/// other than threading `task_id` through both click handlers, plus
+/// (`plans/013` §4) the selected tab's `ACCENT` top border and the usage
+/// label's terminal-font `CAPTION` styling (needs `spec`).
+#[allow(clippy::too_many_arguments)]
 fn render_pane_tab_bar(
     task_id: &str,
     node: &TileNode,
     pane_status: &HashMap<PaneId, AgentStatus>,
     pane_usage: &HashMap<PaneId, AgentUsage>,
+    spec: &RenderSpec,
     is_focused: bool,
     cx: &mut Context<LaboLaboApp>,
 ) -> impl IntoElement {
@@ -1030,7 +1043,11 @@ fn render_pane_tab_bar(
         .items_center()
         .h(px(grid::TAB_BAR_HEIGHT))
         .w_full()
-        .bg(rgb(if is_focused { 0x2f2f2f } else { 0x232323 }))
+        .bg(rgb(if is_focused {
+            theme::surface::RAISED
+        } else {
+            theme::surface::SUNKEN
+        }))
         .px_1()
         .gap_1()
         .children(node.panes.iter().map(|pane| {
@@ -1062,16 +1079,27 @@ fn render_pane_tab_bar(
                 .gap_1()
                 .px_2()
                 .rounded_sm()
-                .when(selected, |el| el.bg(rgb(0x454545)))
-                .when(!selected, |el| el.bg(rgb(0x333333)))
+                // `plans/013` §4: the selected tab connects to the terminal
+                // below it via an `ACCENT` top border, on top of the
+                // `ACTIVE` fill; unselected tabs are plain `RAISED`, no
+                // border -- both switches are instant (no easing), per
+                // this function's own doc comment on tab-switch being
+                // deliberately unadorned.
+                .when(selected, |el| {
+                    el.bg(rgb(theme::surface::ACTIVE))
+                        .border_t(px(2.0))
+                        .border_color(rgb(theme::ACCENT))
+                })
+                .when(!selected, |el| el.bg(rgb(theme::surface::RAISED)))
                 .when_some(status_color, |el, color| {
                     el.child(div().w(px(6.0)).h(px(6.0)).rounded_full().bg(rgb(color)))
                 })
                 .when_some(usage_label, |el, label| {
                     el.child(
                         div()
-                            .text_size(px(9.0))
-                            .text_color(rgb(0x8a8a8a))
+                            .font(spec.font.clone())
+                            .text_size(px(theme::font_size::CAPTION))
+                            .text_color(rgb(theme::text::SECONDARY))
                             .child(label),
                     )
                 })
@@ -1086,7 +1114,8 @@ fn render_pane_tab_bar(
                 .child(
                     div()
                         .px_1()
-                        .text_color(rgb(0xe5e5e5))
+                        .text_color(rgb(theme::text::PRIMARY))
+                        .text_size(px(theme::font_size::LABEL))
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, _: &MouseDownEvent, window, cx| {
@@ -1098,7 +1127,7 @@ fn render_pane_tab_bar(
                 .child(
                     div()
                         .px_1()
-                        .text_color(rgb(0x999999))
+                        .text_color(rgb(theme::text::SECONDARY))
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, _: &MouseDownEvent, window, cx| {
@@ -1113,7 +1142,7 @@ fn render_pane_tab_bar(
             let add_task_id = task_id.to_string();
             div()
                 .px_2()
-                .text_color(rgb(0xe5e5e5))
+                .text_color(rgb(theme::text::PRIMARY))
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _: &MouseDownEvent, window, cx| {

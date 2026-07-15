@@ -53,6 +53,7 @@ use gpui::{
 use labolabo_core::TaskDatabase;
 
 use crate::app::LaboLaboApp;
+use crate::theme;
 
 /// Default scrollback-line-count -- re-exported from `labolabo_term` (the
 /// crate that actually owns what "scrollback" means) rather than redefined
@@ -134,12 +135,12 @@ pub fn adjust_scrollback_lines(current: usize, delta: i64) -> usize {
     next.clamp(MIN_SCROLLBACK_LINES as i64, MAX_SCROLLBACK_LINES as i64) as usize
 }
 
-const OVERLAY_BG: u32 = 0x000000b3; // ~70% black backdrop
-const PANEL_BG: u32 = 0x1e1e1e;
-const BORDER_COLOR: u32 = 0x2f2f2f;
-const BUTTON_BG: u32 = 0x2f2f2f;
-const TEXT_PRIMARY: u32 = 0xe5e5e5;
-const TEXT_SECONDARY: u32 = 0x8a8a8a;
+const OVERLAY_BG: u32 = theme::with_alpha(0x000000, 0xb3); // ~70% black backdrop
+const PANEL_BG: u32 = theme::surface::ROOT;
+const BORDER_COLOR: u32 = theme::surface::STROKE;
+const BUTTON_BG: u32 = theme::surface::RAISED;
+const TEXT_PRIMARY: u32 = theme::text::PRIMARY;
+const TEXT_SECONDARY: u32 = theme::text::SECONDARY;
 
 /// Renders the settings overlay (backdrop + centered panel) when
 /// `app.settings_open()` -- callers append this as the last child of the
@@ -283,7 +284,7 @@ fn toggle_row(
         )
         .child(
             div()
-                .text_size(px(11.0))
+                .text_size(px(theme::font_size::CAPTION))
                 .text_color(rgb(TEXT_SECONDARY))
                 .child(footer),
         )
@@ -319,7 +320,7 @@ fn scrollback_row(current: usize, cx: &mut Context<LaboLaboApp>) -> impl IntoEle
         )
         .child(
             div()
-                .text_size(px(11.0))
+                .text_size(px(theme::font_size::CAPTION))
                 .text_color(rgb(TEXT_SECONDARY))
                 .child("変更は次に開くタブから反映されます（既存のタブには影響しません）。"),
         )
@@ -335,7 +336,7 @@ fn stepper_button(
         .px_2()
         .py_1()
         .rounded_sm()
-        .bg(rgb(0x3a3a3a))
+        .bg(rgb(theme::surface::ACTIVE))
         .text_color(rgb(TEXT_PRIMARY))
         .on_mouse_down(
             MouseButton::Left,
