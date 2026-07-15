@@ -48,6 +48,7 @@
 //! defaults to its tree's first leaf's selected tab, see
 //! `TaskWorkspace::new`'s doc comment).
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -75,6 +76,7 @@ use crate::grid;
 use crate::hooks::{self, HookRuntime};
 use crate::ime;
 use crate::keys::keystroke_to_bytes;
+use crate::motion::DotAnimState;
 use crate::mouse_report::{self, MouseAction, MouseButtonKind, MouseMods};
 use crate::new_task;
 use crate::paste;
@@ -330,12 +332,70 @@ impl LaboLaboApp {
             this.activate_git_pane(&id, cx);
         }
 
+        this.dev_force_running_if_requested(cx);
+
         cx.observe_window_bounds(window, |_this, _window, cx| {
             cx.notify();
         })
         .detach();
 
         this
+    }
+
+    /// Development-only hook for `plans/014`'s M2 power verification
+    /// ("Running 状態はテスト用に status を直接注入する開発フックで再現し
+    /// てよい"): with `LABOLABO_DEV_FORCE_RUNNING=1` set, forces a Task's
+    /// first pane into [`AgentStatus::Running`] immediately at startup, so
+    /// the status-dot breathing animation (`motion::status_dot_element`)
+    /// can be observed/measured without a real Claude Code agent attached
+    /// and without any synthetic keyboard/mouse input (this repo's
+    /// automation policy forbids the latter). If no Task exists yet (a
+    /// throwaway `LABOLABO_RS_DATA_DIR`'s fresh database, the common case
+    /// for this verification), creates one via the exact same
+    /// `Task::new_attached`/`add_task_and_select` path `sidebar::
+    /// icon_button`'s attached-Task button uses (real code, real PTY
+    /// spawn -- just skipping the
+    /// (forbidden) UI click that normally triggers it), at a scratch temp
+    /// directory. A no-op (and the env var check itself is the only cost)
+    /// whenever the var isn't set -- never reachable from the real hooks/
+    /// control-protocol event paths, so it has no effect on normal use.
+    fn dev_force_running_if_requested(&mut self, cx: &mut Context<Self>) {
+        if std::env::var("LABOLABO_DEV_FORCE_RUNNING").as_deref() != Ok("1") {
+            return;
+        }
+        if self.selected_task_id.is_none() {
+            let dir = std::env::temp_dir()
+                .join(format!("labolabo-dev-force-running-{}", std::process::id()));
+            if std::fs::create_dir_all(&dir).is_err() {
+                return;
+            }
+            let (repo_key, repo_root, repo_name) = new_task::resolve_attached_repo(&dir);
+            let layout = single_terminal_layout();
+            let sort_order = self.next_sort_order();
+            let task = Task::new_attached(
+                repo_key,
+                repo_root,
+                repo_name,
+                dir.to_string_lossy().into_owned(),
+                layout,
+                sort_order,
+            );
+            self.add_task_and_select(task, cx);
+        }
+
+        let Some(task_id) = self.selected_task_id.clone() else {
+            return;
+        };
+        let Some(workspace) = self.workspaces.get_mut(&task_id) else {
+            return;
+        };
+        let Some(pane_id) = workspace.model.panes().first().map(|p| p.id) else {
+            return;
+        };
+        workspace.pane_status.insert(pane_id, AgentStatus::Running);
+        eprintln!(
+            "labolabo-app: LABOLABO_DEV_FORCE_RUNNING=1 -- forcing task {task_id} pane {pane_id:?} to AgentStatus::Running"
+        );
     }
 
     // MARK: - read-only accessors (for `sidebar::render`)
@@ -760,6 +820,16 @@ impl LaboLaboApp {
             .values()
             .copied()
             .max_by_key(|status| status_priority(*status))
+    }
+
+    /// `task_id`'s sidebar-row status-dot crossfade state (`plans/014` M1,
+    /// `TaskWorkspace::dot_anim`) -- `sidebar::render`'s read-only access to
+    /// it, mirroring `task_agent_status` right above. `None` only when
+    /// `task_id` has no loaded workspace (never selected yet).
+    pub(crate) fn task_dot_anim(&self, task_id: &str) -> Option<&Cell<DotAnimState>> {
+        self.workspaces
+            .get(task_id)
+            .map(|workspace| &workspace.dot_anim)
     }
 
     // MARK: - Task selection
@@ -2763,8 +2833,15 @@ fn status_priority(status: AgentStatus) -> u8 {
 }
 
 impl Render for LaboLaboApp {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let sidebar_el = sidebar::render(self, cx);
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Running dot breathing (`plans/014` M2) is gated on the window
+        // actually being the one the user is looking at -- see
+        // `motion::status_dot_element`'s doc comment for the power
+        // rationale (an unfocused/minimized window would otherwise still
+        // pay for a repeating `request_animation_frame` loop it can't see).
+        let breathing_enabled = window.is_window_active() && !crate::motion::reduce_motion();
+
+        let sidebar_el = sidebar::render(self, breathing_enabled, cx);
 
         let workspace_el = if let Some(task_id) = self.selected_task_id.clone() {
             if let Some(workspace) = self.workspaces.get(&task_id) {
@@ -2785,6 +2862,7 @@ impl Render for LaboLaboApp {
                     active_preedit.as_ref(),
                     pane_drag_hover,
                     self.divider_drag_active,
+                    breathing_enabled,
                     cx,
                 )
             } else {
