@@ -27,11 +27,14 @@ use std::time::Duration;
 use futures::channel::mpsc;
 use futures::StreamExt;
 use gpui::{
-    canvas, div, prelude::*, px, relative, rgb, AnyElement, Context, ElementInputHandler,
-    FocusHandle, IntoElement, MouseButton, MouseDownEvent, SharedString, Task as GpuiTask,
+    canvas, div, prelude::*, px, relative, rgb, rgba, AnyElement, Context, DragMoveEvent,
+    ElementInputHandler, ExternalPaths, FocusHandle, IntoElement, MouseButton, MouseDownEvent,
+    Render, SharedString, Task as GpuiTask, Window,
 };
 
-use labolabo_core::{AgentStatus, PaneId, PaneTilingModel, TileNode, TileOrientation};
+use labolabo_core::{
+    AgentStatus, DropEdge, PaneId, PaneKind, PaneTilingModel, TileNode, TileOrientation,
+};
 use labolabo_term::{TermEvent, Terminal};
 
 use crate::app::{LaboLaboApp, PreeditState};
@@ -51,6 +54,63 @@ const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const FOCUS_BORDER_COLOR: u32 = 0x5e9eff;
 /// Frame border color for every other (unfocused) pane.
 const IDLE_BORDER_COLOR: u32 = 0x1c1c1c;
+
+/// Drop-zone highlight for a tab/pane **move** (plan §3's "ドロップゾーンの
+/// ハイライト表示"), translucent blue -- the same hue as [`FOCUS_BORDER_COLOR`]
+/// so "this pane" and "the drop target" read as one visual family, alpha'd
+/// down (`4d` = ~30%) so terminal content underneath stays legible.
+const MOVE_DROP_HIGHLIGHT_COLOR: u32 = 0x5e9eff4d;
+/// Drop-zone highlight for an OS file/folder **insert** into a terminal
+/// (`plans/012` §3.1's "ファイル挿入" indicator) -- a distinct amber hue from
+/// [`MOVE_DROP_HIGHLIGHT_COLOR`] so "move a pane" and "insert a path" never
+/// look like the same affordance, per §3.1's explicit "別スタイルにして
+/// 「移動」と「ファイル挿入」を区別する" requirement.
+const FILE_DROP_HIGHLIGHT_COLOR: u32 = 0xffa5004d;
+
+/// Payload of an in-progress tab-chip drag (`render_pane_tab_bar`'s
+/// `.on_drag`): identifies the dragged tab by [`PaneId`]. `move_pane` (the
+/// core model op this eventually calls) only needs a source `PaneId` and a
+/// target `PaneId` -- see [`crate::app::LaboLaboApp::finish_pane_drag_drop`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TabDragPayload {
+    pub source_pane_id: PaneId,
+}
+
+/// The floating view gpui renders under the cursor while a tab chip is
+/// being dragged -- just the tab's title in a small chip, echoing
+/// `render_pane_tab_bar`'s own chip styling so the drag preview reads as
+/// "a copy of the thing you picked up" (mirrors AppKit's default drag-image
+/// behavior, which `PaneTabChip.onDrag` got for free from `NSItemProvider`;
+/// gpui has no default image for a value-only drag, so this view is what
+/// supplies one).
+pub struct TabDragPreview(pub SharedString);
+
+impl Render for TabDragPreview {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .bg(rgb(0x454545))
+            .text_color(rgb(0xe5e5e5))
+            .text_size(px(11.0))
+            .child(self.0.clone())
+    }
+}
+
+/// Which leaf (identified by its anchor -- currently selected -- pane id)
+/// is the current tab-drag's drop target, and which [`DropEdge`] zone of it
+/// -- `crate::app::LaboLaboApp::update_pane_drag_hover`'s output, consumed
+/// by `render_leaf` to paint [`MOVE_DROP_HIGHLIGHT_COLOR`] over the right
+/// quadrant. `None` on [`TaskWorkspace`] means no tab drag is currently
+/// hovering any leaf of this Task (either no drag is active, or the pointer
+/// isn't over any of this Task's leaves, or it's hovering a
+/// meaningless-to-drop-here zone -- see that method's doc comment).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PaneDragHover {
+    pub target_pane_id: PaneId,
+    pub edge: DropEdge,
+}
 
 /// Status-dot color per [`AgentStatus`] -- deliberately minimal (a plain
 /// colored dot, per the wave brief: "見た目は最小限"), not the Swift
@@ -116,6 +176,11 @@ pub struct TaskWorkspace {
     /// with no entry (never received an event, or was just spawned) shows
     /// no dot -- same as `AgentStatus::None`'s Swift label ("—").
     pub pane_status: HashMap<PaneId, AgentStatus>,
+    /// This Task's live tab-drag drop-target highlight, if a tab drag is
+    /// currently hovering one of its leaves -- see [`PaneDragHover`]'s doc
+    /// comment. Purely UI/render state (never persisted, never affects
+    /// `model`), rebuilt continuously while a drag is in flight.
+    pub pane_drag_hover: Option<PaneDragHover>,
 }
 
 impl TaskWorkspace {
@@ -141,6 +206,7 @@ impl TaskWorkspace {
             runtimes: HashMap::new(),
             focused_pane,
             pane_status: HashMap::new(),
+            pane_drag_hover: None,
         }
     }
 }
@@ -247,6 +313,7 @@ pub fn render_tile(
     spec: &RenderSpec,
     focus_handle: &FocusHandle,
     active_preedit: Option<&PreeditState>,
+    pane_drag_hover: Option<PaneDragHover>,
     cx: &mut Context<LaboLaboApp>,
 ) -> AnyElement {
     if node.is_leaf() {
@@ -259,6 +326,7 @@ pub fn render_tile(
             spec,
             focus_handle,
             active_preedit,
+            pane_drag_hover,
             cx,
         );
     }
@@ -276,6 +344,7 @@ pub fn render_tile(
             spec,
             focus_handle,
             active_preedit,
+            pane_drag_hover,
             cx,
         );
     };
@@ -292,6 +361,7 @@ pub fn render_tile(
         spec,
         focus_handle,
         active_preedit,
+        pane_drag_hover,
         cx,
     );
     let second_el = render_tile(
@@ -303,6 +373,7 @@ pub fn render_tile(
         spec,
         focus_handle,
         active_preedit,
+        pane_drag_hover,
         cx,
     );
 
@@ -345,11 +416,14 @@ fn render_leaf(
     spec: &RenderSpec,
     focus_handle: &FocusHandle,
     active_preedit: Option<&PreeditState>,
+    pane_drag_hover: Option<PaneDragHover>,
     cx: &mut Context<LaboLaboApp>,
 ) -> AnyElement {
     let is_focused_leaf = node.panes.iter().any(|p| p.id == focused_pane);
     let selected_id = node.selected_pane().map(|p| p.id);
     let runtime = selected_id.and_then(|id| runtimes.get(&id));
+    let is_terminal_leaf = node.selected_pane().map(|p| p.kind) == Some(PaneKind::Terminal);
+    let leaf_pane_ids: Vec<PaneId> = node.panes.iter().map(|p| p.id).collect();
     // This leaf's selected tab *is* the app's single focused pane -- the
     // only canvas that should register the IME input handler / paint the
     // preedit overlay this frame (there's exactly one focused pane app-
@@ -427,7 +501,10 @@ fn render_leaf(
 
     let tab_bar = render_pane_tab_bar(task_id, node, pane_status, is_focused_leaf, cx);
 
-    div()
+    let mut leaf = div()
+        // A positioning context for the absolutely-positioned drop-zone
+        // highlight overlay below (`move_drop_highlight_overlay`).
+        .relative()
         .flex()
         .flex_col()
         .size_full()
@@ -438,8 +515,96 @@ fn render_leaf(
             IDLE_BORDER_COLOR
         }))
         .child(tab_bar)
-        .child(canvas_area)
-        .into_any_element()
+        .child(canvas_area);
+
+    // DnD drop-target wiring (`plans/012-task-model-and-control-cli.md`
+    // §3): this leaf accepts both an in-app tab-chip drag
+    // (`TabDragPayload`, move/split/merge -- `on_drag`/`on_drag_move`/
+    // `on_drop` on `InteractiveElement` require no `.id()`, unlike the
+    // *source* chip's `on_drag`, see `render_pane_tab_bar`) and an OS
+    // file/folder drag (gpui's `ExternalPaths`, terminal leaves only --
+    // §3.1). `selected_id` (this leaf's anchor/target pane) doubles as the
+    // leaf's drop-target identity everywhere below, matching
+    // `PaneFrameView.performDragOperation`'s `node.selectedPane?.id` use.
+    if let Some(anchor_pane_id) = selected_id {
+        let hover_task_id = task_id.to_string();
+        let hover_pane_ids = leaf_pane_ids.clone();
+        leaf = leaf.on_drag_move::<TabDragPayload>(cx.listener(
+            move |app, event: &DragMoveEvent<TabDragPayload>, _window, cx| {
+                app.update_pane_drag_hover(
+                    &hover_task_id,
+                    anchor_pane_id,
+                    &hover_pane_ids,
+                    event,
+                    cx,
+                );
+            },
+        ));
+
+        let drop_task_id = task_id.to_string();
+        leaf = leaf.on_drop::<TabDragPayload>(cx.listener(
+            move |app, payload: &TabDragPayload, window, cx| {
+                app.finish_pane_drag_drop(&drop_task_id, anchor_pane_id, payload, window, cx);
+            },
+        ));
+
+        // §3.1: files dropped on a non-terminal pane (diff/files/commits)
+        // are "無反応" -- `can_drop` gates the drop itself, `drag_over`
+        // gates the visual feedback, matching each other so the hover
+        // highlight never lies about whether a drop will do anything.
+        leaf = leaf
+            .can_drop(move |any, _window, _cx| {
+                any.downcast_ref::<ExternalPaths>()
+                    .map(|_| is_terminal_leaf)
+                    .unwrap_or(true)
+            })
+            .drag_over::<ExternalPaths>(move |style, _paths, _window, _cx| {
+                if is_terminal_leaf {
+                    style.bg(rgba(FILE_DROP_HIGHLIGHT_COLOR))
+                } else {
+                    style
+                }
+            });
+
+        let file_task_id = task_id.to_string();
+        leaf = leaf.on_drop::<ExternalPaths>(cx.listener(
+            move |app, paths: &ExternalPaths, _window, cx| {
+                app.handle_file_drop(&file_task_id, anchor_pane_id, paths, cx);
+            },
+        ));
+
+        if let Some(hover) = pane_drag_hover {
+            if hover.target_pane_id == anchor_pane_id {
+                leaf = leaf.child(move_drop_highlight_overlay(hover.edge));
+            }
+        }
+    }
+
+    leaf.into_any_element()
+}
+
+/// The tab/pane-move drag's drop-zone highlight for one [`DropEdge`]
+/// quadrant: half the leaf for `Left`/`Right`/`Top`/`Bottom`, the whole
+/// leaf for `Center` (tab merge) -- mirrors `PaneFrameView.highlightRect
+/// (for:)`. Expressed purely in fractions of the parent (`relative(..)`),
+/// not pixel bounds, so it needs no separate knowledge of the leaf's actual
+/// on-screen size -- it just fills the right quadrant of whatever the
+/// parent (a `.relative()` leaf div) currently measures.
+fn move_drop_highlight_overlay(edge: DropEdge) -> impl IntoElement {
+    let (left, top, width, height): (f32, f32, f32, f32) = match edge {
+        DropEdge::Left => (0.0, 0.0, 0.5, 1.0),
+        DropEdge::Right => (0.5, 0.0, 0.5, 1.0),
+        DropEdge::Top => (0.0, 0.0, 1.0, 0.5),
+        DropEdge::Bottom => (0.0, 0.5, 1.0, 0.5),
+        DropEdge::Center => (0.0, 0.0, 1.0, 1.0),
+    };
+    div()
+        .absolute()
+        .left(relative(left))
+        .top(relative(top))
+        .w(relative(width))
+        .h(relative(height))
+        .bg(rgba(MOVE_DROP_HIGHLIGHT_COLOR))
 }
 
 /// One leaf's tab bar. Identical to wave 5b-2's `app::render_pane_tab_bar`
@@ -472,7 +637,15 @@ fn render_pane_tab_bar(
                 .get(&pane_id)
                 .copied()
                 .and_then(status_dot_color);
+            // `.id(..)` promotes this chip to `Stateful<Div>`, the only
+            // element kind `.on_drag` (`StatefulInteractiveElement`) is
+            // available on -- mirrors Swift's `PaneTabChip.onDrag`, one drag
+            // source per chip (`plans/012-task-model-and-control-cli.md`
+            // §3's "各チップが個別に onDrag").
+            let chip_id: SharedString = format!("tab-chip-{task_id}-{pane_id:?}").into();
+            let preview_title = title.clone();
             div()
+                .id(chip_id)
                 .flex()
                 .flex_row()
                 .items_center()
@@ -484,6 +657,14 @@ fn render_pane_tab_bar(
                 .when_some(status_color, |el, color| {
                     el.child(div().w(px(6.0)).h(px(6.0)).rounded_full().bg(rgb(color)))
                 })
+                .on_drag(
+                    TabDragPayload {
+                        source_pane_id: pane_id,
+                    },
+                    move |_payload, _offset, _window, cx| {
+                        cx.new(|_cx| TabDragPreview(preview_title.clone()))
+                    },
+                )
                 .child(
                     div()
                         .px_1()

@@ -110,8 +110,8 @@ pub mod hooks;
 pub use agent_status::{AgentStatus, AgentStatusEvent};
 pub use git_models::{Change, GitFileEntry, GitStatus, Kind};
 pub use tiling::{
-    DropEdge, LayoutPreset, NodeId, PaneId, PaneItem, PaneKind, PanePayload, PaneTilingActions,
-    PaneTilingModel, TileLayout, TileNode, TileOrientation,
+    drop_edge_for_point, DropEdge, LayoutPreset, NodeId, PaneId, PaneItem, PaneKind, PanePayload,
+    PaneTilingActions, PaneTilingModel, TileLayout, TileNode, TileOrientation,
 };
 pub use transcript_usage::AgentUsage;
 pub use unified_diff::{DiffHunk, DiffLine, FileDiff, LineKind};
@@ -197,8 +197,8 @@ pub mod branch_naming;
 pub mod hook_settings;
 
 pub use hook_settings::{
-    claude_resume_command, hook_command, merge_hooks, shell_quote, socket_path_from_uuid,
-    MergedSettings, HOOK_EVENTS,
+    claude_resume_command, hook_command, merge_hooks, quote_dropped_paths, shell_quote,
+    socket_path_from_uuid, MergedSettings, HOOK_EVENTS,
 };
 
 // `store::agent_bindings`: the Task-level (docs/hooks-protocol.md §6(a))
@@ -233,3 +233,14 @@ pub use control_protocol::{
     control_socket_path_from_uuid, parse_request, parse_response, resolve_socket_path,
     resolve_target_task, resolve_task_flag, ControlCommand, ControlRequest, ControlResponse,
 };
+
+// Drag & drop wave (`plans/012-task-model-and-control-cli.md` §3): pure
+// ordering logic for the sidebar's Task reorder DnD. Appended at the tail,
+// same reasoning as every other wave block in this file. The pane-tiling
+// drop-edge geometry (`drop_edge_for_point`) and terminal file-drop path
+// encoding (`quote_dropped_paths`) live alongside their existing modules
+// (`tiling`/`hook_settings`, exported above) rather than getting a new
+// module each -- see those functions' doc comments.
+pub mod task_order;
+
+pub use task_order::reorder_task_ids;
