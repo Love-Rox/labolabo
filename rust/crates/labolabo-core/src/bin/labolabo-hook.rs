@@ -33,6 +33,15 @@
 //!    docs/hooks-protocol.md §3.3: "接続失敗・パス過長などあらゆる失敗も
 //!    exit(0)（hook の失敗で Claude を止めない）", matching Swift's
 //!    `HookForwarder.forward`, which calls `exit(0)` on every branch.
+//!
+//! `labolabo_core::forward_hook` is `#[cfg(unix)]` (its AF_UNIX transport
+//! has no Windows counterpart yet -- see `hooks.rs`'s module doc comment),
+//! so step 4 is split behind a small `forward` shim: the `#[cfg(unix)]` arm
+//! calls the real `forward_hook`, the `#[cfg(not(unix))]` arm is a no-op
+//! stub (Windows hook forwarding is future work, not this wave's job -- see
+//! rust/README.md's known-scope-limits section). Either way `main` still
+//! always exits 0, preserving the "hook の失敗で Claude を止めない" contract
+//! on every platform.
 
 use std::collections::HashMap;
 use std::io::Read;
@@ -53,8 +62,18 @@ fn main() {
 
     let env: HashMap<String, String> = std::env::vars().collect();
 
-    let _ = labolabo_core::forward_hook(&socket_path, &stdin_bytes, &env);
+    forward(&socket_path, &stdin_bytes, &env);
 
     // Always succeed: a hook's failure must never block Claude Code.
     std::process::exit(0);
+}
+
+#[cfg(unix)]
+fn forward(socket_path: &str, stdin_bytes: &[u8], env: &HashMap<String, String>) {
+    let _ = labolabo_core::forward_hook(socket_path, stdin_bytes, env);
+}
+
+#[cfg(not(unix))]
+fn forward(_socket_path: &str, _stdin_bytes: &[u8], _env: &HashMap<String, String>) {
+    eprintln!("labolabo-hook: forwarding is not implemented on this platform yet");
 }

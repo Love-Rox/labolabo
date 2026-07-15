@@ -10,6 +10,15 @@
 //! They are headless (no window): a PTY child writes to the grid, and we
 //! assert on the extracted `GridSnapshot`. That is the whole point of the
 //! plain-data snapshot design -- the render surface is testable without a UI.
+//!
+//! Whole file is `#[cfg(unix)]`: every test drives the spawned child with a
+//! POSIX shell command (`TermSession::spawn_with_cwd_options`'s `Some(cmd)`
+//! path hardcodes `/bin/sh -c <cmd>` -- see `src/session.rs`), which does
+//! not exist on Windows. A `cmd.exe`/PowerShell-equivalent Windows shell
+//! path is future work (Windows PTY spawning in general is out of scope for
+//! this wave -- see rust/README.md's known-scope-limits section), not a
+//! rewrite to attempt without a Windows machine to verify it on.
+#![cfg(unix)]
 
 use std::time::Duration;
 
