@@ -465,6 +465,21 @@ impl PaneItem {
     }
 }
 
+/// Minimum a split node's `ratio` (first child's fraction) may be set to,
+/// interactively or otherwise -- via [`TileNode::set_ratio`]/
+/// [`PaneTilingModel::set_split_ratio`]. Keeps a dragged divider from
+/// collapsing a child to (or past) zero width/height. Mirrors the clamp
+/// `task_workspace::render_tile` (the Rust UI layer) already applied only
+/// at *render* time (`(node.ratio as f32).clamp(0.05, 0.95)`) before this
+/// constant existed -- centralizing it here means a dragged ratio is
+/// clamped once, at the source, so the persisted value itself can never
+/// drift outside range either (previously only the on-screen split ever
+/// respected this bound; a ratio written directly to `TileNode::ratio` by
+/// some other caller could not).
+pub const MIN_SPLIT_RATIO: f64 = 0.05;
+/// Maximum a split node's `ratio` may be set to -- see [`MIN_SPLIT_RATIO`].
+pub const MAX_SPLIT_RATIO: f64 = 0.95;
+
 /// A node in the binary tile tree: a leaf (tab group, `panes` non-empty) or
 /// a 2-way split (`panes` empty, two `children`).
 #[derive(Debug, Clone, PartialEq)]
@@ -606,6 +621,47 @@ impl TileNode {
         self.children
             .iter_mut()
             .find_map(|c| c.find_parent_mut(child_id))
+    }
+
+    /// The node (leaf or split) whose own `id` is `node_id`, anywhere in
+    /// this subtree, mutably -- `None` if not found. Unlike
+    /// [`Self::find_leaf_mut`]/[`Self::find_parent_mut`] (which look a node
+    /// up by a *leaf's* [`PaneId`] or by a *child's* identity respectively),
+    /// this matches a node's own [`NodeId`] directly -- what an interactive
+    /// divider-drag handler has on hand (a split node's own `id`, read once
+    /// from the tree when the drag starts). Used by
+    /// [`PaneTilingModel::set_split_ratio`].
+    pub fn find_node_mut(&mut self, node_id: NodeId) -> Option<&mut TileNode> {
+        if self.id == node_id {
+            return Some(self);
+        }
+        self.children
+            .iter_mut()
+            .find_map(|c| c.find_node_mut(node_id))
+    }
+
+    /// Sets this node's `ratio`, clamped to between [`MIN_SPLIT_RATIO`] and
+    /// [`MAX_SPLIT_RATIO`]. A non-finite
+    /// (`NaN`/`inf`) input -- reachable from a degenerate divide-by-zero
+    /// pixel computation mid-drag, e.g. a momentarily zero-width/height
+    /// split container during a concurrent window resize -- is ignored
+    /// outright, leaving the existing ratio untouched, rather than
+    /// corrupting it. Returns the ratio actually stored (the clamped new
+    /// value, or the unchanged old one for a rejected non-finite input), so
+    /// a caller driving a live divider drag can paint the split at exactly
+    /// what was applied even where it differs from what was asked for
+    /// (clamped at an edge).
+    ///
+    /// Meaningful only on a split node -- a leaf's `ratio` field is unused
+    /// (always its construction-time default, `0.5`) and irrelevant to
+    /// rendering, but this method doesn't distinguish (mirrors every other
+    /// direct-field-write this struct already exposes: `ratio` itself is
+    /// `pub`).
+    pub fn set_ratio(&mut self, ratio: f64) -> f64 {
+        if ratio.is_finite() {
+            self.ratio = ratio.clamp(MIN_SPLIT_RATIO, MAX_SPLIT_RATIO);
+        }
+        self.ratio
     }
 
     // MARK: mutations (operate on `self` as the node being changed)
@@ -1129,6 +1185,35 @@ impl PaneTilingModel {
     /// mutate a pane's title etc.).
     pub fn pane_mut(&mut self, pane_id: PaneId) -> Option<&mut PaneItem> {
         self.root.find_pane_mut(pane_id)
+    }
+
+    /// Updates a split node's `ratio` (e.g. from an interactive divider
+    /// drag), clamped via [`TileNode::set_ratio`]. Returns `false` (a
+    /// silent no-op) if `node_id` doesn't resolve to any node in this tree
+    /// -- e.g. the tree was restructured (a pane closed/moved) while a drag
+    /// was in flight; the caller simply stops applying further updates for
+    /// that now-stale drag rather than panicking or resurrecting a node.
+    ///
+    /// Deliberately does **not** `bump()`/fire `on_layout_changed`, mirroring
+    /// the Swift source's own documented design (see this struct's
+    /// `on_layout_changed` field doc comment: "Ratio changes (drag-resize)
+    /// are *not* routed through this model at all... the UI reads/writes
+    /// `TileNode.ratio` directly and snapshots+saves on drag end"). A ratio
+    /// change touches no tree structure, so there is nothing for a UI
+    /// reconcile pass to redo; firing a persistence callback on every one
+    /// of a drag's many per-frame ratio updates would also be wasteful --
+    /// the caller is expected to explicitly snapshot+persist once itself
+    /// when the drag ends (e.g. on mouse-up), not on every intermediate
+    /// ratio, exactly as the UI layer already does for a tab-drag-and-drop
+    /// move (see `finish_pane_drag_drop` in the Rust UI layer).
+    pub fn set_split_ratio(&mut self, node_id: NodeId, ratio: f64) -> bool {
+        match self.root.find_node_mut(node_id) {
+            Some(node) => {
+                node.set_ratio(ratio);
+                true
+            }
+            None => false,
+        }
     }
 }
 
@@ -1966,5 +2051,120 @@ mod tests {
             drop_edge_for_point(-1.0, 100.0, 0.0, 50.0),
             DropEdge::Center
         );
+    }
+
+    // MARK: - split ratio (interactive divider drag-resize, W5j #2). Not
+    // ported Swift tests -- the Swift source never routed ratio changes
+    // through the model at all (see `PaneTilingModel::set_split_ratio`'s
+    // doc comment), so there is no oracle behavior to match here; this is
+    // new Rust-only surface.
+
+    #[test]
+    fn set_ratio_stores_an_in_range_value_unchanged() {
+        let mut node = TileNode::split(TileOrientation::Horizontal, 0.5, vec![]);
+        assert_eq!(node.set_ratio(0.3), 0.3);
+        approx_eq(node.ratio, 0.3);
+    }
+
+    #[test]
+    fn set_ratio_clamps_below_the_minimum() {
+        let mut node = TileNode::split(TileOrientation::Horizontal, 0.5, vec![]);
+        assert_eq!(node.set_ratio(-1.0), MIN_SPLIT_RATIO);
+        assert_eq!(node.set_ratio(0.0), MIN_SPLIT_RATIO);
+        approx_eq(node.ratio, MIN_SPLIT_RATIO);
+    }
+
+    #[test]
+    fn set_ratio_clamps_above_the_maximum() {
+        let mut node = TileNode::split(TileOrientation::Horizontal, 0.5, vec![]);
+        assert_eq!(node.set_ratio(2.0), MAX_SPLIT_RATIO);
+        assert_eq!(node.set_ratio(1.0), MAX_SPLIT_RATIO);
+        approx_eq(node.ratio, MAX_SPLIT_RATIO);
+    }
+
+    #[test]
+    fn set_ratio_ignores_non_finite_input_and_keeps_the_prior_value() {
+        let mut node = TileNode::split(TileOrientation::Horizontal, 0.42, vec![]);
+        assert_eq!(node.set_ratio(f64::NAN), 0.42);
+        assert_eq!(node.set_ratio(f64::INFINITY), 0.42);
+        assert_eq!(node.set_ratio(f64::NEG_INFINITY), 0.42);
+        approx_eq(node.ratio, 0.42);
+    }
+
+    #[test]
+    fn find_node_mut_locates_the_root_split_by_its_own_node_id() {
+        let mut model = PaneTilingModel::default_layout();
+        let split_id = model.root.id;
+        let found = model
+            .root
+            .find_node_mut(split_id)
+            .expect("root finds itself");
+        assert_eq!(found.id, split_id);
+    }
+
+    #[test]
+    fn find_node_mut_locates_a_leaf_by_its_own_node_id() {
+        let mut model = PaneTilingModel::default_layout();
+        let leaf_node_id = model.root.leaves()[0].id;
+        let found = model
+            .root
+            .find_node_mut(leaf_node_id)
+            .expect("leaf's own id resolves via find_node_mut");
+        assert!(found.is_leaf());
+    }
+
+    #[test]
+    fn find_node_mut_unknown_id_returns_none() {
+        let mut model = PaneTilingModel::default_layout();
+        let other_tree = PaneTilingModel::default_layout();
+        assert!(model.root.find_node_mut(other_tree.root.id).is_none());
+    }
+
+    #[test]
+    fn set_split_ratio_updates_the_addressed_split_node() {
+        let mut model = PaneTilingModel::default_layout();
+        let split_id = model.root.id;
+        let before_revision = model.revision();
+        assert!(model.set_split_ratio(split_id, 0.7));
+        approx_eq(model.root.ratio, 0.7);
+        // Mirrors the Swift source: a ratio change never bumps `revision`
+        // (no tree-structure change, no reconcile needed) -- see
+        // `set_split_ratio`'s doc comment.
+        assert_eq!(model.revision(), before_revision);
+    }
+
+    #[test]
+    fn set_split_ratio_clamps_via_the_same_bounds_as_set_ratio() {
+        let mut model = PaneTilingModel::default_layout();
+        let split_id = model.root.id;
+        assert!(model.set_split_ratio(split_id, 10.0));
+        approx_eq(model.root.ratio, MAX_SPLIT_RATIO);
+    }
+
+    #[test]
+    fn set_split_ratio_unknown_node_id_is_a_silent_no_op() {
+        let mut model = PaneTilingModel::default_layout();
+        let original_ratio = model.root.ratio;
+        // A NodeId from an entirely different tree never resolves here.
+        let other_tree = PaneTilingModel::default_layout();
+        let foreign_id = other_tree.root.id;
+        assert!(!model.set_split_ratio(foreign_id, 0.9));
+        approx_eq(model.root.ratio, original_ratio);
+    }
+
+    #[test]
+    fn set_split_ratio_reaches_a_nested_split_not_just_the_root() {
+        let mut model = PaneTilingModel::default_layout();
+        // `default_layout`'s bottom row (`commits | files_and_diff`) is a
+        // split nested one level under the root -- addressing it exercises
+        // the recursive `find_node_mut` walk, not just the trivial
+        // self-match at the root.
+        let bottom_row = &model.root.children[1];
+        assert_eq!(bottom_row.orientation, TileOrientation::Horizontal);
+        let nested_id = bottom_row.id;
+        assert!(model.set_split_ratio(nested_id, 0.6));
+        approx_eq(model.root.children[1].ratio, 0.6);
+        // The root's own ratio is untouched.
+        approx_eq(model.root.ratio, 0.55);
     }
 }

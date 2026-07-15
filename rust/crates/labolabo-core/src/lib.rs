@@ -111,7 +111,8 @@ pub use agent_status::{AgentStatus, AgentStatusEvent};
 pub use git_models::{Change, GitFileEntry, GitStatus, Kind};
 pub use tiling::{
     drop_edge_for_point, DropEdge, LayoutPreset, NodeId, PaneId, PaneItem, PaneKind, PanePayload,
-    PaneTilingActions, PaneTilingModel, TileLayout, TileNode, TileOrientation,
+    PaneTilingActions, PaneTilingModel, TileLayout, TileNode, TileOrientation, MAX_SPLIT_RATIO,
+    MIN_SPLIT_RATIO,
 };
 pub use transcript_usage::AgentUsage;
 pub use unified_diff::{DiffHunk, DiffLine, FileDiff, LineKind};

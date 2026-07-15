@@ -54,8 +54,9 @@ use std::path::{Path, PathBuf};
 
 use gpui::{
     actions, div, point, prelude::*, px, rgb, size, Bounds, ClipboardItem, Context, DragMoveEvent,
-    EntityInputHandler, ExternalPaths, FocusHandle, IntoElement, KeyDownEvent, PathPromptOptions,
-    Pixels, Point, Render, ScrollWheelEvent, Task as GpuiTask, UTF16Selection, Window,
+    EntityInputHandler, ExternalPaths, FocusHandle, IntoElement, KeyDownEvent, Modifiers,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels, Point, Render,
+    ScrollWheelEvent, Task as GpuiTask, UTF16Selection, Window,
 };
 
 use labolabo_core::{
@@ -74,6 +75,7 @@ use crate::grid;
 use crate::hooks::{self, HookRuntime};
 use crate::ime;
 use crate::keys::keystroke_to_bytes;
+use crate::mouse_report::{self, MouseAction, MouseButtonKind, MouseMods};
 use crate::new_task;
 use crate::paste;
 use crate::render::RenderSpec;
@@ -187,6 +189,16 @@ pub struct LaboLaboApp {
     /// brief's explicitly accepted "status 取得済みのタスク間のみで検出"
     /// limitation (see `crates/labolabo-app/README.md`).
     changed_files_cache: HashMap<String, HashSet<String>>,
+    /// Whether a pane-divider drag-resize (`plans` W5j #2) is currently in
+    /// progress, anywhere in any Task's tree -- a single app-wide flag
+    /// (not per-Task/per-node) because at most one divider can be dragged
+    /// at a time regardless of which Task's tree it's in. Set `true` on
+    /// every `update_divider_drag` call (harmless to set repeatedly) and
+    /// back to `false` on `finish_divider_drag`. Threaded down through
+    /// `task_workspace::render_tile`/`render_leaf` so every terminal
+    /// pane's canvas can suppress `Terminal::resize` while a drag is live
+    /// -- see `render_leaf`'s `prepaint` closure for why.
+    divider_drag_active: bool,
 }
 
 /// The focused pane's in-progress IME composition, tracked by
@@ -308,6 +320,7 @@ impl LaboLaboApp {
             settings,
             settings_open: false,
             changed_files_cache: HashMap::new(),
+            divider_drag_active: false,
         };
 
         if let Some(id) = selected_task_id {
@@ -1327,6 +1340,67 @@ impl LaboLaboApp {
         cx.notify();
     }
 
+    /// Live-updates a pane-divider's ratio as it's dragged (`plans` W5j
+    /// #2): derives the new ratio from the drag's current pointer position
+    /// against `event.bounds` (the split container's own bounds -- see
+    /// `task_workspace::render_tile`'s `container.on_drag_move::
+    /// <DividerDragPayload>` wiring for why this, rather than the thin
+    /// divider handle's own bounds, is what's registered here) via
+    /// `grid::ratio_from_drag_position` along whichever axis
+    /// `event.dragged_item()`'s `orientation` says the split runs, then
+    /// applies it (clamped) through `PaneTilingModel::set_split_ratio`.
+    /// Sets [`Self::divider_drag_active`] `true` on every call (harmless
+    /// to repeat) so every terminal pane's canvas suppresses `Terminal::
+    /// resize` for the duration -- see `render_leaf`'s `prepaint` closure.
+    /// Deliberately does not persist -- ratio changes are cheap, per-frame,
+    /// in-memory-only updates during the drag; [`Self::
+    /// finish_divider_drag`] persists once, on drop, mirroring
+    /// `PaneTilingModel::set_split_ratio`'s own doc comment (which mirrors
+    /// the Swift source's original design for this exact reason).
+    pub(crate) fn update_divider_drag(
+        &mut self,
+        task_id: &str,
+        event: &DragMoveEvent<task_workspace::DividerDragPayload>,
+        cx: &mut Context<Self>,
+    ) {
+        let payload = *event.drag(cx);
+        self.divider_drag_active = true;
+
+        let local_x = f32::from(event.event.position.x - event.bounds.origin.x);
+        let local_y = f32::from(event.event.position.y - event.bounds.origin.y);
+        let ratio = match payload.orientation {
+            TileOrientation::Horizontal => {
+                grid::ratio_from_drag_position(local_x, f32::from(event.bounds.size.width))
+            }
+            TileOrientation::Vertical => {
+                grid::ratio_from_drag_position(local_y, f32::from(event.bounds.size.height))
+            }
+        };
+
+        let Some(workspace) = self.workspaces.get_mut(task_id) else {
+            return;
+        };
+        if workspace.model.set_split_ratio(payload.node_id, ratio) {
+            cx.notify();
+        }
+    }
+
+    /// Finishes a pane-divider drag (`plans` W5j #2) on drop: clears
+    /// [`Self::divider_drag_active`] (letting every terminal pane's canvas
+    /// resume normal `Terminal::resize`-on-bounds-change behavior, applying
+    /// the drag's final size in one shot -- see `render_leaf`'s `prepaint`
+    /// closure) and persists the Task's layout once (mirroring
+    /// `finish_pane_drag_drop`'s own "persist once, on drop" shape --
+    /// `update_divider_drag` above never persists, matching
+    /// `PaneTilingModel::set_split_ratio`'s documented design). The dragged
+    /// node's own ratio needs no further action here -- it was already
+    /// applied live, during the drag, by `update_divider_drag`.
+    pub(crate) fn finish_divider_drag(&mut self, task_id: &str, cx: &mut Context<Self>) {
+        self.divider_drag_active = false;
+        self.persist_workspace(task_id);
+        cx.notify();
+    }
+
     /// Completes an OS file/folder drop onto `anchor_pane_id`'s terminal
     /// pane (`plans/012` §3.1): shell-quotes and space-joins every dropped
     /// path (`labolabo_core::quote_dropped_paths`) and writes the
@@ -1701,14 +1775,17 @@ impl LaboLaboApp {
         }
     }
 
-    // MARK: - text selection & wheel scroll (`task_workspace::render_leaf`'s
-    // mouse handlers on a leaf's canvas)
+    // MARK: - text selection, mouse reporting & wheel scroll
+    // (`task_workspace::render_leaf`'s mouse handlers on a leaf's canvas --
+    // W5j widened this section from local text-selection-only to also
+    // cover SGR mouse-report forwarding, see `crate::mouse_report`'s module
+    // doc comment for the overall design and its scope limits)
 
     /// Convert a window-space mouse `position` into the `(col, row)` cell it
     /// falls on within `pane_id`'s canvas -- `None` if the pane has no live
-    /// runtime. Shared by [`Self::begin_selection`]/[`Self::
-    /// extend_selection`]: both need "what cell is the mouse over right
-    /// now," just for different fields of a [`selection::Selection`].
+    /// runtime. Shared by every mouse handler below: all of them need "what
+    /// cell is the mouse over right now," whether for local selection or
+    /// for SGR-encoding a report.
     fn pane_cell_at(
         &self,
         task_id: &str,
@@ -1731,49 +1808,27 @@ impl LaboLaboApp {
         Some(CellPos { row, col })
     }
 
-    /// Begin (or restart) a text selection in `pane_id`'s canvas at
-    /// `position` (window-space pixels, `MouseDownEvent::position`): the
-    /// cell under the mouse becomes both the selection's anchor and cursor
-    /// (a zero-length selection -- [`Self::extend_selection`] grows it as
-    /// the drag continues). Any selection previously in progress in this
-    /// pane is replaced outright -- every desktop terminal's "a fresh click
-    /// starts a fresh selection" convention. Called alongside (not instead
-    /// of) `select_pane` from `render_leaf`'s mouse-down handler, so
-    /// starting a selection also focuses the pane it's in, same as before
-    /// selection existed.
+    /// Begin (or restart) a left-button gesture in `pane_id`'s canvas at
+    /// `event.position`: either starts SGR-encoding it and forwarding to
+    /// the child program's PTY (when the child has requested mouse
+    /// tracking and Shift isn't held -- see `mouse_report::
+    /// is_click_reporting_active`), or begins local text selection (the
+    /// pre-existing behavior, now click-count-aware -- a double-click
+    /// selects the word under the mouse, a triple-click the whole line;
+    /// see `selection::selection_for_click`). Which of the two applies is
+    /// decided once here and held fixed for the rest of this one gesture
+    /// (see `PaneRuntime::reporting_drag`'s doc comment for why). Called
+    /// alongside (not instead of) `select_pane` from `render_leaf`'s
+    /// mouse-down handler, so starting a gesture also focuses the pane
+    /// it's in, same as before either behavior existed.
     pub(crate) fn begin_selection(
         &mut self,
         task_id: &str,
         pane_id: PaneId,
-        position: Point<Pixels>,
+        event: &MouseDownEvent,
         cx: &mut Context<Self>,
     ) {
-        let Some(pos) = self.pane_cell_at(task_id, pane_id, position) else {
-            return;
-        };
-        if let Some(runtime) = self
-            .workspaces
-            .get_mut(task_id)
-            .and_then(|w| w.runtimes.get_mut(&pane_id))
-        {
-            runtime.selection = Some(selection::Selection::at(pos));
-        }
-        cx.notify();
-    }
-
-    /// Extend `pane_id`'s in-progress selection's cursor to the cell under
-    /// `position` -- a no-op if that pane has no selection in progress
-    /// (e.g. the drag started outside any pane's canvas). Called from
-    /// `render_leaf`'s mouse-move handler only while the left button is
-    /// held (`MouseMoveEvent::dragging()`).
-    pub(crate) fn extend_selection(
-        &mut self,
-        task_id: &str,
-        pane_id: PaneId,
-        position: Point<Pixels>,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(pos) = self.pane_cell_at(task_id, pane_id, position) else {
+        let Some(pos) = self.pane_cell_at(task_id, pane_id, event.position) else {
             return;
         };
         let Some(runtime) = self
@@ -1783,6 +1838,75 @@ impl LaboLaboApp {
         else {
             return;
         };
+        let mouse_mode = runtime.session.mouse_mode();
+        let reporting = mouse_report::is_click_reporting_active(mouse_mode, event.modifiers.shift);
+        runtime.reporting_drag = reporting;
+        if reporting {
+            runtime.selection = None;
+            if let Some(bytes) = mouse_report::encode_sgr(
+                mouse_mode.tracking,
+                MouseAction::Press,
+                Some(MouseButtonKind::Left),
+                mouse_mods(event.modifiers),
+                pos.col,
+                pos.row,
+            ) {
+                runtime.session.write_input(&bytes);
+            }
+        } else {
+            let snapshot = runtime.session.snapshot();
+            runtime.selection = Some(selection::selection_for_click(
+                &snapshot,
+                pos,
+                event.click_count,
+            ));
+        }
+        cx.notify();
+    }
+
+    /// Extend `pane_id`'s in-progress left-button gesture as the mouse
+    /// moves while the button is held: either SGR-encodes and forwards a
+    /// motion report (when [`Self::begin_selection`] started this gesture
+    /// as a mouse-report one, and the child's tracking mode reports motion
+    /// -- `Button`/`Any`; a `Normal`-tracking gesture reports nothing
+    /// between press and release, matching `mouse_report::should_report`),
+    /// or extends the local text selection cell-by-cell (the pre-existing
+    /// behavior -- continuing to drag after a double/triple-click does
+    /// *not* re-snap to word/line boundaries, a documented simplification,
+    /// see `selection::selection_for_click`'s doc comment). Called from
+    /// `render_leaf`'s mouse-move handler only while the left button is
+    /// held (`MouseMoveEvent::dragging()`).
+    pub(crate) fn extend_selection(
+        &mut self,
+        task_id: &str,
+        pane_id: PaneId,
+        event: &MouseMoveEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pos) = self.pane_cell_at(task_id, pane_id, event.position) else {
+            return;
+        };
+        let Some(runtime) = self
+            .workspaces
+            .get_mut(task_id)
+            .and_then(|w| w.runtimes.get_mut(&pane_id))
+        else {
+            return;
+        };
+        if runtime.reporting_drag {
+            let mouse_mode = runtime.session.mouse_mode();
+            if let Some(bytes) = mouse_report::encode_sgr(
+                mouse_mode.tracking,
+                MouseAction::Motion,
+                Some(MouseButtonKind::Left),
+                mouse_mods(event.modifiers),
+                pos.col,
+                pos.row,
+            ) {
+                runtime.session.write_input(&bytes);
+            }
+            return;
+        }
         let Some(selection) = runtime.selection.as_mut() else {
             return;
         };
@@ -1790,18 +1914,25 @@ impl LaboLaboApp {
         cx.notify();
     }
 
-    /// Finish `pane_id`'s selection on mouse-up: a selection that never
-    /// grew past its zero-length starting point (a plain click, no drag)
-    /// is cleared outright, so an ordinary click-to-focus never leaves a
-    /// stray "selected" highlight or blocks a later Cmd+C with an empty
-    /// range. A real (non-empty) selection is left exactly as dragged --
-    /// releasing the mouse doesn't change it further.
+    /// Finish `pane_id`'s left-button gesture on mouse-up: either
+    /// SGR-encodes and forwards a release report (finishing a mouse-report
+    /// gesture -- `mouse_report::encode_sgr` itself is the source of truth
+    /// for whether a release is reportable, so it isn't re-checked
+    /// separately here), or finishes local text selection (the
+    /// pre-existing behavior: a selection that never grew past its
+    /// zero-length starting point -- a plain click, no drag -- is cleared
+    /// outright, so an ordinary click-to-focus never leaves a stray
+    /// "selected" highlight or blocks a later Cmd+C with an empty range).
     pub(crate) fn finish_selection(
         &mut self,
         task_id: &str,
         pane_id: PaneId,
+        event: &MouseUpEvent,
         cx: &mut Context<Self>,
     ) {
+        let Some(pos) = self.pane_cell_at(task_id, pane_id, event.position) else {
+            return;
+        };
         let Some(runtime) = self
             .workspaces
             .get_mut(task_id)
@@ -1809,22 +1940,135 @@ impl LaboLaboApp {
         else {
             return;
         };
+        if runtime.reporting_drag {
+            runtime.reporting_drag = false;
+            let mouse_mode = runtime.session.mouse_mode();
+            if let Some(bytes) = mouse_report::encode_sgr(
+                mouse_mode.tracking,
+                MouseAction::Release,
+                Some(MouseButtonKind::Left),
+                mouse_mods(event.modifiers),
+                pos.col,
+                pos.row,
+            ) {
+                runtime.session.write_input(&bytes);
+            }
+            return;
+        }
         if runtime.selection.is_some_and(|s| s.is_empty()) {
             runtime.selection = None;
             cx.notify();
         }
     }
 
-    /// Route one wheel/trackpad scroll event over `pane_id`'s canvas: while
-    /// the alternate screen is active (`vim`/`less`/`htop`/...), converts
-    /// the accumulated line delta into that many Up/Down cursor-key escape
-    /// sequences written straight to the PTY (mirroring real Ghostty's
-    /// default "alternate scroll mode" behavior for alt-screen programs --
-    /// see `labolabo_term::backend::VtBackend::alt_screen_active`'s doc
-    /// comment); otherwise scrolls that pane's own `Terminal` viewport
-    /// (`Terminal::scroll`). Mouse-reporting TUIs (`vim -mouse`, ...) that
-    /// would rather receive raw scroll-wheel button events are out of
-    /// scope here -- see the crate README.
+    /// Reports a right- or middle-button press to `pane_id`'s child
+    /// program via SGR mouse encoding, if it has requested mouse tracking
+    /// and Shift isn't held (`mouse_report::is_click_reporting_active`) --
+    /// a silent no-op otherwise. Right/middle clicks have no *local*
+    /// behavior in this app (no context menu, no paste-on-middle-click,
+    /// unlike the left button's text-selection fallback), so there is
+    /// nothing else for this to fall back to.
+    pub(crate) fn report_mouse_click(
+        &mut self,
+        task_id: &str,
+        pane_id: PaneId,
+        button: MouseButtonKind,
+        event: &MouseDownEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pos) = self.pane_cell_at(task_id, pane_id, event.position) else {
+            return;
+        };
+        let Some(runtime) = self
+            .workspaces
+            .get_mut(task_id)
+            .and_then(|w| w.runtimes.get_mut(&pane_id))
+        else {
+            return;
+        };
+        let mouse_mode = runtime.session.mouse_mode();
+        if !mouse_report::is_click_reporting_active(mouse_mode, event.modifiers.shift) {
+            return;
+        }
+        let Some(bytes) = mouse_report::encode_sgr(
+            mouse_mode.tracking,
+            MouseAction::Press,
+            Some(button),
+            mouse_mods(event.modifiers),
+            pos.col,
+            pos.row,
+        ) else {
+            return;
+        };
+        runtime.session.write_input(&bytes);
+        if runtime.selection.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Reports a right- or middle-button release -- the release-side
+    /// counterpart to [`Self::report_mouse_click`]. No local state to
+    /// notify gpui about either way, so this takes no `cx`.
+    pub(crate) fn report_mouse_release(
+        &mut self,
+        task_id: &str,
+        pane_id: PaneId,
+        button: MouseButtonKind,
+        event: &MouseUpEvent,
+    ) {
+        let Some(pos) = self.pane_cell_at(task_id, pane_id, event.position) else {
+            return;
+        };
+        let Some(runtime) = self
+            .workspaces
+            .get_mut(task_id)
+            .and_then(|w| w.runtimes.get_mut(&pane_id))
+        else {
+            return;
+        };
+        let mouse_mode = runtime.session.mouse_mode();
+        if !mouse_report::is_click_reporting_active(mouse_mode, event.modifiers.shift) {
+            return;
+        }
+        if let Some(bytes) = mouse_report::encode_sgr(
+            mouse_mode.tracking,
+            MouseAction::Release,
+            Some(button),
+            mouse_mods(event.modifiers),
+            pos.col,
+            pos.row,
+        ) {
+            runtime.session.write_input(&bytes);
+        }
+    }
+
+    /// Route one wheel/trackpad scroll event over `pane_id`'s canvas.
+    /// Three cases, checked in this priority order (bug report W5j #4: a
+    /// mouse-aware alt-screen TUI, e.g. Claude Code's own TUI, was
+    /// receiving arrow-key sequences from a scroll gesture and warning
+    /// "use PgUp/PgDn to scroll" -- its own mouse tracking was simply never
+    /// consulted before falling into the alt-screen branch):
+    ///
+    /// 1. **The child has requested mouse tracking** (`Terminal::
+    ///    mouse_mode`, regardless of alt/primary screen): SGR-encodes each
+    ///    whole accumulated line as a wheel-up/down press report and
+    ///    forwards it, clearing any local selection -- mirrors real
+    ///    Ghostty's own `Surface.scrollCallback` (confirmed by reading the
+    ///    vendored source): "If we have an active mouse reporting mode,
+    ///    clear the selection... then report mouse events" takes priority
+    ///    over both of the other two cases below. Unlike the click/drag
+    ///    path, **not** overridden by Shift -- see `mouse_report::
+    ///    is_scroll_reporting_active`'s doc comment.
+    /// 2. **No mouse tracking, alternate screen active, and alternate
+    ///    scroll mode (DECSET `1007`) also active** (`Terminal::
+    ///    alternate_scroll_active`, which defaults to `true` -- see its own
+    ///    doc comment): converts the accumulated line delta into that many
+    ///    Up/Down cursor-key escape sequences written straight to the PTY
+    ///    -- the pre-existing behavior for `vim`/`less`/`htop`-style
+    ///    programs that manage their own internal scrolling and haven't
+    ///    requested real mouse events.
+    /// 3. **Neither**: scrolls that pane's own `Terminal` viewport
+    ///    (`Terminal::scroll`) -- this crate's own scrollback.
     pub(crate) fn handle_pane_scroll(
         &mut self,
         task_id: &str,
@@ -1833,6 +2077,9 @@ impl LaboLaboApp {
         cx: &mut Context<Self>,
     ) {
         let cell_height = self.spec.cell_height;
+        let Some(pos) = self.pane_cell_at(task_id, pane_id, event.position) else {
+            return;
+        };
         let Some(runtime) = self
             .workspaces
             .get_mut(task_id)
@@ -1847,7 +2094,37 @@ impl LaboLaboApp {
         if lines == 0 {
             return;
         }
-        if runtime.session.alt_screen_active() {
+
+        let mouse_mode = runtime.session.mouse_mode();
+        if mouse_report::is_scroll_reporting_active(mouse_mode) {
+            runtime.selection = None;
+            let button = if lines > 0 {
+                MouseButtonKind::WheelUp
+            } else {
+                MouseButtonKind::WheelDown
+            };
+            let mods = mouse_mods(event.modifiers);
+            let mut bytes = Vec::new();
+            for _ in 0..lines.unsigned_abs() {
+                if let Some(encoded) = mouse_report::encode_sgr(
+                    mouse_mode.tracking,
+                    MouseAction::Press,
+                    Some(button),
+                    mods,
+                    pos.col,
+                    pos.row,
+                ) {
+                    bytes.extend_from_slice(&encoded);
+                }
+            }
+            if !bytes.is_empty() {
+                runtime.session.write_input(&bytes);
+            }
+            cx.notify();
+            return;
+        }
+
+        if runtime.session.alt_screen_active() && runtime.session.alternate_scroll_active() {
             // Up arrow for "scroll up" (positive lines, our shared
             // convention -- see `VtBackend::scroll_display`'s doc
             // comment), Down arrow otherwise. Same normal-mode `ESC[A`/
@@ -2506,6 +2783,7 @@ impl Render for LaboLaboApp {
                     &focus_handle,
                     active_preedit.as_ref(),
                     pane_drag_hover,
+                    self.divider_drag_active,
                     cx,
                 )
             } else {
@@ -2563,6 +2841,19 @@ impl Render for LaboLaboApp {
             .child(workspace_el)
             .children(git_pane_el)
             .children(settings_el)
+    }
+}
+
+/// gpui's [`Modifiers`] to `crate::mouse_report::MouseMods`'s narrower,
+/// SGR-relevant subset (`shift`/`alt`/`ctrl` only -- SGR mouse encoding has
+/// no bit for `platform`/`function`). Shared by every mouse handler in
+/// `impl LaboLaboApp`'s "text selection, mouse reporting & wheel scroll"
+/// section above.
+fn mouse_mods(modifiers: Modifiers) -> MouseMods {
+    MouseMods {
+        shift: modifiers.shift,
+        alt: modifiers.alt,
+        ctrl: modifiers.control,
     }
 }
 

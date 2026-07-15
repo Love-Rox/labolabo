@@ -22,7 +22,7 @@
 
 use std::time::Duration;
 
-use labolabo_term::{ColorScheme, Rgb, TermEvent, Terminal};
+use labolabo_term::{ColorScheme, MouseMode, MouseTracking, Rgb, TermEvent, Terminal};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -83,6 +83,60 @@ fn resize_changes_grid_dimensions() {
     );
     // The cell buffer is re-sized to match the reported dimensions.
     assert_eq!(latest.cells.len(), 100 * 40, "cell count matches new grid");
+}
+
+/// Resizing publishes a fresh, correctly-sized snapshot on its own -- with
+/// real content already on screen, and **with no further PTY output at
+/// all** after the resize -- so a UI layer polling only `Terminal::
+/// snapshot()`/`wait_for` (never blocking on new bytes arriving) always
+/// sees a grid whose `cols`/`rows` match its own most recent `resize()`
+/// call. Regression coverage for a reported symptom (W5j bug report #2):
+/// closing/opening the Git side pane resizes a terminal pane's canvas, and
+/// the terminal appeared to "stay broken" -- rendered at the wrong
+/// width/garbled -- until the next real PTY output arrived. Investigation
+/// (reading `session.rs`'s `run_worker`) found `WorkerMsg::Resize` already
+/// unconditionally rebuilds and publishes a snapshot (`publish_snapshot`,
+/// which itself fires `TermEvent::Wakeup`) with **no dependency on new PTY
+/// bytes** -- this test exercises exactly that contract end-to-end (spawn,
+/// print visible content, resize with the child then completely silent,
+/// confirm the published snapshot already reflects the new dimensions)
+/// rather than just asserting on a blank grid the way
+/// `resize_changes_grid_dimensions` above does, since a snapshot rebuild
+/// that's merely blank-vs-blank could theoretically mask a reflow-specific
+/// bug that only shows up with real content in the grid. It passes against
+/// both backends unmodified from this investigation, which points the
+/// actual root cause at the Rust UI layer's own resize-trigger wiring
+/// (`task_workspace::render_leaf`'s canvas `prepaint` closure / the Git
+/// pane visibility toggle) rather than this crate -- see that code's own
+/// comments for the follow-up.
+#[test]
+fn resize_with_existing_content_and_no_further_output_still_republishes() {
+    let term = Terminal::spawn_with_command(40, 10, Some("printf 'hello labolabo'; sleep 5"), &[])
+        .expect("spawn");
+    let before = term.wait_for(TIMEOUT, |g| g.contains_text("hello labolabo"));
+    assert!(
+        before.is_some(),
+        "expected content before resizing, got:\n{}",
+        term.snapshot().to_text()
+    );
+
+    // The child above is now blocked in `sleep 5` -- no further PTY output
+    // will ever arrive before the test's own timeout. If a resized
+    // snapshot only ever republishes in response to new bytes, this
+    // `wait_for` would time out and return `None`.
+    term.resize(100, 30);
+    let after = term.wait_for(TIMEOUT, |g| g.cols == 100 && g.rows == 30);
+    assert!(
+        after.is_some(),
+        "expected a 100x30 snapshot published from the resize alone (no new \
+         PTY output), got {}x{}",
+        term.snapshot().cols,
+        term.snapshot().rows,
+    );
+    assert!(
+        after.unwrap().contains_text("hello labolabo"),
+        "existing content should still be present after the resize"
+    );
 }
 
 /// A never-producing child still yields the blank spawn-size snapshot up front
@@ -313,6 +367,60 @@ fn bracketed_paste_mode_reflects_decset_2004() {
     );
 }
 
+/// DECSET `1000`/`1002`/`1006` toggle `Terminal::mouse_mode()` the same way
+/// `1000`, `1002`, and `1006` are used together by real mouse-aware TUIs
+/// (vim, tmux, ...): normal tracking, then switched to button-event
+/// tracking with SGR extended coordinates enabled, then all off again.
+/// This is the mode-query API `labolabo-app`'s mouse-event routing uses to
+/// decide whether a click/drag/scroll should be SGR-encoded and forwarded
+/// to the child instead of driving this crate's own text-selection/
+/// scrollback UI (W5j #1).
+#[test]
+fn mouse_mode_reflects_decset_1000_1002_1006() {
+    let term = Terminal::spawn_with_command(
+        80,
+        24,
+        Some(
+            r#"printf '\033[?1000h'; sleep 0.3; \
+               printf '\033[?1000l\033[?1002h\033[?1006h'; sleep 0.3; \
+               printf '\033[?1002l\033[?1006l'; sleep 0.3"#,
+        ),
+        &[],
+    )
+    .expect("spawn");
+    assert_eq!(
+        term.mouse_mode(),
+        MouseMode::OFF,
+        "mouse mode should be off before the child runs"
+    );
+    assert!(
+        wait_for_mouse_mode(
+            &term,
+            TIMEOUT,
+            MouseMode {
+                tracking: MouseTracking::Normal,
+                sgr: false,
+            },
+        ),
+        "expected normal tracking (no SGR) after DECSET 1000h"
+    );
+    assert!(
+        wait_for_mouse_mode(
+            &term,
+            TIMEOUT,
+            MouseMode {
+                tracking: MouseTracking::Button,
+                sgr: true,
+            },
+        ),
+        "expected button-event tracking with SGR after DECSET 1000l 1002h 1006h"
+    );
+    assert!(
+        wait_for_mouse_mode(&term, TIMEOUT, MouseMode::OFF),
+        "expected mouse mode to turn back off after DECSET 1002l 1006l"
+    );
+}
+
 /// A fresh session has no scrollback yet: `scroll_offset`/`scrollback_len`
 /// both start at `0` (the live tail, nothing to scroll into).
 #[test]
@@ -535,6 +643,36 @@ fn alt_screen_active_reflects_decset_1049() {
     );
 }
 
+/// DECSET `1007` (alternate scroll mode) defaults to **on**, matching real
+/// Ghostty's and `alacritty_terminal`'s own defaults (confirmed by reading
+/// each backend's source -- see `Terminal::alternate_scroll_active`'s doc
+/// comment), and toggles off/back on via `ESC[?1007l`/`ESC[?1007h` -- the
+/// query `labolabo-app`'s wheel handler uses to decide whether an
+/// alt-screen scroll gesture (when mouse reporting is off) should convert
+/// to cursor-key sequences at all.
+#[test]
+fn alternate_scroll_defaults_on_and_toggles_via_decset_1007() {
+    let term = Terminal::spawn_with_command(
+        80,
+        24,
+        Some(r#"sleep 0.3; printf '\033[?1007l'; sleep 0.3; printf '\033[?1007h'; sleep 0.3"#),
+        &[],
+    )
+    .expect("spawn");
+    assert!(
+        term.alternate_scroll_active(),
+        "alternate scroll should default to on, before the child runs"
+    );
+    assert!(
+        wait_for_alternate_scroll(&term, TIMEOUT, false),
+        "expected alternate scroll to turn off after DECSET 1007l"
+    );
+    assert!(
+        wait_for_alternate_scroll(&term, TIMEOUT, true),
+        "expected alternate scroll to turn back on after DECSET 1007h"
+    );
+}
+
 /// Find the first cell whose text matches `needle` (a single grapheme, as
 /// printed by the tests above -- there's no ambiguity to resolve).
 fn find_cell<'a>(
@@ -590,6 +728,43 @@ fn wait_for_alt_screen(term: &Terminal, timeout: Duration, expected: bool) -> bo
         };
         if term.recv_event(remaining.min(Duration::from_millis(50))) == Some(TermEvent::Exit) {
             return term.alt_screen_active() == expected;
+        }
+    }
+}
+
+/// Poll `term.alternate_scroll_active()` until it equals `expected` or
+/// `timeout` elapses -- same shape as [`wait_for_alt_screen`] (no dedicated
+/// event of its own; a plain flag refreshed alongside snapshot publishing).
+fn wait_for_alternate_scroll(term: &Terminal, timeout: Duration, expected: bool) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if term.alternate_scroll_active() == expected {
+            return true;
+        }
+        let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else {
+            return term.alternate_scroll_active() == expected;
+        };
+        if term.recv_event(remaining.min(Duration::from_millis(50))) == Some(TermEvent::Exit) {
+            return term.alternate_scroll_active() == expected;
+        }
+    }
+}
+
+/// Poll `term.mouse_mode()` until it equals `expected` or `timeout` elapses
+/// -- same shape as [`wait_for_bracketed_paste`]/[`wait_for_alt_screen`] (no
+/// dedicated event of its own; a plain flag refreshed alongside snapshot
+/// publishing).
+fn wait_for_mouse_mode(term: &Terminal, timeout: Duration, expected: MouseMode) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if term.mouse_mode() == expected {
+            return true;
+        }
+        let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else {
+            return term.mouse_mode() == expected;
+        };
+        if term.recv_event(remaining.min(Duration::from_millis(50))) == Some(TermEvent::Exit) {
+            return term.mouse_mode() == expected;
         }
     }
 }

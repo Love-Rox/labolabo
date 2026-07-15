@@ -118,6 +118,26 @@ pub fn accumulate_scroll_lines(pending: &mut f32, delta_y_px: f32, cell_height: 
     whole as i64
 }
 
+/// The split `ratio` (first child's fraction) a divider drag implies:
+/// `local_pos` (the drag cursor's position along the drag axis, relative to
+/// the split container's own origin) divided by `container_len` (that
+/// container's own pixel extent along the same axis -- width for a
+/// row/horizontal split's left-right divider, height for a column/vertical
+/// split's up-down divider).
+///
+/// Deliberately performs **no clamping and no zero-guard** of its own: a
+/// degenerate `container_len` (`0.0`, negative, or non-finite -- reachable
+/// momentarily mid-drag if a concurrent window resize collapses the split
+/// container to zero size) produces `NaN`/`±inf` here, same as any other
+/// float division would, and is left for the one caller
+/// (`labolabo_core::TileNode::set_ratio`, via `PaneTilingModel::
+/// set_split_ratio`) that already has to reject a non-finite ratio anyway
+/// (leaving the previous ratio untouched) to be the single place that
+/// safety net lives, rather than duplicating it here.
+pub fn ratio_from_drag_position(local_pos: f32, container_len: f32) -> f64 {
+    (local_pos / container_len) as f64
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,5 +241,33 @@ mod tests {
         assert_eq!(accumulate_scroll_lines(&mut pending, f32::NAN, 18.0), 0);
         // `pending` is untouched by the degenerate calls above.
         assert!((pending - 0.3).abs() < f32::EPSILON);
+    }
+
+    // MARK: - ratio_from_drag_position (divider drag-resize)
+
+    #[test]
+    fn ratio_from_drag_position_midpoint() {
+        let ratio = ratio_from_drag_position(50.0, 100.0);
+        assert!((ratio - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn ratio_from_drag_position_at_either_edge() {
+        assert!((ratio_from_drag_position(0.0, 100.0) - 0.0).abs() < 1e-9);
+        assert!((ratio_from_drag_position(100.0, 100.0) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn ratio_from_drag_position_past_the_edges_is_not_clamped_here() {
+        // Clamping is the caller's (`TileNode::set_ratio`'s) job -- this
+        // function is a plain division.
+        assert!(ratio_from_drag_position(-10.0, 100.0) < 0.0);
+        assert!(ratio_from_drag_position(150.0, 100.0) > 1.0);
+    }
+
+    #[test]
+    fn ratio_from_drag_position_zero_container_len_is_non_finite_not_a_panic() {
+        assert!(ratio_from_drag_position(0.0, 0.0).is_nan());
+        assert!(ratio_from_drag_position(10.0, 0.0).is_infinite());
     }
 }

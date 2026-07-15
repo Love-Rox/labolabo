@@ -778,9 +778,14 @@ Three independent DnD systems, all built on gpui 0.2's `on_drag`/
   either way).
 - **Keyboard focus placement is not persisted.** After a restart, a Task's
   focus defaults to its first leaf's selected tab.
-- **No interactive divider drag-resize**, and the sidebar width is fixed
-  (see "Resize path" above) — explicitly out of this DnD wave's scope too
-  (see "Drag & drop" above).
+- **Interactive divider drag-resize landed in wave 5j** (`task_workspace.rs`'s
+  `render_tile` split branch, `app.rs`'s `update_divider_drag`/
+  `finish_divider_drag`, `labolabo_core::tiling`'s `TileNode::set_ratio`/
+  `find_node_mut`/`PaneTilingModel::set_split_ratio`) — a thin draggable
+  handle at a split's boundary, resize cursor + hover highlight, `Terminal::
+  resize` throttled to "once, on drag end" rather than every intermediate
+  frame (see "Wave 5j" below for the real-mouse-drag caveat). The sidebar
+  width is still fixed — that was never in scope for this addition.
 - **No intra-group tab reorder by dragging**, and **no Windows shell
   quoting for OS file drops** — see "Drag & drop" above for both.
 - **"Next/previous pane" is DFS tree order, not geometric adjacency.**
@@ -796,17 +801,38 @@ Three independent DnD systems, all built on gpui 0.2's `on_drag`/
   convention), so this needs a human to actually type through a real IME
   before it's considered confirmed working, not just "compiles and the
   design traces correctly through gpui's platform backends".
-- **Scrollback, text selection & copy landed this wave** (see "Text
-  selection, scroll & copy" above), but: no double-click word-select or
-  triple-click line-select (plain click-drag only); no mouse reporting to
-  TUI programs (`vim -mouse` and similar always get scroll-to-cursor-keys /
-  text selection instead of raw button/motion escape sequences); no
-  scrollbar widget drawn yet (the data for one, `GridSnapshot::
-  scroll_offset`/`scrollback_len`, already exists); a selection's
-  coordinates are not stable across a scroll or new PTY output that lands
-  mid-drag (see that section's "known limitation, by design" for why); and
-  real interactive scroll/drag-select/Cmd+C behavior has not been verified
-  by an actual mouse — see "What was and wasn't verified" below.
+- **Scrollback, text selection & copy landed in wave 5g; double/triple-click
+  word/line select and SGR mouse-report forwarding landed in wave 5j** (see
+  "Text selection, scroll & copy" above, and "Wave 5j" below). Remaining
+  scope trims after 5j:
+  - **Mouse reporting is SGR-format only** (`crate::mouse_report`'s module
+    doc comment): a program that requests tracking (`1000`/`1002`/`1003`)
+    *without* SGR (`1006`) — rare in practice since virtually every
+    mouse-aware TUI written since SGR's introduction requests both — still
+    falls back to local selection/scrollback, exactly as before 5j.
+  - **No bare-hover motion forwarding.** Under `MouseTracking::Any`, a
+    program can ask for motion reports with *no* button held (e.g. link
+    highlighting on hover); this app only forwards motion while the left
+    button is actively held (a drag) — see `render_leaf`'s mouse-move
+    wiring comment.
+  - **No horizontal-scroll forwarding.** `grid::accumulate_scroll_lines`
+    only accumulates the vertical wheel axis (unchanged from before 5j);
+    `mouse_report::MouseButtonKind::WheelLeft`/`WheelRight` exist (mirroring
+    Ghostty's own button set, exercised by this module's own tests) but
+    have no accumulated horizontal delta to encode from yet.
+  - **Word/line selection is single-row and doesn't re-snap while
+    dragging.** `selection::word_bounds_at` doesn't cross a soft-wrapped
+    line the way Ghostty's own algorithm does; continuing to drag after a
+    double/triple-click extends character-by-character, not by whole
+    words/lines, unlike Ghostty's own gesture (`selection::
+    selection_for_click`'s doc comment).
+  - No scrollbar widget drawn yet (the data for one, `GridSnapshot::
+    scroll_offset`/`scrollback_len`, already exists); a selection's
+    coordinates are not stable across a scroll or new PTY output that lands
+    mid-drag (see that section's "known limitation, by design" for why);
+    and real interactive scroll/drag-select/double-click/mouse-report/
+    Cmd+C behavior has not been verified by an actual mouse — see "What was
+    and wasn't verified" below.
 - **Colors: light/dark theme switching is out of scope.** Ghostty's `theme
   = light:NAME,dark:NAME` syntax picks a theme based on the desktop
   appearance; this port only ever resolves the **light** side and has no
@@ -1361,3 +1387,157 @@ instruction, same as every wave above:**
   bounded by something closer to a fixed page size regardless of the
   requested value -- nobody has floods large enough, on that backend, to
   find out yet.
+
+### Wave 5j (terminal-interaction polish: mouse reporting, divider
+drag-resize, word/line select)
+
+Landed: three planned polish items, plus two real-machine bug fixes folded
+into the same branch --
+
+- **SGR mouse-report forwarding** (`labolabo_term::mouse` -- new
+  `MouseTracking`/`MouseMode` types and `VtBackend::mouse_mode`/
+  `TermSession::mouse_mode`, mirrored on both backends; `crate::
+  mouse_report` -- a pure SGR encoder ported from Ghostty's own
+  `mouse_encode.zig`; `app.rs`'s `begin_selection`/`extend_selection`/
+  `finish_selection`/`report_mouse_click`/`report_mouse_release`/
+  `handle_pane_scroll`): a click/drag/scroll is forwarded to a pane's PTY
+  as SGR (DECSET `1006`) escape sequences whenever that pane's own program
+  has requested mouse tracking (`1000`/`1002`/`1003`) -- Shift overrides
+  this back to local selection for clicks/drags (not scroll), matching
+  real Ghostty's own default `mouse-shift-capture` behavior (confirmed by
+  reading the vendored source; **not** the Option/Alt convention an
+  earlier draft of this wave's brief guessed at). See "Known limitations"
+  above for the SGR-only/no-bare-hover/no-horizontal-scroll scope trims.
+- **Interactive divider drag-resize** (`labolabo_core::tiling`'s
+  `MIN_SPLIT_RATIO`/`MAX_SPLIT_RATIO`/`TileNode::set_ratio`/
+  `find_node_mut`/`PaneTilingModel::set_split_ratio`; `task_workspace.rs`'s
+  `render_tile` split branch, `DividerDragPayload`; `app.rs`'s
+  `update_divider_drag`/`finish_divider_drag`): a thin absolutely-
+  positioned handle at a split's boundary, resize cursor + hover highlight,
+  dragged via gpui's native drag-and-drop system (`on_drag`/
+  `on_drag_move`/`on_drop`, the same mechanism the pre-existing tab-chip
+  drag already used) rather than raw mouse-move, so the drag survives the
+  cursor briefly outrunning the thin handle's own hitbox during a fast
+  flick. `Terminal::resize` is suppressed for every pane in the tree while
+  any divider is being dragged (`LaboLaboApp::divider_drag_active`,
+  threaded through `render_tile`/`render_leaf`) and applied once, with the
+  final size, on drop -- the "間引き" (throttle) the wave's brief asked
+  for, done as "finalize once at drag end" rather than a 16ms timer (the
+  brief's own wording permits either).
+- **Double-click word-select / triple-click line-select**
+  (`selection::word_bounds_at`/`line_bounds_at`/`selection_for_click`,
+  `crate::selection::WORD_BOUNDARY_CHARS`): a mouse-down's `click_count`
+  (gpui's own field) selects the word or line under the cursor instead of
+  starting a zero-length click, using Ghostty's own default word-boundary
+  character set (confirmed by reading `terminal/selection_codepoints.zig`'s
+  `default_word_boundaries` in the vendored source). See "Known
+  limitations" above for the single-row/no-drag-resnap scope trims.
+- **Bug fix: a mouse-aware alt-screen TUI (e.g. Claude Code's own TUI)
+  received arrow-key sequences from a scroll gesture instead of real mouse
+  events**, and warned "Scroll wheel is sending arrow keys". Root cause:
+  `handle_pane_scroll` converted every alt-screen scroll to cursor keys
+  unconditionally, never consulting the program's own mouse tracking.
+  Fixed by `handle_pane_scroll`'s new three-way priority (mouse reporting,
+  confirmed active via `Terminal::mouse_mode`, always wins; then alt-screen
+  + alternate-scroll-mode, DECSET `1007`, itself newly queried via
+  `VtBackend::alternate_scroll_active`/`Terminal::alternate_scroll_active`
+  rather than assumed always-on; then local scrollback) -- see that
+  method's doc comment for the full ordering and the real-Ghostty source
+  citations behind each branch.
+- **Bug fix: a terminal pane could render stale/wrong-sized content after
+  a layout change (e.g. closing the Git side pane) until new PTY output
+  arrived.** Root cause, found by an investigation agent reading
+  `spawn_redraw_bridge` (`task_workspace.rs`): its post-pacing-sleep
+  `drain()` call discarded any `TermEvent::Wakeup` that arrived during the
+  16ms `FRAME_INTERVAL` sleep *without* a corresponding `cx.notify()` --
+  a resize (whose own snapshot-republish can closely follow the child
+  program's own SIGWINCH-triggered redraw) was exactly the kind of event
+  prone to landing a second, swallowed `Wakeup` in that window. Fixed by
+  removing that discard: anything that arrives during the sleep is simply
+  left queued and picked up by the loop's own head (`notify_rx.next()
+  .await`, which then resolves immediately) on the next iteration, so every
+  real `Wakeup` is now guaranteed an eventual `cx.notify()` call while the
+  pacing/coalescing behavior is otherwise unchanged. `labolabo-term`'s own
+  resize-publish plumbing (`session.rs`'s `run_worker`) was independently
+  confirmed already correct by a new regression test (see below) before
+  this UI-layer root cause was found.
+
+Verified locally:
+
+- `cargo build`/`cargo clippy --workspace --all-targets -- -D warnings`/
+  `cargo test`/`cargo fmt --check` (workspace root, covering
+  `default-members` *and* `-p labolabo-app` together) all pass.
+- `cargo build -p labolabo-app`, `cargo clippy -p labolabo-app --all-targets
+  -- -D warnings`, and `cargo test -p labolabo-app` (210 tests) all pass in
+  isolation too.
+- New `labolabo-term` unit tests (`mouse.rs`) and integration tests
+  (`tests/backend_common.rs`, exercised against the default
+  `backend-alacritty`; also run in CI's `rust-term-ghostty` job against the
+  real `backend-ghostty-vt`): `mouse_mode_reflects_decset_1000_1002_1006`
+  (Normal -> Button+SGR -> off, via real DECSET sequences from a spawned
+  child), `alternate_scroll_defaults_on_and_toggles_via_decset_1007`, and
+  `resize_with_existing_content_and_no_further_output_still_republishes`
+  (spawns a child, prints content, blocks it in `sleep 5` with zero further
+  output, resizes, and confirms a correctly-sized snapshot republishes on
+  its own -- direct regression coverage for the redraw-bridge bug above,
+  which independently confirmed this crate's own resize-publish plumbing
+  was never the actual root cause).
+- New `labolabo-app` unit tests: `mouse_report.rs` (17 pure tests --
+  Ghostty's `shouldReport`/`buttonCode` gating ported and checked against
+  every tracking mode, wheel button-code table, modifier/motion bit
+  arithmetic, Shift-overrides-clicks-but-not-scroll), `selection.rs` (15
+  new tests -- word-boundary classification against Ghostty's default
+  separator set, blank-cell-as-boundary, line-trim-trailing-not-leading,
+  click-count dispatch), `grid.rs` (4 new tests -- `ratio_from_drag_
+  position`'s midpoint/edges/non-finite-container-length behavior),
+  `labolabo-core`'s `tiling.rs` (12 new tests -- `set_ratio` clamping/
+  non-finite-input rejection, `find_node_mut` root/leaf/unknown-id lookup,
+  `set_split_ratio` end-to-end including a *nested* split and the
+  "never bumps `revision`" contract).
+- **A genuine end-to-end test spanning both crates**
+  (`mouse_report.rs`'s `mouse_scroll_reporting_end_to_end_reaches_the_pty_
+  as_sgr_bytes`, Unix-only): spawns a real `labolabo_term::Terminal`, has
+  the child enable DECSET `1000`/`1003`/`1006`, polls `Terminal::
+  mouse_mode()` (real backend state) until it reports `Any`+SGR, encodes a
+  wheel-up press with that *real* queried mode via this crate's own
+  `encode_sgr` (the exact call `handle_pane_scroll` makes), writes the
+  result through `Terminal::write_input` (same method `handle_pane_scroll`
+  calls), and confirms the raw bytes reached the child's stdin unmodified
+  by having the child capture them via `stty raw -echo; dd` (bypassing this
+  crate's own VT parser entirely, so a mouse-report sequence fed back in as
+  *input* -- which no real terminal is meant to interpret -- can't be
+  silently swallowed and produce a false pass). Ran it 5 times in a row
+  with no flakes.
+- `cargo run -p labolabo-app` smoke run (`LABOLABO_RS_DATA_DIR=$(mktemp
+  -d)`, ~5 seconds, then killed): no panic/crash output, process exited
+  cleanly on kill.
+
+**Not verified -- no synthetic mouse input, on explicit instruction, same
+as every wave above:**
+
+- **None of this wave's UI-facing behavior has been driven by a real
+  mouse.** The divider handle's cursor icon, hover highlight, drag feel,
+  and whether it visually centers correctly on the boundary; double- and
+  triple-click actually selecting the expected word/line on screen;
+  real mouse-report forwarding into a real running `vim -mouse -mouse=a`/
+  `claude` session (rather than the synthetic-DECSET-plus-direct-
+  `encode_sgr`-call end-to-end test above, which proves the wiring is
+  correct but isn't the same as watching it happen in the actual app
+  window) -- none of these have been seen by a human. The redraw-bridge
+  fix's *end effect* (a terminal pane staying visually correct after
+  toggling the Git pane) is likewise unconfirmed against the real app,
+  though the fix directly addresses a concretely-identified defect
+  (see above) rather than a guessed-at one.
+- **`backend-ghostty-vt`'s new `mouse_mode`/`alternate_scroll_active`
+  implementations were not built or tested on this development machine** --
+  same Zig-toolchain/linker gap as every earlier wave's ghostty-vt entries
+  above (this sandbox's `zig build` fails on missing libSystem symbols
+  before it ever reaches this crate's own code, confirmed pre-existing --
+  identical failure on a clean `origin/dev` checkout with none of this
+  wave's changes applied). Written by directly reading `libghostty-vt`'s
+  Rust API source (`Terminal::mode`, the `Mode::X10_MOUSE`/`NORMAL_MOUSE`/
+  `BUTTON_MOUSE`/`ANY_MOUSE`/`SGR_MOUSE`/`ALT_SCROLL` constants) and
+  mirroring the exact pattern the pre-existing, CI-verified
+  `alt_screen_active`/`bracketed_paste` implementations already use on
+  that backend -- reasonably low-risk by construction, but CI's
+  `rust-term-ghostty` job is what will actually exercise it.

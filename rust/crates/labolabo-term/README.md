@@ -219,6 +219,46 @@ running the **same** integration tests as ghostty (`tests/backend_common.rs`).
   time). Covered by a shared (`tests/backend_common.rs`) headless test on
   both backends: `printf '\033[?2004h'`/`...l` in a spawned shell toggles
   `bracketed_paste()`.
+- **Mouse-mode query via `TermSession::mouse_mode()`, and alternate-scroll
+  query via `TermSession::alternate_scroll_active()`** (added for
+  `labolabo-app`'s SGR mouse-report forwarding, `plans` wave 5j #1/#4):
+  - `mouse_mode()` returns a new `MouseMode` (`mouse.rs`) -- which
+    `MouseTracking` protocol (`Off`/`X10`/`Normal`/`Button`/`Any`,
+    mirroring `libghostty-vt`'s own `mouse::TrackingMode` naming) the
+    foreground program has requested via DECSET `9`/`1000`/`1002`/`1003`,
+    plus whether SGR extended coordinates (`1006`) are also requested.
+    Ghostty backend: queries `Terminal::mode` against each of `Mode::
+    X10_MOUSE`/`NORMAL_MOUSE`/`BUTTON_MOUSE`/`ANY_MOUSE`/`SGR_MOUSE`
+    (confirmed mutually exclusive among the four tracking modes by reading
+    the vendored Zig source's `modeFromInt`: DECSET `9`/`1000`/`1002`/
+    `1003` each map to a distinct tag of a *single* `flags.mouse_event`
+    field, not independent bits). Alacritty backend: reads `TermMode::
+    MOUSE_REPORT_CLICK`/`MOUSE_DRAG`/`MOUSE_MOTION`/`SGR_MOUSE` (also
+    confirmed mutually exclusive by reading `Term::set_private_mode`'s
+    "Mouse protocols are mutually exclusive" comment) -- **with one real
+    backend gap**: `alacritty_terminal`'s vendored `vte` ANSI parser has no
+    `NamedPrivateMode` variant for DECSET `9` (X10) at all, confirmed by
+    reading `vte::ansi::PrivateMode::from(u16)`'s match arms, so this
+    backend can never report `MouseTracking::X10` -- it silently resolves
+    to `Off` instead. Packed into a single `AtomicU8` (`MouseMode::
+    to_bits`/`from_bits`) for the same "cheap plain-data flag the worker
+    thread refreshes, the caller thread reads without blocking" shape
+    `bracketed_paste`/`alt_screen_active` already use, just multi-valued
+    instead of a plain `bool`.
+  - `alternate_scroll_active()` reports DECSET `1007` ("alternate scroll
+    mode"), the signal `labolabo-app`'s wheel handler consults (only once
+    mouse reporting is confirmed off) to decide whether an alt-screen
+    scroll gesture should convert to cursor-key sequences at all -- unlike
+    the flags above, this one **defaults to `true`** on both backends when
+    unset (`alacritty_terminal::TermMode::default()` includes
+    `ALTERNATE_SCROLL`; `libghostty-vt`'s Zig source, `terminal/modes.zig`,
+    gives `mouse_alternate_scroll` a `.default = true`), so the
+    `AtomicBool` backing it is seeded `true` at spawn time too, before the
+    worker ever gets a chance to refresh it from real backend state.
+  - Both covered by shared headless tests (`tests/backend_common.rs`):
+    `mouse_mode_reflects_decset_1000_1002_1006` (Normal -> Button+SGR ->
+    off, via real DECSET sequences from a spawned child) and
+    `alternate_scroll_defaults_on_and_toggles_via_decset_1007`.
 
 ### PTY unification (design decision)
 
