@@ -2998,6 +2998,8 @@ dependencies = [
  "gpui",
  "labolabo-core",
  "labolabo-term",
+ "serde_json",
+ "uuid",
 ]
 
 [[package]]
