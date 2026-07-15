@@ -1,16 +1,20 @@
 //! Pure geometry: translate a pixel-space window/canvas area into a
 //! terminal grid's column/row count, given a fixed cell size.
 //!
-//! No gpui types appear here on purpose -- window-resize -> `TermSession::
-//! resize` wiring (`app::TerminalApp::handle_window_resized`) needs this
-//! math, and keeping it gpui-free makes it unit-testable without spinning
-//! up a gpui `Application`/window (which `cargo test` cannot do headlessly
-//! in CI).
+//! No gpui types appear here on purpose -- both the initial-pane sizing at
+//! startup (`app::TerminalApp::viewport_grid_size`) and the per-pane
+//! resize-on-layout wiring (`app::render_leaf`'s canvas `prepaint`
+//! closure) -> `Terminal::resize` need this math, and keeping it gpui-free
+//! makes it unit-testable without spinning up a gpui `Application`/window
+//! (which `cargo test` cannot do headlessly in CI).
 
-/// Height in pixels reserved for the tab bar strip at the top of the
-/// window, subtracted from the viewport before computing the terminal
-/// grid's own area. Must match `app::TerminalApp::render_tab_bar`'s
-/// `.h(px(TAB_BAR_HEIGHT))`.
+/// Height in pixels reserved for a pane's tab bar strip, subtracted from its
+/// viewport before computing that pane's terminal grid area. Must match
+/// `app::render_pane_tab_bar`'s `.h(px(TAB_BAR_HEIGHT))`. Used directly by
+/// [`grid_size_for_window`] (the whole-window special case, see its own doc
+/// comment); every other pane's own tab bar height is subtracted
+/// automatically by gpui's flex layout instead (see `app::render_leaf`'s doc
+/// comment).
 pub const TAB_BAR_HEIGHT: f32 = 32.0;
 
 /// How many whole `cell_width` x `cell_height` cells fit in an

@@ -2960,6 +2960,7 @@ dependencies = [
  "anyhow",
  "futures",
  "gpui",
+ "labolabo-core",
  "labolabo-term",
 ]
 

@@ -3,7 +3,7 @@ name = "labolabo-app"
 version = "0.1.0"
 edition.workspace = true
 publish = false
-description = "gpui terminal-shell binary for LaboLabo's Rust cross-platform port (wave 5a: bootable skeleton -- window, tab bar, keyboard input, event-driven redraw over labolabo-term's TermSession)."
+description = "gpui terminal-shell binary for LaboLabo's Rust cross-platform port (wave 5b-2: tile/tab tree UI over labolabo-core::tiling, layered on labolabo-term's TermSession)."
 
 [[bin]]
 name = "labolabo-app"
@@ -22,6 +22,7 @@ backend-alacritty = ["labolabo-term/backend-alacritty"]
 backend-ghostty-vt = ["labolabo-term/backend-ghostty-vt"]
 
 [dependencies]
+labolabo-core = { path = "../labolabo-core" }
 labolabo-term = { path = "../labolabo-term", default-features = false }
 anyhow = "1"
 futures = "0.3"
