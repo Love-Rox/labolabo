@@ -15,13 +15,18 @@ git worktree, or an "attached" existing directory), and Tasks + layouts
 persist to a Rust-only SQLite database and are restored on relaunch. **Wave
 5c** adds Claude Code hooks integration (`docs/hooks-protocol.md`): agent
 status dots (tab chip + sidebar row), per-tab Claude session memory, and
-resume-at-restore — see "Claude Code hooks integration" below. **This wave**
-adds the control CLI (`plans/012-task-model-and-control-cli.md` §2,
-`docs/control-protocol.md`): the `labolabo` binary and a second, separate
-control socket let scripts/agents/the app's own Claude sessions open tabs,
-list Tasks/tabs, and switch focus from outside the gpui process — see
-"Control CLI" below. Still not the full production UI — drag & drop (plan
-§3) and Task rename/done/archive are later waves' scope.
+resume-at-restore — see "Claude Code hooks integration" below. The control
+CLI (`plans/012-task-model-and-control-cli.md` §2, `docs/control-protocol.md`)
+followed: the `labolabo` binary and a second, separate control socket let
+scripts/agents/the app's own Claude sessions open tabs, list Tasks/tabs, and
+switch focus from outside the gpui process — see "Control CLI" below. **This
+wave** adds drag & drop (`plans/012` §3): dragging a tab chip onto another
+pane splits (edge) or merges (center) it via `PaneTilingModel::move_pane`,
+dragging a sidebar Task row reorders it within its repo group, and dropping
+OS files/folders inserts shell-quoted paths into a terminal pane or starts a
+new attached Task from a dropped folder — see "Drag & drop" below. Still not
+the full production UI — Task rename/done/archive and interactive divider
+drag-resize are later waves' scope.
 
 Not in the workspace's `default-members` (see `rust/Cargo.toml`): gpui is a
 heavy desktop-UI dependency, and the existing `rust` CI job's fast,
@@ -599,14 +604,77 @@ close-last-surface behavior, scoped to the degenerate one-Task case now
 that Tasks outlive their panes' sessions.
 
 **Not implemented this wave** (see `plans/012-task-model-and-control-cli.md`
-for where these land in the product model): drag & drop (§3 — pane/tab DnD,
-sidebar reordering, OS file drops), and Task rename/done/archive (§1's
-completion flow). Claude Code hooks integration (agent status, per-tab
-session memory, resume-at-restore) landed in wave 5c — see "Claude Code
-hooks integration" above; the control CLI (§2 — `labolabo tab open`/
-`task list`/`tab list`/`focus`) landed this wave — see "Control CLI" above.
-`task new` (§2's own scope note) and exposing the same RPC as an MCP server
-remain reserved/future work (docs/control-protocol.md §5.5).
+for where these land in the product model): Task rename/done/archive (§1's
+completion flow) and interactive divider drag-resize (explicitly out of
+this DnD wave's scope, per the wave's own brief). Claude Code hooks
+integration (agent status, per-tab session memory, resume-at-restore)
+landed in wave 5c — see "Claude Code hooks integration" above; the control
+CLI (§2 — `labolabo tab open`/`task list`/`tab list`/`focus`) landed the
+following wave — see "Control CLI" above; drag & drop (§3 — pane/tab DnD,
+sidebar reordering, OS file drops) landed this wave — see "Drag & drop"
+below. `task new` (§2's own scope note) and exposing the same RPC as an MCP
+server remain reserved/future work (docs/control-protocol.md §5.5).
+
+## Drag & drop (`plans/012-task-model-and-control-cli.md` §3)
+
+Three independent DnD systems, all built on gpui 0.2's `on_drag`/
+`on_drag_move`/`on_drop`/`drag_over`/`can_drop` (`crate::task_workspace`,
+`crate::sidebar`):
+
+- **Pane/tab DnD** (`task_workspace::render_pane_tab_bar`'s per-chip
+  `.on_drag`, `task_workspace::render_leaf`'s per-leaf drop target):
+  dragging a tab chip and dropping it on another pane's outer 25% margin
+  splits toward that edge (`DropEdge::Left/Right/Top/Bottom`); dropping on
+  the inner 50% merges it into that pane's tab group
+  (`DropEdge::Center`) — the exact geometry `app/Sources/PaneTiling.swift`'s
+  `PaneFrameView.edge(at:)` used, ported to gpui's top-left-origin
+  coordinates (`labolabo_core::drop_edge_for_point`, unit-tested). The
+  actual tree mutation is `PaneTilingModel::move_pane` — nothing here
+  reimplements tiling logic. A translucent blue overlay
+  (`task_workspace::MOVE_DROP_HIGHLIGHT_COLOR`) previews the drop zone while
+  dragging; a same-leaf drop onto its own tab group's center, or its own
+  edge when it's the group's only tab, shows no highlight (meaningless —
+  `move_pane` already no-ops on it). **Not implemented:** reordering tabs
+  *within* the same group by dragging (only cross-pane split/merge) — out of
+  this wave's scope per the task brief.
+- **Sidebar Task reorder** (`sidebar::render`'s per-row `.on_drag`/
+  `.on_drop`): dragging a Task row and dropping it on another row within the
+  same repo group reorders it there (`LaboLaboApp::
+  reorder_tasks_in_sidebar`, pure ordering math in `labolabo_core::
+  reorder_task_ids`, unit-tested — other repos' interleaved positions are
+  preserved exactly). Cross-repo drops are rejected (`can_drop`). `sort_order`
+  is renumbered densely and persisted for every Task on each successful
+  reorder.
+- **OS file/folder drops** (§3.1): gpui translates a platform file drag into
+  a synthetic internal drag of its own `ExternalPaths` type, dispatched
+  through the same hit-tested `on_drop`/`drag_over`/`can_drop` machinery as
+  the in-app drags above — so "which pane is under the pointer" falls out of
+  normal event dispatch, no separate coordinate-to-pane resolution needed.
+  - **Onto a terminal pane**: every dropped path is POSIX-shell-quoted and
+    space-joined (`labolabo_core::quote_dropped_paths`, reusing
+    `shell_quote`), with one trailing space and **no newline** — the user
+    finishes the command themselves. A distinct amber overlay
+    (`task_workspace::FILE_DROP_HIGHLIGHT_COLOR`) marks this as "insert",
+    visually different from the pane-move highlight. Dropping on a
+    non-terminal pane (diff/files/commits) is a no-op (`can_drop` rejects
+    it).
+  - **Onto the sidebar**: every dropped *directory* starts a new attached
+    Task there (`LaboLaboApp::handle_sidebar_folder_drop`, reusing "+
+    Attached"'s own tail); dropped files are ignored. No confirmation
+    dialog — matches "+ Attached"'s existing no-confirmation flow.
+    **TODO:** a future wave may want a confirmation step here per the plan's
+    own note (§3: "確認 UI を挟む" for the general case; this wave's brief
+    explicitly allowed skipping it for the no-destructive-side-effect
+    attached-Task case).
+  - **Not implemented**: the relative-path/filename-only path variants (§3.1
+    lists absolute-path as the default and only variant landed here), and
+    Windows PowerShell/cmd quoting (§3.1's OS×shell matrix) — this app is
+    macOS-only today and has no shell-kind metadata per pane yet;
+    `quote_dropped_paths` is POSIX-only pending that.
+  - **Not implemented**: window-level (non-sidebar, non-pane) OS drops —
+    e.g. dropping a folder directly onto empty canvas space outside any
+    pane/sidebar has no handler; the plan's "フォルダをサイドバー/ウィンドウ
+    へドロップ" window-level case is covered only via the sidebar today.
 
 ## Known limitations
 
@@ -631,11 +699,10 @@ remain reserved/future work (docs/control-protocol.md §5.5).
 - **Keyboard focus placement is not persisted.** After a restart, a Task's
   focus defaults to its first leaf's selected tab.
 - **No interactive divider drag-resize**, and the sidebar width is fixed
-  (see "Resize path" above).
-- **No drag & drop.** Moving a tab into another pane (merge) or splitting it
-  out by dragging is a later wave, per `plans/012` §3; `PaneTilingModel::
-  move_pane` (the underlying operation) is already ported and tested in
-  `labolabo-core`, just not wired to any gesture here.
+  (see "Resize path" above) — explicitly out of this DnD wave's scope too
+  (see "Drag & drop" above).
+- **No intra-group tab reorder by dragging**, and **no Windows shell
+  quoting for OS file drops** — see "Drag & drop" above for both.
 - **"Next/previous pane" is DFS tree order, not geometric adjacency.**
   Cmd+]/Cmd+[ cycle `TileNode::leaves()` in depth-first order, not by
   on-screen position — the simplest option wave 5b-2's brief explicitly
@@ -910,3 +977,74 @@ instruction, same as every wave above:**
   confirmed** — `bounds_for_range`'s cursor-cell math is straightforward
   (mirrors `render::paint_cursor`'s own coordinate math) but was not
   screenshotted against a real candidate popover.
+
+### Drag & drop (`plans/012-task-model-and-control-cli.md` §3)
+
+Landed: the three DnD systems described in "Drag & drop" above --
+`labolabo_core::drop_edge_for_point` (pane-move drop-zone geometry, ported
+from `PaneFrameView.edge(at:)`), `labolabo_core::quote_dropped_paths`
+(§3.1's terminal file-drop path encoding, built on the existing
+`shell_quote`), `labolabo_core::reorder_task_ids` (sidebar reorder ordering
+math), and their gpui wiring in `task_workspace.rs`/`sidebar.rs`/`app.rs`
+(`on_drag`/`on_drag_move`/`on_drop`/`drag_over`/`can_drop`).
+
+Verified locally:
+
+- `cargo build -p labolabo-app`, `cargo clippy -p labolabo-app --all-targets
+  -- -D warnings`, and workspace-wide `cargo fmt --check` all pass.
+- `cargo test -p labolabo-app` (105 lib tests + 8 `control_cli` integration
+  tests, unchanged counts): no new app-crate unit tests this wave -- the
+  gpui-level drag/drop wiring itself isn't meaningfully unit-testable
+  without a real `Application`/window (per the task brief, verified instead
+  by the smoke run below and left for manual UI verification); every piece
+  of *pure logic* the wiring calls into lives in, and is tested in,
+  `labolabo-core` instead (see below).
+- `cargo test -p labolabo-core` (284 lib tests + 23 golden/integration
+  tests): the new `drop_edge_for_point` suite in `tiling.rs` (center/edge/
+  corner-priority/non-square-rectangle/degenerate-rectangle cases, plus an
+  explicit test documenting the AppKit-flipped-vs-gpui-top-left coordinate
+  difference from the Swift source), the new `quote_dropped_paths` suite in
+  `hook_settings.rs` (single/multiple paths, embedded-quote escaping, empty
+  input, no-newline invariant), and the new `task_order` module's
+  `reorder_task_ids` suite (move-before, move-to-end, cross-repo-slot
+  preservation, self-drop/unknown-id/cross-repo no-ops) -- plus the full
+  pre-existing suite unchanged (goldens untouched; `move_pane`'s existing
+  tests already covered the underlying tree mutation these both call into).
+- Root `cargo build`/`cargo test`/`cargo clippy -- -D warnings` (workspace
+  `default-members`: `labolabo-core` + `labolabo-term`) all pass.
+- `cargo run -p labolabo-app` smoke run (`LABOLABO_RS_DATA_DIR=$(mktemp
+  -d)`, ~6 seconds, then killed): no panic/crash output, process exited
+  cleanly on kill, no leftover process.
+
+**Not verified -- no synthetic keyboard/mouse input, on explicit
+instruction, same as every wave above. Drag & drop is inherently a gesture
+feature, so this gap is larger than usual here:**
+
+- **No actual drag has been performed.** Dragging a tab chip onto another
+  pane's edge/center, dragging a sidebar Task row onto another row, and
+  dropping an OS file/folder onto a terminal pane or the sidebar have all
+  been traced through gpui's own source (`on_drag`/`on_drag_move`/
+  `on_drop`/`drag_over`/`can_drop`'s exact dispatch code, read directly --
+  see this README's "Drag & drop" section above for what was confirmed that
+  way, including how `FileDropEvent` becomes a synthetic internal drag
+  routed through the same hit-tested dispatch, which is what makes
+  per-pane/per-row drop-target resolution work with no extra coordinate
+  bookkeeping) and compiles/runs without crashing, but none of the five
+  interactions above (pane split, pane merge, same-leaf-meaningless-drop
+  suppression, sidebar reorder, file/folder drop) has been watched happen
+  on screen.
+- **The drop-zone highlight overlays have not been visually confirmed** --
+  `move_drop_highlight_overlay`'s fractional-quadrant math (left/right/top/
+  bottom half, or full-pane center) and the distinct move/insert/reorder
+  colors are straightforward but unscreenshotted.
+- **The sidebar folder-drop -> new-Task flow has not been exercised via an
+  actual OS drag** (dropping a Finder folder onto the sidebar) -- the
+  underlying `resolve_attached_repo`/`Task::new_attached`/
+  `add_task_and_select` path is exercised by "+ Attached"'s own (also
+  unverified-via-click) flow and by `new_task.rs`'s real-git-repo tests, but
+  the drop-triggered entry point itself was not driven end to end.
+- **Whether gpui correctly reports drop coordinates on Linux's X11/Wayland
+  backends for `FileDropEvent`** was not checked -- this wave's development
+  and smoke run were macOS-only (see "macOS 専用" in the repo's top-level
+  `CLAUDE.md`); the dispatch-code reading above covers all three platforms'
+  source, but only macOS was actually run.
