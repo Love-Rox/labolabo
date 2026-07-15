@@ -25,6 +25,7 @@
 
 use std::io::{Read, Write};
 use std::marker::PhantomData;
+use std::path::Path;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -126,12 +127,42 @@ impl<B: VtBackend> TermSession<B> {
     /// colors (see [`crate::backend::VtBackend::new`]). Pass
     /// `&ColorScheme::default()` for the same behavior as
     /// `spawn_with_command`.
+    ///
+    /// Equivalent to [`Self::spawn_with_cwd_options`] with `cwd: None` (the
+    /// child inherits this process's own working directory, `portable-pty`'s
+    /// default) -- kept as a separate, narrower entry point so existing call
+    /// sites that don't care about the child's working directory aren't
+    /// forced to thread a `cwd` through.
     pub fn spawn_with_options(
         cols: u16,
         rows: u16,
         command: Option<&str>,
         env: &[(String, String)],
         colors: &ColorScheme,
+    ) -> anyhow::Result<Self> {
+        Self::spawn_with_cwd_options(cols, rows, command, env, colors, None)
+    }
+
+    /// Like [`Self::spawn_with_options`], with an additional `cwd`: the
+    /// child's initial working directory (`chdir`'d before exec, same as a
+    /// real terminal opened in that directory). `None` leaves it unset --
+    /// `portable-pty`'s `CommandBuilder` then defaults to this process's own
+    /// working directory. This is the mechanism `labolabo-app`'s Task model
+    /// (`plans/012-task-model-and-control-cli.md` §1) uses to spawn a Task's
+    /// panes in that Task's worktree/attached directory rather than wherever
+    /// the app itself happens to be running from.
+    ///
+    /// The directory is not validated here (no existence/is-a-directory
+    /// check) -- an invalid `cwd` surfaces as a spawn failure from the
+    /// underlying `CommandBuilder`/PTY exec, same as passing a bogus
+    /// executable path would.
+    pub fn spawn_with_cwd_options(
+        cols: u16,
+        rows: u16,
+        command: Option<&str>,
+        env: &[(String, String)],
+        colors: &ColorScheme,
+        cwd: Option<&Path>,
     ) -> anyhow::Result<Self> {
         let mut cmd = match command {
             Some(c) => {
@@ -145,6 +176,9 @@ impl<B: VtBackend> TermSession<B> {
         cmd.env("TERM", "xterm-256color");
         for (key, value) in env {
             cmd.env(key, value);
+        }
+        if let Some(dir) = cwd {
+            cmd.cwd(dir);
         }
 
         let pty_system = native_pty_system();

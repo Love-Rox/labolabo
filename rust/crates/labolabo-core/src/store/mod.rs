@@ -26,3 +26,16 @@ pub use database::SessionDatabase;
 pub use error::{StoreError, StoreResult};
 pub use persisting::SessionPersisting;
 pub use record::SessionRecord;
+
+// Wave 5b-3 (`plans/012-task-model-and-control-cli.md` §1's Task model).
+// Appended at the tail rather than interleaved above, same
+// minimize-merge-conflicts reasoning as `lib.rs`'s wave-4a/4b/4c blocks:
+// `Task`/`TaskDatabase` have no Swift/GRDB counterpart (see
+// `task_database`'s module doc comment) and share nothing with the
+// `session`/`appState`-v3 code above beyond this file and `error.rs`.
+mod task_database;
+mod task_record;
+
+pub use data_dir::rust_app_data_dir;
+pub use task_database::TaskDatabase;
+pub use task_record::{Task, TaskKind, TaskStatus};

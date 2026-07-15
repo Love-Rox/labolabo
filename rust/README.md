@@ -637,3 +637,36 @@ byte-identical before and after a full read+write+delete cycle. All 8
 `SessionPersisting` operations are additionally exercised through the trait
 object (not just the inherent methods) in
 `all_8_operations_are_reachable_through_the_session_persisting_trait`.
+
+## Wave 5b-3 (Task model: `store::task_record` / `store::task_database` / `branch_naming`)
+
+Unlike every wave above, this one has **no Swift source**: the Task model
+(`plans/012-task-model-and-control-cli.md` §1 — "1 作業 = 1 worktree (or
+attached directory) = 1 tile/tab tree", decided 2026-07-14 to ship only in
+the Rust port) is new product surface. The `labolabo-core` pieces:
+
+- `store/task_record.rs` — `Task` (`id`: UUID v4, `repo_key`/`repo_root`/
+  `repo_name` from `GitEngine::repo_info`, `kind: Worktree { branch, base,
+  path } | Attached { directory }`, `title`, `layout: TileLayout`, `status:
+  active|done|archived`, `created_at`/`last_active_at`, `sort_order`, and a
+  reserved `agent_bindings` column for the plan's per-tab agent bindings).
+- `store/task_database.rs` — `TaskDatabase` (rusqlite): CRUD + selected-task
+  app-state, with its own ordered-migration ledger (`schemaMigrations`
+  table). **No GRDB compatibility constraint**, and deliberately a separate
+  database *file* from the Swift app's: `TaskDatabase::default_path()` is
+  `<data dir>/LaboLabo-rs/tasks.db` (`store::rust_app_data_dir`), never the
+  Swift `LaboLabo/labolabo.db` — two live apps must never write the same
+  SQLite file, and this schema shares nothing with the GRDB one (which
+  stays untouched for future Swift-data import). A Task's `layout` column
+  stores `TileLayout::to_json` verbatim, so the tile tree's existing
+  byte-compatibility contract carries over unchanged.
+- `branch_naming.rs` — pure `generate_branch_name(prefix, date, existing)`
+  (`labolabo/<YYYYMMDD>-<n>`, collision-skipping) for the "new worktree
+  Task" flow; kept in core (not `labolabo-app`) so the future control CLI
+  (plan §2) can share it.
+
+No golden coverage (nothing to compare against — there is no Swift
+implementation); unit tests cover CRUD round-trips (including `TileLayout`
+through the DB), migration-ledger idempotence, on-disk reopen persistence,
+and malformed-value error surfacing. The UI driving all of this lives in
+`crates/labolabo-app` (see its README's "The Task model" section).

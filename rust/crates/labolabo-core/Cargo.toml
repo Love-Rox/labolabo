@@ -25,14 +25,23 @@ serde_json = "1"
 # dependency) and chrono become runtime dependencies starting wave 4c:
 # `store::SessionDatabase` is real SQLite persistence (a faithful port of
 # `SessionDatabase.swift`, which uses GRDB), not a pure parser. `chrono`
-# (`default-features = false, features = ["std"]` -- no "clock"/"wasmbind",
-# since nothing here calls `Utc::now()`) backs `SessionRecord::added_at`;
-# `store::datetime` hand-rolls both directions of GRDB's `Date` <-> TEXT
-# format rather than using rusqlite's own `chrono` feature, to keep full
-# control over exact byte-for-byte compatibility with GRDB's `DateFormatter`
-# output.
-chrono = { version = "0.4.45", default-features = false, features = ["std"] }
+# (`default-features = false, features = ["std"]`, no "wasmbind" -- this
+# crate never targets wasm) backs `SessionRecord::added_at`; `store::
+# datetime` hand-rolls both directions of GRDB's `Date` <-> TEXT format
+# rather than using rusqlite's own `chrono` feature, to keep full control
+# over exact byte-for-byte compatibility with GRDB's `DateFormatter` output.
+# The `"clock"` feature (`Utc::now()`) is on starting wave 5b-3: `store::
+# task_record::Task::new_*` stamps `created_at`/`last_active_at` at Task-
+# creation time -- unlike `SessionRecord::added_at` (always caller-supplied,
+# since Swift's `SessionRecord` has no Rust-side notion of "now" to begin
+# with), a freshly created `Task` needs a real wall-clock timestamp.
+chrono = { version = "0.4.45", default-features = false, features = ["std", "clock"] }
 rusqlite = { version = "0.40.1", features = ["bundled"] }
+
+# Wave 5b-3: `store::task_record::Task::new_*` mints a UUID v4 per Task
+# (`plans/012-task-model-and-control-cli.md` §1's `id: UUID`) -- `v4` is the
+# only feature needed (random IDs, no MAC-address/timestamp-based variants).
+uuid = { version = "1", features = ["v4"] }
 
 # Wave 4b: `hooks::UnixSocketEventTransport::stop()` needs `shutdown(2)` on a
 # raw fd (to unblock the accept-loop thread's blocking `accept()` call from
