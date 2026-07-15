@@ -4,10 +4,27 @@ version = "0.1.0"
 edition.workspace = true
 publish = false
 description = "gpui terminal-shell binary for LaboLabo's Rust cross-platform port (wave 5b-2: tile/tab tree UI over labolabo-core::tiling, layered on labolabo-term's TermSession)."
+# Now that this package has two bin targets (the gpui app itself, and the
+# `labolabo` control CLI, see the `[[bin]]` entries below), a bare `cargo
+# run -p labolabo-app` (used throughout README.md and CLAUDE.md's smoke-run
+# instructions, predating the control CLI) would otherwise fail with "could
+# not determine which binary to run" -- `default-run` keeps that command
+# launching the app, matching every pre-existing doc/script.
+default-run = "labolabo-app"
 
 [[bin]]
 name = "labolabo-app"
 path = "src/main.rs"
+
+# The control CLI (`docs/control-protocol.md`, `plans/012-task-model-and-
+# control-cli.md` §2): a thin client for `labolabo-app`'s control socket
+# (`src/control.rs`/`labolabo_core::control`). Deliberately a separate,
+# small binary target in this same package rather than a `labolabo-core`
+# `src/bin/` bin (contrast `labolabo-hook`, `labolabo-core`'s own bin
+# target) -- see `src/bin/labolabo.rs`'s module doc comment for why.
+[[bin]]
+name = "labolabo"
+path = "src/bin/labolabo.rs"
 
 [features]
 # Passthrough to labolabo-term's own backend features (see its README/
@@ -44,8 +61,9 @@ chrono = { version = "0.4.45", default-features = false, features = ["std", "clo
 # dependency's feature set.
 uuid = { version = "1", features = ["v4"] }
 
-# Test-only: `hooks::tests` asserts on the merged `.claude/settings.local.json`
-# content's actual JSON structure (not just substring matches), same as
-# `labolabo-core`'s own `hook_settings` tests.
-[dev-dependencies]
+# Control CLI wave (`docs/control-protocol.md`): `LaboLaboApp::
+# dispatch_control`'s command handlers (`app.rs`) build `ControlResponse`
+# `result` payloads with `serde_json::json!`. Previously dev-dependency-only
+# (`hooks::tests` asserted on merged `.claude/settings.local.json`
+# structure); now needed at runtime too.
 serde_json = "1"

@@ -57,11 +57,13 @@ use gpui::{
 };
 
 use labolabo_core::{
-    claude_resume_command, AgentBindings, AgentStatus, AgentStatusEvent, PaneId, PaneItem,
-    PaneKind, PaneTilingModel, Task, TaskDatabase, TaskStatus, TileNode, TileOrientation,
+    claude_resume_command, shell_quote, AgentBindings, AgentStatus, AgentStatusEvent,
+    ControlCommand, ControlResponse, PaneId, PaneItem, PaneKind, PaneTilingModel, Task,
+    TaskDatabase, TaskStatus, TileNode, TileOrientation,
 };
 use labolabo_term::{ColorScheme, Terminal};
 
+use crate::control::{self, ControlRuntime};
 use crate::focus;
 use crate::ghostty_config::FontConfig;
 use crate::grid;
@@ -138,6 +140,16 @@ pub struct LaboLaboApp {
     /// `hooks::spawn_agent_event_bridge`); dropping it would stop event
     /// delivery.
     _agent_event_task: GpuiTask<()>,
+    /// Control-protocol integration (`docs/control-protocol.md`,
+    /// `plans/012` §2): the control socket/server -- see `crate::control`'s
+    /// module doc comment. Its `socket_path` is injected into every spawned
+    /// pane's env as `LABOLABO_CONTROL_SOCKET`.
+    control: ControlRuntime,
+    /// Keeps the control-bridge task alive for the app's lifetime (see
+    /// `control::spawn_control_bridge`); dropping it would stop request
+    /// delivery (every in-flight/future `labolabo` CLI request would time
+    /// out instead of being answered).
+    _control_bridge_task: GpuiTask<()>,
 }
 
 impl LaboLaboApp {
@@ -192,6 +204,19 @@ impl LaboLaboApp {
         let (hooks, hooks_rx) = HookRuntime::new();
         let agent_event_task = hooks::spawn_agent_event_bridge(hooks_rx, cx);
 
+        // Control-protocol integration (docs/control-protocol.md,
+        // `plans/012` §2): a second, separate socket/server (see
+        // `crate::control`'s module doc comment for why this needs a
+        // `WindowHandle`-routed bridge rather than the hooks bridge's plain
+        // `WeakEntity` update). `window.window_handle()` is safe to call
+        // here because this window's root view -- the one being constructed
+        // right now -- is always `Self` (see `main.rs`'s `cx.open_window`
+        // call, the only place a `LaboLaboApp` window is ever opened).
+        let window_handle: gpui::WindowHandle<Self> =
+            gpui::WindowHandle::new(window.window_handle().window_id());
+        let (control_runtime, control_rx) = ControlRuntime::new();
+        let control_bridge_task = control::spawn_control_bridge(control_rx, window_handle, cx);
+
         // Restore every injected directory's `settings.local.json` at quit
         // (docs/hooks-protocol.md §2's "終了時に原本へ復元"). `Context::
         // on_app_quit` (unlike the plain `gpui::App::on_app_quit`) hands the
@@ -215,6 +240,8 @@ impl LaboLaboApp {
             new_task_error: None,
             hooks,
             _agent_event_task: agent_event_task,
+            control: control_runtime,
+            _control_bridge_task: control_bridge_task,
         };
 
         if let Some(id) = selected_task_id {
@@ -311,46 +338,56 @@ impl LaboLaboApp {
             .insert(task_id.to_string(), TaskWorkspace::new(model));
 
         for pane_id in pane_ids {
-            self.spawn_runtime_for_task(task_id, pane_id, cols, rows, cx);
+            self.spawn_runtime_for_task(task_id, pane_id, cols, rows, None, cx);
         }
     }
 
     /// Spawns a new `terminal`-kind pane's session and registers its redraw
-    /// bridge. No-op (with a stderr warning) if the spawn itself fails, or
-    /// if `task_id` has no loaded workspace to register into -- mirrors
-    /// wave 5a/5b-2's `spawn_runtime`.
+    /// bridge. No-op (with a stderr warning), returning `None`, if the spawn
+    /// itself fails, or if `task_id` has no loaded workspace to register
+    /// into -- mirrors wave 5a/5b-2's `spawn_runtime`. Returns `Some(pane_uuid)`
+    /// on success -- the same `LABOLABO_PANE` value registered in the hooks
+    /// routing table below, and (via `open_tab_for_control`) the control
+    /// protocol's `tab_open` response's `pane_id` (docs/control-protocol.md
+    /// §5.1).
     ///
-    /// Two hooks-integration additions over wave 5b-2/5b-3's plain shell
-    /// spawn:
+    /// Hooks-integration additions over wave 5b-2/5b-3's plain shell spawn:
     ///
-    /// - **Env injection** (docs/hooks-protocol.md §7): every spawned pane
-    ///   gets `LABOLABO_PANE=<fresh UUID>` and `LABOLABO_TASK=<task_id>` in
-    ///   its environment, and the UUID is registered in `self.hooks`'
-    ///   routing table so `handle_agent_event` can route that pane's future
-    ///   hook events back here.
+    /// - **Env injection** (docs/hooks-protocol.md §7,
+    ///   docs/control-protocol.md §4.1): every spawned pane gets
+    ///   `LABOLABO_PANE=<fresh UUID>`, `LABOLABO_TASK=<task_id>`, and
+    ///   `LABOLABO_CONTROL_SOCKET=<this process's control socket path>` in
+    ///   its environment, and the pane UUID is registered in `self.hooks`'
+    ///   routing table so `handle_agent_event`/`dispatch_control`'s
+    ///   `focus --pane` can route back to `(task_id, pane_id)`.
     /// - **Resume-at-spawn** (docs/hooks-protocol.md §6's resume guard,
-    ///   `tiling::PaneItem::is_resumable`): if the pane already carries a
-    ///   Claude session id from its persisted `TileLayout` (a Task restored
-    ///   from the database -- see `PaneTilingModel::model_from`; a freshly
-    ///   created pane never does), and its recorded transcript path either
-    ///   doesn't exist or wasn't recorded, spawn `claude --resume <id>`
-    ///   directly as the pane's command instead of a plain shell -- this
-    ///   port's version of the Swift app's `triggerAutoResumeIfNeeded`
-    ///   (which instead types the resume command into an already-running
-    ///   shell after the fact; spawning it directly is simpler here and
-    ///   avoids the "was the shell ready yet" race that approach has to
-    ///   guard against).
+    ///   `tiling::PaneItem::is_resumable`): if `override_command` is `None`
+    ///   and the pane already carries a Claude session id from its
+    ///   persisted `TileLayout` (a Task restored from the database -- see
+    ///   `PaneTilingModel::model_from`; a freshly created pane never does),
+    ///   and its recorded transcript path either doesn't exist or wasn't
+    ///   recorded, spawn `claude --resume <id>` directly as the pane's
+    ///   command instead of a plain shell -- this port's version of the
+    ///   Swift app's `triggerAutoResumeIfNeeded` (which instead types the
+    ///   resume command into an already-running shell after the fact;
+    ///   spawning it directly is simpler here and avoids the "was the shell
+    ///   ready yet" race that approach has to guard against).
+    ///
+    /// `override_command`, when `Some`, always wins over the resume-at-spawn
+    /// command above -- the control protocol's `tab_open --` command
+    /// (docs/control-protocol.md §5.1) is this wave's only caller that
+    /// passes one; every other caller passes `None` (unchanged wave
+    /// 5b-2/5b-3 behavior).
     fn spawn_runtime_for_task(
         &mut self,
         task_id: &str,
         pane_id: PaneId,
         cols: u16,
         rows: u16,
+        override_command: Option<String>,
         cx: &mut Context<Self>,
-    ) {
-        let Some(task) = self.tasks.iter().find(|t| t.id == task_id) else {
-            return;
-        };
+    ) -> Option<String> {
+        let task = self.tasks.iter().find(|t| t.id == task_id)?;
         let cwd = task.working_directory().to_string();
         let colors = self.colors.clone();
 
@@ -362,20 +399,26 @@ impl LaboLaboApp {
                 .find(|p| p.id == pane_id)
                 .cloned()
         });
-        let command = pane_snapshot.as_ref().and_then(|pane| {
-            let transcript_exists = pane
-                .agent_transcript_path
-                .as_deref()
-                .map(|path| Path::new(path).exists())
-                .unwrap_or(false);
-            pane.is_resumable(transcript_exists)
-                .then(|| claude_resume_command(pane.agent_session_id.as_deref()))
+        let command = override_command.or_else(|| {
+            pane_snapshot.as_ref().and_then(|pane| {
+                let transcript_exists = pane
+                    .agent_transcript_path
+                    .as_deref()
+                    .map(|path| Path::new(path).exists())
+                    .unwrap_or(false);
+                pane.is_resumable(transcript_exists)
+                    .then(|| claude_resume_command(pane.agent_session_id.as_deref()))
+            })
         });
 
         let pane_uuid = uuid::Uuid::new_v4().to_string();
         let env = vec![
             ("LABOLABO_PANE".to_string(), pane_uuid.clone()),
             ("LABOLABO_TASK".to_string(), task_id.to_string()),
+            (
+                "LABOLABO_CONTROL_SOCKET".to_string(),
+                self.control.socket_path.clone(),
+            ),
         ];
 
         let session = match Terminal::spawn_with_cwd_options(
@@ -391,7 +434,7 @@ impl LaboLaboApp {
                 eprintln!(
                     "labolabo-app: failed to spawn terminal session for task {task_id}: {err:#}"
                 );
-                return;
+                return None;
             }
         };
 
@@ -407,10 +450,11 @@ impl LaboLaboApp {
                 session,
                 cols,
                 rows,
-                pane_uuid,
+                pane_uuid.clone(),
                 redraw_task,
             );
         }
+        Some(pane_uuid)
     }
 
     /// Snapshots `task_id`'s current `TileLayout` and upserts its Task row
@@ -625,7 +669,34 @@ impl LaboLaboApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let pane = PaneItem::new(PaneKind::Terminal, PaneKind::Terminal.default_title());
+        self.open_tab_for_control(task_id, anchor_pane_id, None, None, window, cx);
+    }
+
+    /// Shared by the UI "+" tab button ([`Self::add_tab_to`], always
+    /// `title: None, command: None`) and the control protocol's `tab_open`
+    /// command (docs/control-protocol.md §5.1, `LaboLaboApp::
+    /// control_tab_open`): adds a new tab to `anchor_pane_id`'s tab group
+    /// and spawns its terminal session, optionally with a custom `title`
+    /// and/or a shell `command` to run instead of the default resume/shell
+    /// logic (see `spawn_runtime_for_task`'s doc comment).
+    ///
+    /// Returns the new pane's `LABOLABO_PANE` uuid on success (the control
+    /// protocol's `tab_open` response's `pane_id`), or `None` if the anchor
+    /// pane's tab group couldn't be found or the spawn itself failed --
+    /// mirrors `spawn_runtime_for_task`'s own `None`-on-failure contract.
+    pub(crate) fn open_tab_for_control(
+        &mut self,
+        task_id: &str,
+        anchor_pane_id: PaneId,
+        title: Option<String>,
+        command: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<String> {
+        let pane = match &title {
+            Some(title) => PaneItem::new(PaneKind::Terminal, title.clone()),
+            None => PaneItem::new(PaneKind::Terminal, PaneKind::Terminal.default_title()),
+        };
         let new_id = pane.id;
         let added = self
             .workspaces
@@ -633,15 +704,23 @@ impl LaboLaboApp {
             .map(|workspace| workspace.model.add_tab(anchor_pane_id, pane))
             .unwrap_or(false);
         if !added {
-            return;
+            return None;
         }
-        self.spawn_runtime_for_task(task_id, new_id, DEFAULT_PANE_COLS, DEFAULT_PANE_ROWS, cx);
+        let pane_uuid = self.spawn_runtime_for_task(
+            task_id,
+            new_id,
+            DEFAULT_PANE_COLS,
+            DEFAULT_PANE_ROWS,
+            command,
+            cx,
+        );
         if let Some(workspace) = self.workspaces.get_mut(task_id) {
             workspace.focused_pane = new_id;
         }
         window.focus(&self.focus_handle);
         self.persist_workspace(task_id);
         cx.notify();
+        pane_uuid
     }
 
     fn split_focused(
@@ -663,7 +742,14 @@ impl LaboLaboApp {
         if let Some(workspace) = self.workspaces.get_mut(task_id) {
             workspace.model.split(focused, orientation, pane);
         }
-        self.spawn_runtime_for_task(task_id, new_id, DEFAULT_PANE_COLS, DEFAULT_PANE_ROWS, cx);
+        self.spawn_runtime_for_task(
+            task_id,
+            new_id,
+            DEFAULT_PANE_COLS,
+            DEFAULT_PANE_ROWS,
+            None,
+            cx,
+        );
         if let Some(workspace) = self.workspaces.get_mut(task_id) {
             workspace.focused_pane = new_id;
         }
@@ -924,6 +1010,201 @@ impl LaboLaboApp {
         self.selected_task_id = Some(id.clone());
         let _ = self.db.set_selected_task_id(Some(&id));
         cx.notify();
+    }
+
+    // MARK: - control protocol (docs/control-protocol.md, `plans/012` §2)
+
+    /// Executes one control-protocol request and returns the serialized
+    /// response (docs/control-protocol.md §6) -- `crate::control`'s bridge
+    /// (`spawn_control_bridge`) calls this via `WindowHandle::update`, which
+    /// is why a live `&mut Window` is available here (needed by
+    /// `open_tab_for_control`/`select_task`/`select_pane`, all of which move
+    /// keyboard focus).
+    pub(crate) fn dispatch_control(
+        &mut self,
+        request_bytes: &[u8],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<u8> {
+        let request = match labolabo_core::parse_request(request_bytes) {
+            Ok(request) => request,
+            Err(err) => return ControlResponse::err(err).to_bytes(),
+        };
+        let command = match ControlCommand::from_request(&request) {
+            Ok(command) => command,
+            Err(err) => return ControlResponse::err(err).to_bytes(),
+        };
+        let ambient_task = request.labolabo_task_id.as_deref();
+
+        let response = match command {
+            ControlCommand::TabOpen {
+                task,
+                title,
+                command,
+            } => self.control_tab_open(task.as_deref(), ambient_task, title, command, window, cx),
+            ControlCommand::TaskList => self.control_task_list(),
+            ControlCommand::TabList { task, all } => {
+                self.control_tab_list(task.as_deref(), ambient_task, all)
+            }
+            ControlCommand::Focus { task, pane } => {
+                self.control_focus(task.as_deref(), pane.as_deref(), window, cx)
+            }
+        };
+        response.to_bytes()
+    }
+
+    /// `tab_open` (docs/control-protocol.md §5.1): resolves the target
+    /// Task, loads its workspace if this is the first control/UI action to
+    /// touch it, and opens a new tab in its currently focused pane's tab
+    /// group via [`Self::open_tab_for_control`] -- the exact path the UI's
+    /// "+" tab button uses, so env injection/hooks routing/persistence all
+    /// go through the same code (docs/control-protocol.md §7).
+    fn control_tab_open(
+        &mut self,
+        explicit_task: Option<&str>,
+        ambient_task: Option<&str>,
+        title: Option<String>,
+        command_argv: Option<Vec<String>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> ControlResponse {
+        let task_id = match labolabo_core::resolve_target_task(explicit_task, ambient_task) {
+            Ok(id) => id,
+            Err(err) => return ControlResponse::err(err),
+        };
+        if !self.tasks.iter().any(|t| t.id == task_id) {
+            return ControlResponse::err(format!("unknown task id: {task_id}"));
+        }
+
+        let (cols, rows) = self.viewport_grid_size(window);
+        self.ensure_workspace_loaded(&task_id, cols, rows, cx);
+        let Some(anchor) = self.workspaces.get(&task_id).map(|w| w.focused_pane) else {
+            return ControlResponse::err(format!("failed to load task workspace: {task_id}"));
+        };
+
+        // Each argv element is shell-quoted individually and space-joined
+        // into the single command string `Terminal::spawn_with_cwd_options`
+        // execs via `/bin/sh -c` (docs/control-protocol.md §5.1) -- the same
+        // quoting rule `labolabo_core::shell_quote` documents for its other
+        // callers (the hooks forwarder's `claude --resume` command string).
+        let command = command_argv.map(|argv| {
+            argv.iter()
+                .map(|arg| shell_quote(arg))
+                .collect::<Vec<_>>()
+                .join(" ")
+        });
+
+        match self.open_tab_for_control(&task_id, anchor, title, command, window, cx) {
+            Some(pane_uuid) => {
+                ControlResponse::ok(serde_json::json!({ "task_id": task_id, "pane_id": pane_uuid }))
+            }
+            None => ControlResponse::err("failed to open a new tab (spawn failed)".to_string()),
+        }
+    }
+
+    /// `task_list` (docs/control-protocol.md §5.2).
+    fn control_task_list(&self) -> ControlResponse {
+        let tasks: Vec<serde_json::Value> = self
+            .tasks
+            .iter()
+            .map(|task| {
+                serde_json::json!({
+                    "id": task.id,
+                    "title": task.title,
+                    "kind": task.kind.tag(),
+                    "repo_name": task.repo_name,
+                    "working_directory": task.working_directory(),
+                    "status": task.status.tag(),
+                })
+            })
+            .collect();
+        ControlResponse::ok(serde_json::json!({ "tasks": tasks }))
+    }
+
+    /// `tab_list` (docs/control-protocol.md §5.3): `all` overrides both
+    /// `explicit_task` and `ambient_task` (lists every loaded Task's tabs);
+    /// otherwise the target Task is `explicit_task.or(ambient_task)`, or --
+    /// if neither is present -- every loaded Task's tabs (same as `all`,
+    /// just reached by "nothing to filter on" rather than an explicit
+    /// request).
+    fn control_tab_list(
+        &self,
+        explicit_task: Option<&str>,
+        ambient_task: Option<&str>,
+        all: bool,
+    ) -> ControlResponse {
+        let target = if all {
+            None
+        } else {
+            explicit_task.or(ambient_task)
+        };
+        if let Some(target) = target {
+            if !self.tasks.iter().any(|t| t.id == target) {
+                return ControlResponse::err(format!("unknown task id: {target}"));
+            }
+        }
+
+        let mut tabs = Vec::new();
+        for task in &self.tasks {
+            if let Some(target) = target {
+                if task.id != target {
+                    continue;
+                }
+            }
+            let Some(workspace) = self.workspaces.get(&task.id) else {
+                continue;
+            };
+            for pane in workspace.model.panes() {
+                let pane_uuid = workspace
+                    .runtimes
+                    .get(&pane.id)
+                    .map(|runtime| runtime.pane_uuid.clone());
+                tabs.push(serde_json::json!({
+                    "task_id": task.id,
+                    "pane_id": pane_uuid,
+                    "title": pane.title,
+                    "kind": pane.kind.raw_value(),
+                    "focused": pane.id == workspace.focused_pane,
+                }));
+            }
+        }
+        ControlResponse::ok(serde_json::json!({ "tabs": tabs }))
+    }
+
+    /// `focus` (docs/control-protocol.md §5.4): exactly one of `task`/`pane`
+    /// is `Some` (`ControlCommand::from_request` already validated this).
+    /// Both are literal ids -- no `--task current`/ambient resolution here
+    /// (see docs/control-protocol.md §5.4's note on why `focus` is
+    /// deliberately excluded from that convenience).
+    fn control_focus(
+        &mut self,
+        task: Option<&str>,
+        pane: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> ControlResponse {
+        if let Some(pane_uuid) = pane {
+            let Some(route) = self.hooks.resolve_pane(pane_uuid) else {
+                return ControlResponse::err(format!("unknown pane id: {pane_uuid}"));
+            };
+            if !self.tasks.iter().any(|t| t.id == route.task_id) {
+                return ControlResponse::err(format!("task no longer exists: {}", route.task_id));
+            }
+            self.select_task(route.task_id.clone(), window, cx);
+            self.select_pane(&route.task_id, route.pane_id, window, cx);
+            return ControlResponse::ok(
+                serde_json::json!({ "task_id": route.task_id, "pane_id": pane_uuid }),
+            );
+        }
+
+        let Some(task_id) = task else {
+            return ControlResponse::err("focus: --task or --pane is required".to_string());
+        };
+        if !self.tasks.iter().any(|t| t.id == task_id) {
+            return ControlResponse::err(format!("unknown task id: {task_id}"));
+        }
+        self.select_task(task_id.to_string(), window, cx);
+        ControlResponse::ok(serde_json::json!({ "task_id": task_id }))
     }
 
     // MARK: - input routing

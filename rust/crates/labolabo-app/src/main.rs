@@ -6,10 +6,16 @@
 //! in the Task's working directory), and Tasks + layouts persist to a
 //! Rust-only SQLite database (restored on relaunch). Not the production
 //! UI: see `crates/labolabo-app/README.md` for scope and known TODOs (IME,
-//! Linux gpui build support, drag & drop, Task rename/done/archive, the
-//! control CLI).
+//! Linux gpui build support, drag & drop, Task rename/done/archive).
+//!
+//! The control CLI (`docs/control-protocol.md`, `plans/012-task-model-and-
+//! control-cli.md` §2) is implemented: `crate::control` wires
+//! `labolabo_core::control::ControlServer` into this window (see that
+//! module and `app.rs`'s `LaboLaboApp::dispatch_control`), and the
+//! `labolabo` CLI bin (`src/bin/labolabo.rs`) is the client.
 
 mod app;
+mod control;
 mod focus;
 mod ghostty_config;
 mod grid;

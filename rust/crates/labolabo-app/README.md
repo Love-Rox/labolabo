@@ -15,9 +15,13 @@ git worktree, or an "attached" existing directory), and Tasks + layouts
 persist to a Rust-only SQLite database and are restored on relaunch. **Wave
 5c** adds Claude Code hooks integration (`docs/hooks-protocol.md`): agent
 status dots (tab chip + sidebar row), per-tab Claude session memory, and
-resume-at-restore — see "Claude Code hooks integration" below. Still not the
-full production UI — the control CLI (plan §2), drag & drop (plan §3), and
-Task rename/done/archive are later waves' scope.
+resume-at-restore — see "Claude Code hooks integration" below. **This wave**
+adds the control CLI (`plans/012-task-model-and-control-cli.md` §2,
+`docs/control-protocol.md`): the `labolabo` binary and a second, separate
+control socket let scripts/agents/the app's own Claude sessions open tabs,
+list Tasks/tabs, and switch focus from outside the gpui process — see
+"Control CLI" below. Still not the full production UI — drag & drop (plan
+§3) and Task rename/done/archive are later waves' scope.
 
 Not in the workspace's `default-members` (see `rust/Cargo.toml`): gpui is a
 heavy desktop-UI dependency, and the existing `rust` CI job's fast,
@@ -112,6 +116,8 @@ GHOSTTY_SOURCE_DIR=/path/to/ghostty-zig016-src \
 | `new_task.rs` | The new-Task flows' git side (gpui-free, integration-tested against real temp repos): repo-identity resolution for attached Tasks, and branch-generation + `git worktree add` for worktree Tasks. |
 | `focus.rs` | Pure tile-tree focus logic (gpui-independent, unit-tested): which pane to focus after a close, next/previous-pane cycling, Cmd+N tab lookup. See its module doc comment for the "focus is a `PaneId`, not a `NodeId`" invariant. |
 | `hooks.rs` | Claude Code hooks integration (wave 5c): the app-wide `AgentStatusBus`, `.claude/settings.local.json` injection/restore, and the `LABOLABO_PANE` routing table. See "Claude Code hooks integration" below. |
+| `control.rs` | Control CLI wiring: `ControlRuntime` (the app-wide control socket/server) and the gpui bridge that routes each request through a `WindowHandle` into `LaboLaboApp::dispatch_control` (`app.rs`). See "Control CLI" below. |
+| `bin/labolabo.rs` | The `labolabo` CLI binary — a thin client for the control socket (argv parsing, `ControlRequest` construction, printing the response). See "Control CLI" below. |
 | `ghostty_config.rs` | Pure-ish loader for the user's Ghostty config (`font-family`/`font-size`, `background`/`foreground`/`cursor-color`/`palette`/`theme`, `config-file` includes). Fixture-tested; never reads `$HOME` in tests. |
 | `grid.rs` | Pure function: pixel area + cell size -> terminal column/row count. No gpui types — unit-tested without a gpui `Application`. |
 | `keys.rs` | Pure function: `gpui::Keystroke` -> PTY input bytes. `Keystroke`/`Modifiers` are plain data, so this is unit-tested directly too. |
@@ -267,6 +273,52 @@ time is not recommended** — this matches `plans/012` §1's own "要設計" not
 on the same-cwd-multiple-Tasks case, which remains only partially resolved
 (the *socket* collision is solved by this wave's one-socket-per-process
 design; the *settings-file* backup race is not).
+
+### Control CLI
+
+Implements `docs/control-protocol.md` (the canonical wire spec, checked in
+at the repo root) end to end: a second AF_UNIX socket (separate from the
+hooks socket above — `control_protocol::control_socket_path_from_uuid`,
+`/tmp/labolabo/control-<10hex>.sock`), the `labolabo` CLI binary, and the
+`tab_open`/`task_list`/`tab_list`/`focus` commands. The flagship use case
+(`plans/012` §2): a Claude session running inside a LaboLabo pane opens a
+teammate as a new tab in its own Task with
+`labolabo tab open --title reviewer -- claude ...`, with no `--task` flag
+needed (resolved from the ambient `LABOLABO_TASK` env var LaboLabo injects
+into every pane it spawns, alongside the pre-existing `LABOLABO_PANE`).
+
+**Same accept-loop-on-a-dedicated-thread shape as the hooks bus, but
+bidirectional.** `labolabo_core::control::ControlServer` mirrors
+`hooks::UnixSocketEventTransport`'s bind/chmod/accept-loop/`stop()`
+structure, but each connection gets a response written back before it
+closes (docs/control-protocol.md §3: "書いて half-close → 読む"). The actual
+Task/tab mutation has to happen on the gpui main thread, so
+`labolabo-app::control::ControlRuntime`'s handler hands each request off
+over a channel and blocks (`std::sync::mpsc`, 15s timeout) for the reply —
+`control::spawn_control_bridge` is the gpui-side task that receives
+requests and calls `LaboLaboApp::dispatch_control` via a `WindowHandle`
+(not the plain `WeakEntity` update the hooks bridge uses — command handlers
+like `open_tab_for_control`/`select_task` need a live `&mut Window`).
+
+**`tab_open` reuses the exact UI "+"-button code path**
+(`LaboLaboApp::open_tab_for_control`, which `add_tab_to` now also calls):
+env injection (`LABOLABO_PANE`/`LABOLABO_TASK`/`LABOLABO_CONTROL_SOCKET`,
+the last one new this wave), hooks routing-table registration, and layout
+persistence are identical whether the tab came from a click or a CLI
+request — this is also the enforcement mechanism for
+`docs/control-protocol.md` §2's "no invisible execution" invariant: there
+is no code path that spawns a pane without also adding it to the visible
+tile/tab tree.
+
+**The CLI is a separate small binary in this same package** (`labolabo`,
+`src/bin/labolabo.rs`) rather than living in `labolabo-core` like
+`labolabo-hook` does — see that file's module doc comment for the
+trade-off this implies (it pulls in the package's `gpui` dependency at
+*build* time, though the linker doesn't include unreferenced gpui code in
+the produced binary). `cargo run -p labolabo-app` (bare) still launches the
+gpui app (`default-run = "labolabo-app"` in `Cargo.toml`, needed once a
+second bin target existed); use `cargo run -p labolabo-app --bin labolabo
+-- ...` (or the built `target/debug/labolabo` binary directly) for the CLI.
 
 ## Keybindings
 
@@ -476,11 +528,14 @@ close-last-surface behavior, scoped to the degenerate one-Task case now
 that Tasks outlive their panes' sessions.
 
 **Not implemented this wave** (see `plans/012-task-model-and-control-cli.md`
-for where these land in the product model): the control CLI (§2), drag &
-drop (§3 — pane/tab DnD, sidebar reordering, OS file drops), and Task
-rename/done/archive (§1's completion flow). Claude Code hooks integration
-(agent status, per-tab session memory, resume-at-restore) landed in wave 5c
-— see "Claude Code hooks integration" above.
+for where these land in the product model): drag & drop (§3 — pane/tab DnD,
+sidebar reordering, OS file drops), and Task rename/done/archive (§1's
+completion flow). Claude Code hooks integration (agent status, per-tab
+session memory, resume-at-restore) landed in wave 5c — see "Claude Code
+hooks integration" above; the control CLI (§2 — `labolabo tab open`/
+`task list`/`tab list`/`focus`) landed this wave — see "Control CLI" above.
+`task new` (§2's own scope note) and exposing the same RPC as an MCP server
+remain reserved/future work (docs/control-protocol.md §5.5).
 
 ## Known limitations
 
