@@ -1292,10 +1292,18 @@ Verified locally:
   `cargo fmt --check` at the workspace root (`default-members`:
   `labolabo-core` + `labolabo-term`) all pass, including a new
   `labolabo-term` integration test (`spawn_with_scrollback_options_caps_
-  history_length`, `tests/backend_common.rs`) that floods far more lines
-  than a small explicit `max_scrollback` and asserts the backend's reported
-  `scrollback_len` actually stays at or under that cap -- not just that the
-  new parameter compiles and is accepted.
+  history_length`, `tests/backend_common.rs`, exercised against the default
+  `backend-alacritty`) that floods far more lines than a small explicit
+  `max_scrollback` and asserts the backend's reported `scrollback_len`
+  lands *exactly* at that cap. This test is also run in CI's separate
+  `rust-term-ghostty` job against the real `backend-ghostty-vt` -- an
+  earlier version asserting the same exact-cap bound for *that* backend
+  failed there (libghostty-vt's pagelist reclaims scrollback in coarse
+  page-sized chunks, not synchronously to an exact line count after a small
+  burst -- see the test's own doc comment for the real numbers observed).
+  The test now only asserts exact capping for alacritty and a weaker
+  "accepted, doesn't error, content still readable" check for ghostty-vt --
+  an honestly narrower guarantee for that backend, not a second guess.
 - Three new `labolabo-core::store::task_database` tests confirm the
   `appState`-backed settings round-trip and default to `None` (not some
   hardcoded value) until first written, and one confirms unparseable
@@ -1338,9 +1346,18 @@ instruction, same as every wave above:**
   an actual `claude` session to `Idle` and watched the token label appear,
   or opened two worktree Tasks on the same repo and edited the same file in
   both to watch the ⚠ badge appear.
-- **`backend-ghostty-vt`'s scrollback-cap wiring was not built or tested**
-  -- same Zig-toolchain gap as wave 5g's entry above; the `max_scrollback`
-  parameter was threaded through by close reading of the vendored
-  `libghostty-vt` crate's `TerminalOptions::max_scrollback` field (confirmed
-  `usize`, matching this parameter's type exactly, so no cast was needed),
-  but has not actually compiled or run against that backend.
+- **`backend-ghostty-vt`'s scrollback-cap wiring was not built or tested on
+  this development machine** -- same Zig-toolchain gap as wave 5g's entry
+  above (this machine has Zig 0.15.2 only). It *was* built and tested by
+  CI's `rust-term-ghostty` job (which does have the 0.16 toolchain), and
+  that run is what surfaced the real, coarser-than-alacritty capping
+  granularity documented on `spawn_with_scrollback_options_caps_history_
+  length`'s doc comment -- so "not tested on this machine" no longer means
+  "unverified anywhere," just that this port's own local development loop
+  couldn't have caught the exact-cap assumption being wrong without CI.
+  What remains genuinely unverified: whether libghostty-vt's pagelist
+  *ever* reclaims down toward a tiny configured `max_scrollback` given a
+  large enough flood, or whether its practical minimum retained history is
+  bounded by something closer to a fixed page size regardless of the
+  requested value -- nobody has floods large enough, on that backend, to
+  find out yet.
