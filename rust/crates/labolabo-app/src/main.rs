@@ -18,6 +18,7 @@ mod app;
 mod control;
 mod focus;
 mod ghostty_config;
+mod git_pane;
 mod grid;
 mod hooks;
 mod ime;
@@ -36,7 +37,7 @@ use gpui::{
 use app::{
     CloseTab, Copy, FocusNextPane, FocusPrevPane, LaboLaboApp, NewTab, Paste, SelectTab1,
     SelectTab2, SelectTab3, SelectTab4, SelectTab5, SelectTab6, SelectTab7, SelectTab8, SelectTab9,
-    SplitDown, SplitRight,
+    SplitDown, SplitRight, ToggleGitPane,
 };
 
 /// Initial window size -- purely a starting point. The initial terminal
@@ -80,6 +81,9 @@ fn main() {
             KeyBinding::new("cmd-7", SelectTab7, None),
             KeyBinding::new("cmd-8", SelectTab8, None),
             KeyBinding::new("cmd-9", SelectTab9, None),
+            // Git pane (`crate::git_pane`) visibility toggle -- the task
+            // brief's own suggested binding ("Cmd+Shift+G 等").
+            KeyBinding::new("cmd-shift-g", ToggleGitPane, None),
         ]);
 
         let bounds = Bounds::centered(None, size(px(INITIAL_WIDTH), px(INITIAL_HEIGHT)), cx);

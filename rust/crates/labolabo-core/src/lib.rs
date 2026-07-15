@@ -244,3 +244,13 @@ pub use control_protocol::{
 pub mod task_order;
 
 pub use task_order::reorder_task_ids;
+
+// Wave 5h (Git pane): a cross-platform (notify-based) port of
+// `Sources/LaboLaboEngine/Git/FileWatcher.swift` -- watches a worktree for
+// changes so `labolabo-app`'s Git pane can re-run `git status`/`diff`
+// live. See the module doc comment for the debounce design and the
+// `.git/` filtering this port adds over the Swift source. Appended at the
+// tail, same reasoning as every other wave block in this file.
+pub mod file_watcher;
+
+pub use file_watcher::FileWatcher;
