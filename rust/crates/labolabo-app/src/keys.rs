@@ -1,26 +1,56 @@
 //! Pure translation from a gpui key event to the bytes a real terminal
-//! expects on its PTY input.
+//! expects on its PTY input, for the keys that must **never** reach the
+//! platform's text-input/IME machinery.
 //!
 //! `gpui::Keystroke`/`Modifiers` are plain data (no `App`/`Window` runtime
 //! needed to construct one), so this is directly unit-testable -- see the
 //! tests below, which build `Keystroke` values by hand.
 //!
-//! TODO(W5a): no IME support. gpui's `EntityInputHandler` (composition,
-//! marked/underlined text, CJK input methods) is not wired up -- this module
-//! only handles single dispatched `KeyDownEvent`s. Composed input (e.g. a
-//! Japanese IME) will not work until that lands.
+//! ## IME design decision (see `app::LaboLaboApp`'s `EntityInputHandler` impl)
 //!
-//! TODO(W5a): only the keys this wave's brief calls for are mapped
-//! (printable text, Enter/Backspace/Tab/Escape/arrows, and a bare
-//! Ctrl-<letter>). Delete/Home/End/PageUp/PageDown/function keys and
-//! modifier combinations beyond a lone Ctrl are future work.
+//! Once a pane has gpui's IME/text-input handler wired up
+//! (`Window::handle_input`, called from the focused pane's canvas paint --
+//! see `task_workspace::render_leaf`), the platform (macOS's
+//! `NSTextInputContext`, X11/Wayland's IBus/fcitx bridge) takes over
+//! **every** keystroke that carries a `key_char` and no
+//! Ctrl/Alt/Cmd modifier: it either self-inserts the character (calling
+//! `EntityInputHandler::replace_text_in_range`) or starts an IME
+//! composition (`replace_and_mark_text_in_range`). This is true on macOS,
+//! X11, *and* Wayland (traced through gpui's own platform backends: all
+//! three route plain/shift-only key_char keystrokes through the input
+//! handler once one is registered, not through the raw `KeyDownEvent`).
+//!
+//! That means this function must **not** also handle those keystrokes --
+//! doing so would either double-send the character (once here, once via the
+//! input handler) or, worse, pre-empt IME composition entirely (writing the
+//! *unconverted* Roman letter to the PTY before the IME ever gets a chance
+//! to turn it into a composed character). So `keystroke_to_bytes` is
+//! intentionally narrow: it only covers keys that must always be handled
+//! directly, because they either carry no `key_char` at all (Enter,
+//! Backspace, Tab, Escape, arrows) or must never be treated as text
+//! (Ctrl-<letter>). Plain printable text -- including space -- is *not*
+//! handled here anymore; it arrives exclusively via
+//! `EntityInputHandler::replace_text_in_range`.
+//!
+//! `app::LaboLaboApp::key_down` calls `cx.stop_propagation()` whenever this
+//! function returns `Some(..)`, which is what prevents gpui from *also*
+//! forwarding an already-handled keystroke (e.g. Ctrl-A, which macOS's
+//! default Cocoa key bindings would otherwise also route to
+//! `doCommandBySelector:`) to the input handler.
+//!
+//! TODO(W5a): only the keys this wave's brief calls for are mapped (Enter/
+//! Backspace/Tab/Escape/arrows, and a bare Ctrl-<letter>).
+//! Delete/Home/End/PageUp/PageDown/function keys and modifier combinations
+//! beyond a lone Ctrl are future work.
 
 use gpui::Keystroke;
 
 /// Translate one key-down event into the bytes to write to the PTY, or
-/// `None` if this keystroke has no terminal-input meaning (a bare modifier
-/// key with no `key_char`, or a Cmd/Super combination -- reserved for
-/// application-level shortcuts, not terminal input).
+/// `None` if this keystroke has no *direct* terminal-input meaning here --
+/// either because it's a bare modifier key with no `key_char`, a Cmd/Super
+/// combination (reserved for application-level shortcuts), or plain
+/// printable text/space, which (see this module's doc comment) is now
+/// handled exclusively via the platform's text-input/IME machinery instead.
 pub fn keystroke_to_bytes(keystroke: &Keystroke) -> Option<Vec<u8>> {
     // Cmd (macOS) / Super (Linux/Windows) combinations are reserved for
     // application-level shortcuts (tab switching, quit, ...), never sent to
@@ -34,7 +64,6 @@ pub fn keystroke_to_bytes(keystroke: &Keystroke) -> Option<Vec<u8>> {
         "backspace" => return Some(vec![0x7f]),
         "tab" => return Some(vec![b'\t']),
         "escape" => return Some(vec![0x1b]),
-        "space" => return Some(vec![b' ']),
         "up" => return Some(b"\x1b[A".to_vec()),
         "down" => return Some(b"\x1b[B".to_vec()),
         "right" => return Some(b"\x1b[C".to_vec()),
@@ -53,10 +82,10 @@ pub fn keystroke_to_bytes(keystroke: &Keystroke) -> Option<Vec<u8>> {
         }
     }
 
-    // Fall back to whatever gpui says was actually typed -- printable text,
-    // including non-ASCII (accented letters, symbols typed via a
-    // dead-key-free layout, ...).
-    keystroke.key_char.as_deref().map(|s| s.as_bytes().to_vec())
+    // Anything else -- plain printable text, space, Alt-modified accented
+    // characters, ... -- is deliberately left to the input handler (see
+    // this module's doc comment).
+    None
 }
 
 /// `Some(letter)` iff `key` is exactly one ASCII letter (gpui's `key` field
@@ -86,13 +115,17 @@ mod tests {
     }
 
     #[test]
-    fn printable_character_forwards_key_char() {
+    fn printable_character_is_left_to_the_input_handler() {
+        // No key_char-carrying, unmodified (or shift-only) keystroke is
+        // handled here anymore -- see this module's doc comment: it must
+        // reach the platform's IME/text-input machinery instead, both so a
+        // composition can start and so it isn't double-sent once one does.
         let ks = keystroke("a", Some("a"), Modifiers::none());
-        assert_eq!(keystroke_to_bytes(&ks), Some(b"a".to_vec()));
+        assert_eq!(keystroke_to_bytes(&ks), None);
     }
 
     #[test]
-    fn shifted_character_forwards_the_shifted_key_char() {
+    fn shifted_character_is_left_to_the_input_handler() {
         let ks = keystroke(
             "a",
             Some("A"),
@@ -101,11 +134,17 @@ mod tests {
                 ..Modifiers::none()
             },
         );
-        assert_eq!(keystroke_to_bytes(&ks), Some(b"A".to_vec()));
+        assert_eq!(keystroke_to_bytes(&ks), None);
     }
 
     #[test]
-    fn enter_backspace_tab_escape_space() {
+    fn space_is_left_to_the_input_handler() {
+        let ks = keystroke("space", Some(" "), Modifiers::none());
+        assert_eq!(keystroke_to_bytes(&ks), None);
+    }
+
+    #[test]
+    fn enter_backspace_tab_escape() {
         assert_eq!(
             keystroke_to_bytes(&keystroke("enter", None, Modifiers::none())),
             Some(vec![b'\r'])
@@ -121,10 +160,6 @@ mod tests {
         assert_eq!(
             keystroke_to_bytes(&keystroke("escape", None, Modifiers::none())),
             Some(vec![0x1b])
-        );
-        assert_eq!(
-            keystroke_to_bytes(&keystroke("space", Some(" "), Modifiers::none())),
-            Some(vec![b' '])
         );
     }
 
@@ -175,10 +210,13 @@ mod tests {
             alt: true,
             ..Modifiers::none()
         };
-        // Falls back to whatever key_char gpui reports for the combination
-        // (e.g. option-a on macOS types "\u{e5}"), not a bare control code.
+        // Not a bare control code, and (like any other key_char-carrying
+        // keystroke this function doesn't special-case) left to the input
+        // handler rather than falling back to key_char here -- e.g.
+        // option-a on macOS types "\u{e5}" via the same text-input path a
+        // plain letter would.
         let ks = keystroke("a", Some("\u{e5}"), ctrl_alt);
-        assert_eq!(keystroke_to_bytes(&ks), Some("\u{e5}".as_bytes().to_vec()));
+        assert_eq!(keystroke_to_bytes(&ks), None);
     }
 
     #[test]

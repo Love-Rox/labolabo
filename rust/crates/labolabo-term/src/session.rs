@@ -26,6 +26,7 @@
 use std::io::{Read, Write};
 use std::marker::PhantomData;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -86,6 +87,10 @@ pub struct TermSession<B: VtBackend> {
     latest: Arc<Mutex<Arc<GridSnapshot>>>,
     events: Mutex<Receiver<TermEvent>>,
     worker_tx: Mutex<Sender<WorkerMsg>>,
+    /// Mirrors `VtBackend::bracketed_paste` for the caller thread -- updated
+    /// by the worker after every processed PTY byte batch (see
+    /// `run_worker`), read non-blockingly by [`Self::bracketed_paste`].
+    bracketed_paste: Arc<AtomicBool>,
     /// A kill handle split off the child (`Child::clone_killer`) so
     /// [`Self::shutdown`] can signal it even though the `Child` itself is
     /// owned by (and reaped on) the worker thread.
@@ -206,6 +211,7 @@ impl<B: VtBackend> TermSession<B> {
         let master = Arc::new(Mutex::new(pair.master));
 
         let latest = Arc::new(Mutex::new(Arc::new(GridSnapshot::blank(cols, rows))));
+        let bracketed_paste = Arc::new(AtomicBool::new(false));
         let (event_tx, event_rx) = mpsc::channel::<TermEvent>();
         let (worker_tx, worker_rx) = mpsc::channel::<WorkerMsg>();
 
@@ -240,9 +246,18 @@ impl<B: VtBackend> TermSession<B> {
             let writer = writer.clone();
             let latest = latest.clone();
             let colors = colors.clone();
+            let bracketed_paste = bracketed_paste.clone();
             thread::spawn(move || {
                 run_worker::<B>(
-                    cols, rows, writer, latest, worker_rx, event_tx, child, colors,
+                    cols,
+                    rows,
+                    writer,
+                    latest,
+                    bracketed_paste,
+                    worker_rx,
+                    event_tx,
+                    child,
+                    colors,
                 );
             });
         }
@@ -251,6 +266,7 @@ impl<B: VtBackend> TermSession<B> {
             writer,
             master,
             latest,
+            bracketed_paste,
             events: Mutex::new(event_rx),
             worker_tx: Mutex::new(worker_tx),
             killer: Mutex::new(killer),
@@ -325,6 +341,16 @@ impl<B: VtBackend> TermSession<B> {
         }
     }
 
+    /// Whether bracketed paste mode (DECSET `2004`) is currently enabled --
+    /// a cheap, non-blocking read of the flag the worker thread refreshes
+    /// after every processed PTY byte batch (see `run_worker` and
+    /// `VtBackend::bracketed_paste`). `labolabo-app`'s Cmd+V paste handler
+    /// uses this to decide whether to wrap the pasted text in
+    /// `ESC[200~...ESC[201~`.
+    pub fn bracketed_paste(&self) -> bool {
+        self.bracketed_paste.load(Ordering::Relaxed)
+    }
+
     /// Wait up to `timeout` for the next [`TermEvent`], or `None` on timeout.
     pub fn recv_event(&self, timeout: Duration) -> Option<TermEvent> {
         let rx = self.events.lock().ok()?;
@@ -380,6 +406,7 @@ fn run_worker<B: VtBackend>(
     rows: u16,
     writer: SharedWriter,
     latest: Arc<Mutex<Arc<GridSnapshot>>>,
+    bracketed_paste: Arc<AtomicBool>,
     rx: Receiver<WorkerMsg>,
     event_tx: Sender<TermEvent>,
     mut child: Box<dyn portable_pty::Child + Send + Sync>,
@@ -398,6 +425,10 @@ fn run_worker<B: VtBackend>(
         match msg {
             WorkerMsg::Bytes(bytes) => {
                 backend.feed(&bytes);
+                // Refresh the bracketed-paste flag on every processed batch
+                // (unlike the snapshot, not throttled -- it's a single cheap
+                // bool, and a paste can arrive at any time between frames).
+                bracketed_paste.store(backend.bracketed_paste(), Ordering::Relaxed);
                 if last_snapshot.elapsed() >= FRAME_INTERVAL {
                     last_snapshot = Instant::now();
                     publish_snapshot(&mut backend, &latest, &event_tx);

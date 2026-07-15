@@ -20,8 +20,10 @@ mod focus;
 mod ghostty_config;
 mod grid;
 mod hooks;
+mod ime;
 mod keys;
 mod new_task;
+mod paste;
 mod render;
 mod sidebar;
 mod task_workspace;
@@ -31,7 +33,7 @@ use gpui::{
 };
 
 use app::{
-    CloseTab, FocusNextPane, FocusPrevPane, LaboLaboApp, NewTab, SelectTab1, SelectTab2,
+    CloseTab, FocusNextPane, FocusPrevPane, LaboLaboApp, NewTab, Paste, SelectTab1, SelectTab2,
     SelectTab3, SelectTab4, SelectTab5, SelectTab6, SelectTab7, SelectTab8, SelectTab9, SplitDown,
     SplitRight,
 };
@@ -64,6 +66,7 @@ fn main() {
             KeyBinding::new("cmd-w", CloseTab, None),
             KeyBinding::new("cmd-d", SplitRight, None),
             KeyBinding::new("cmd-shift-d", SplitDown, None),
+            KeyBinding::new("cmd-v", Paste, None),
             KeyBinding::new("cmd-]", FocusNextPane, None),
             KeyBinding::new("cmd-[", FocusPrevPane, None),
             KeyBinding::new("cmd-1", SelectTab1, None),
