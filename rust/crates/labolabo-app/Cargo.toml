@@ -36,3 +36,16 @@ gpui = "0.2"
 # matches `labolabo-core`'s own `chrono` dependency to keep one resolved
 # version in the workspace lockfile.
 chrono = { version = "0.4.45", default-features = false, features = ["std", "clock"] }
+
+# Wave 5c (hooks integration): `hooks::HookRuntime` mints a fresh UUID per
+# spawned pane (the `LABOLABO_PANE` env value, routing hook events back to
+# their pane -- see `hooks.rs`'s module doc comment) and per app-launch
+# socket path. `v4` only (random IDs), matching `labolabo-core`'s own `uuid`
+# dependency's feature set.
+uuid = { version = "1", features = ["v4"] }
+
+# Test-only: `hooks::tests` asserts on the merged `.claude/settings.local.json`
+# content's actual JSON structure (not just substring matches), same as
+# `labolabo-core`'s own `hook_settings` tests.
+[dev-dependencies]
+serde_json = "1"

@@ -53,18 +53,19 @@ use std::path::Path;
 
 use gpui::{
     actions, div, prelude::*, rgb, Context, FocusHandle, IntoElement, KeyDownEvent,
-    PathPromptOptions, Render, Window,
+    PathPromptOptions, Render, Task as GpuiTask, Window,
 };
 
 use labolabo_core::{
-    PaneId, PaneItem, PaneKind, PaneTilingModel, Task, TaskDatabase, TaskStatus, TileNode,
-    TileOrientation,
+    claude_resume_command, AgentBindings, AgentStatus, AgentStatusEvent, PaneId, PaneItem,
+    PaneKind, PaneTilingModel, Task, TaskDatabase, TaskStatus, TileNode, TileOrientation,
 };
 use labolabo_term::{ColorScheme, Terminal};
 
 use crate::focus;
 use crate::ghostty_config::FontConfig;
 use crate::grid;
+use crate::hooks::{self, HookRuntime};
 use crate::keys::keystroke_to_bytes;
 use crate::new_task;
 use crate::render::RenderSpec;
@@ -128,6 +129,15 @@ pub struct LaboLaboApp {
     /// attempt. There is no success-path banner; a successful flow just
     /// selects the new Task, which is feedback enough.
     new_task_error: Option<String>,
+    /// Claude Code hooks integration: the shared socket/bus, the forwarder
+    /// binary path, `.claude/settings.local.json` injection bookkeeping, and
+    /// the `LABOLABO_PANE` routing table -- see `crate::hooks`'s module doc
+    /// comment.
+    hooks: HookRuntime,
+    /// Keeps the hooks-event bridge task alive for the app's lifetime (see
+    /// `hooks::spawn_agent_event_bridge`); dropping it would stop event
+    /// delivery.
+    _agent_event_task: GpuiTask<()>,
 }
 
 impl LaboLaboApp {
@@ -174,6 +184,26 @@ impl LaboLaboApp {
             .filter(|id| tasks.iter().any(|t| &t.id == id))
             .or_else(|| tasks.first().map(|t| t.id.clone()));
 
+        // Claude Code hooks integration (docs/hooks-protocol.md): one shared
+        // socket/bus for the whole app process (see `hooks`'s module doc
+        // comment for why, vs. Swift's one-per-session design), bridged into
+        // gpui via an unbounded channel + a coalescing-free redraw-bridge-
+        // style task (`hooks::spawn_agent_event_bridge`).
+        let (hooks, hooks_rx) = HookRuntime::new();
+        let agent_event_task = hooks::spawn_agent_event_bridge(hooks_rx, cx);
+
+        // Restore every injected directory's `settings.local.json` at quit
+        // (docs/hooks-protocol.md §2's "終了時に原本へ復元"). `Context::
+        // on_app_quit` (unlike the plain `gpui::App::on_app_quit`) hands the
+        // closure `&mut LaboLaboApp` directly, so this can just call
+        // `HookRuntime::restore_all` through `self` -- no separately shared
+        // handle needed.
+        cx.on_app_quit(|this, _cx| {
+            this.hooks.restore_all();
+            std::future::ready(())
+        })
+        .detach();
+
         let mut this = Self {
             db,
             tasks,
@@ -183,6 +213,8 @@ impl LaboLaboApp {
             spec,
             colors: color_config.clone(),
             new_task_error: None,
+            hooks,
+            _agent_event_task: agent_event_task,
         };
 
         if let Some(id) = selected_task_id {
@@ -258,6 +290,12 @@ impl LaboLaboApp {
             return;
         };
 
+        // Inject Claude Code hooks into this Task's working directory
+        // before any pane spawns (idempotent per directory -- see
+        // `HookRuntime::ensure_injected`'s doc comment).
+        self.hooks
+            .ensure_injected(Path::new(task.working_directory()));
+
         let model = PaneTilingModel::model_from(&task.layout).unwrap_or_else(|| {
             let pane = PaneItem::new(PaneKind::Terminal, PaneKind::Terminal.default_title());
             PaneTilingModel::new(TileNode::leaf(pane))
@@ -277,11 +315,31 @@ impl LaboLaboApp {
         }
     }
 
-    /// Spawns a new `terminal`-kind pane's session (a fresh login-shell
-    /// `Terminal`, started in `task_id`'s working directory) and registers
-    /// its redraw bridge. No-op (with a stderr warning) if the spawn itself
-    /// fails, or if `task_id` has no loaded workspace to register into --
-    /// mirrors wave 5a/5b-2's `spawn_runtime`.
+    /// Spawns a new `terminal`-kind pane's session and registers its redraw
+    /// bridge. No-op (with a stderr warning) if the spawn itself fails, or
+    /// if `task_id` has no loaded workspace to register into -- mirrors
+    /// wave 5a/5b-2's `spawn_runtime`.
+    ///
+    /// Two hooks-integration additions over wave 5b-2/5b-3's plain shell
+    /// spawn:
+    ///
+    /// - **Env injection** (docs/hooks-protocol.md §7): every spawned pane
+    ///   gets `LABOLABO_PANE=<fresh UUID>` and `LABOLABO_TASK=<task_id>` in
+    ///   its environment, and the UUID is registered in `self.hooks`'
+    ///   routing table so `handle_agent_event` can route that pane's future
+    ///   hook events back here.
+    /// - **Resume-at-spawn** (docs/hooks-protocol.md §6's resume guard,
+    ///   `tiling::PaneItem::is_resumable`): if the pane already carries a
+    ///   Claude session id from its persisted `TileLayout` (a Task restored
+    ///   from the database -- see `PaneTilingModel::model_from`; a freshly
+    ///   created pane never does), and its recorded transcript path either
+    ///   doesn't exist or wasn't recorded, spawn `claude --resume <id>`
+    ///   directly as the pane's command instead of a plain shell -- this
+    ///   port's version of the Swift app's `triggerAutoResumeIfNeeded`
+    ///   (which instead types the resume command into an already-running
+    ///   shell after the fact; spawning it directly is simpler here and
+    ///   avoids the "was the shell ready yet" race that approach has to
+    ///   guard against).
     fn spawn_runtime_for_task(
         &mut self,
         task_id: &str,
@@ -296,11 +354,35 @@ impl LaboLaboApp {
         let cwd = task.working_directory().to_string();
         let colors = self.colors.clone();
 
+        let pane_snapshot = self.workspaces.get(task_id).and_then(|workspace| {
+            workspace
+                .model
+                .panes()
+                .into_iter()
+                .find(|p| p.id == pane_id)
+                .cloned()
+        });
+        let command = pane_snapshot.as_ref().and_then(|pane| {
+            let transcript_exists = pane
+                .agent_transcript_path
+                .as_deref()
+                .map(|path| Path::new(path).exists())
+                .unwrap_or(false);
+            pane.is_resumable(transcript_exists)
+                .then(|| claude_resume_command(pane.agent_session_id.as_deref()))
+        });
+
+        let pane_uuid = uuid::Uuid::new_v4().to_string();
+        let env = vec![
+            ("LABOLABO_PANE".to_string(), pane_uuid.clone()),
+            ("LABOLABO_TASK".to_string(), task_id.to_string()),
+        ];
+
         let session = match Terminal::spawn_with_cwd_options(
             cols,
             rows,
-            None,
-            &[],
+            command.as_deref(),
+            &env,
             &colors,
             Some(Path::new(&cwd)),
         ) {
@@ -313,6 +395,9 @@ impl LaboLaboApp {
             }
         };
 
+        self.hooks
+            .register_pane(pane_uuid.clone(), task_id.to_string(), pane_id);
+
         let redraw_task =
             task_workspace::spawn_redraw_bridge(session.clone(), task_id.to_string(), pane_id, cx);
         if let Some(workspace) = self.workspaces.get_mut(task_id) {
@@ -322,6 +407,7 @@ impl LaboLaboApp {
                 session,
                 cols,
                 rows,
+                pane_uuid,
                 redraw_task,
             );
         }
@@ -344,6 +430,106 @@ impl LaboLaboApp {
                 eprintln!("labolabo-app: failed to persist task {task_id}: {err}");
             }
         }
+    }
+
+    // MARK: - Claude Code hooks events (docs/hooks-protocol.md §6)
+
+    /// Consumes one parsed hook event (delivered by
+    /// `hooks::spawn_agent_event_bridge`): updates the routed pane's live
+    /// [`AgentStatus`] (for the tab-chip dot), and -- for events carrying a
+    /// `session_id` -- records the per-tab Claude session binding (into the
+    /// Task's `TileLayout`, via `PaneTilingModel::record_agent_session`,
+    /// exactly like the Swift app's tab-resume feature) and the Task-level
+    /// `agent_bindings` fallback (docs/hooks-protocol.md §6(a); see
+    /// `labolabo_core::AgentBindings`'s module doc comment for why these are
+    /// two separate records).
+    pub(crate) fn handle_agent_event(&mut self, event: AgentStatusEvent, cx: &mut Context<Self>) {
+        let route = event
+            .pane_id
+            .as_deref()
+            .and_then(|id| self.hooks.resolve_pane(id));
+
+        if let Some(route) = &route {
+            if let Some(workspace) = self.workspaces.get_mut(&route.task_id) {
+                workspace.pane_status.insert(route.pane_id, event.status);
+            }
+        }
+
+        if let Some(session_id) = &event.session_id {
+            // Prefer the event's own `labolabo_task_id` (only trusted if it
+            // names a Task still known to this run); fall back to the
+            // routed pane's Task, matching docs/hooks-protocol.md §7's
+            // "labolabo_task_id が予約済み" -- as of the forwarder's current
+            // annotation, this is always the same Task as `route`'s when
+            // both are present, but keeping them independently resolved
+            // means a future task-id-only event (no pane_id) still records
+            // the §6(a) fallback correctly.
+            let binding_task_id = event
+                .task_id
+                .clone()
+                .filter(|id| self.tasks.iter().any(|t| &t.id == id))
+                .or_else(|| route.as_ref().map(|r| r.task_id.clone()));
+
+            if let Some(task_id) = &binding_task_id {
+                self.record_agent_binding(task_id, session_id, event.transcript_path.as_deref());
+            }
+
+            if let Some(route) = &route {
+                if let Some(workspace) = self.workspaces.get_mut(&route.task_id) {
+                    workspace.model.record_agent_session(
+                        session_id.clone(),
+                        route.pane_id,
+                        event.transcript_path.clone(),
+                    );
+                }
+                self.persist_workspace(&route.task_id);
+            }
+        }
+
+        cx.notify();
+    }
+
+    /// Updates `task_id`'s `agent_bindings` column (docs/hooks-protocol.md
+    /// §6(a) fallback) and persists it, unless the new observation is
+    /// identical to what's already recorded (`AgentBindings::record`'s
+    /// dedup check -- avoids a write on every `PreToolUse`/`PostToolUse` of
+    /// an already-known session).
+    fn record_agent_binding(
+        &mut self,
+        task_id: &str,
+        session_id: &str,
+        transcript_path: Option<&str>,
+    ) {
+        let Some(task) = self.tasks.iter_mut().find(|t| t.id == task_id) else {
+            return;
+        };
+        let mut bindings = AgentBindings::from_json(task.agent_bindings.as_deref());
+        if !bindings.record(session_id, transcript_path) {
+            return;
+        }
+        task.agent_bindings = Some(bindings.to_json());
+        if let Err(err) = self.db.upsert_task(task) {
+            eprintln!("labolabo-app: failed to persist agent binding for task {task_id}: {err}");
+        }
+    }
+
+    /// The aggregate [`AgentStatus`] shown on `task_id`'s sidebar row: the
+    /// highest-priority status across its panes (priority order, highest
+    /// first: waiting-for-input, running, starting, idle, ended/none/
+    /// unknown), or `None` if the Task has no loaded workspace or no pane
+    /// has reported a status yet. Deliberately a simple max, not
+    /// last-writer-wins across panes -- Swift's sidebar dot has one status
+    /// per *session* (1 worktree = 1 agent), so there's no direct analogue
+    /// for "which of several tabs' statuses wins"; picking the most
+    /// attention-worthy one seemed like the least surprising choice for this
+    /// port's per-Task, multi-tab sidebar row.
+    pub(crate) fn task_agent_status(&self, task_id: &str) -> Option<AgentStatus> {
+        let workspace = self.workspaces.get(task_id)?;
+        workspace
+            .pane_status
+            .values()
+            .copied()
+            .max_by_key(|status| status_priority(*status))
     }
 
     // MARK: - Task selection
@@ -545,7 +731,9 @@ impl LaboLaboApp {
                 // Quit path: tear the runtime down (signaling the child on a
                 // user-driven close) and quit, like wave 5b-2.
                 if let Some(workspace) = self.workspaces.get_mut(task_id) {
+                    workspace.pane_status.remove(&pane_id);
                     if let Some(runtime) = workspace.runtimes.remove(&pane_id) {
+                        self.hooks.unregister_pane(&runtime.pane_uuid);
                         if shutdown_child {
                             runtime.session.shutdown();
                         }
@@ -562,14 +750,19 @@ impl LaboLaboApp {
             // Natural exit of a Task's last pane's shell: drop the dead
             // runtime, keep the pane as a recoverable anchor.
             if let Some(workspace) = self.workspaces.get_mut(task_id) {
-                workspace.runtimes.remove(&pane_id);
+                workspace.pane_status.remove(&pane_id);
+                if let Some(runtime) = workspace.runtimes.remove(&pane_id) {
+                    self.hooks.unregister_pane(&runtime.pane_uuid);
+                }
             }
             cx.notify();
             return;
         }
 
         if let Some(workspace) = self.workspaces.get_mut(task_id) {
+            workspace.pane_status.remove(&pane_id);
             if let Some(runtime) = workspace.runtimes.remove(&pane_id) {
+                self.hooks.unregister_pane(&runtime.pane_uuid);
                 if shutdown_child {
                     runtime.session.shutdown();
                 }
@@ -854,6 +1047,19 @@ fn single_terminal_layout() -> labolabo_core::TileLayout {
     PaneTilingModel::new(TileNode::leaf(pane)).snapshot()
 }
 
+/// Ranks [`AgentStatus`] by how attention-worthy it is, highest first --
+/// used by [`LaboLaboApp::task_agent_status`] to pick one status to show for
+/// a Task with multiple tabs in different states.
+fn status_priority(status: AgentStatus) -> u8 {
+    match status {
+        AgentStatus::WaitingForInput => 4,
+        AgentStatus::Running => 3,
+        AgentStatus::Starting => 2,
+        AgentStatus::Idle => 1,
+        AgentStatus::None | AgentStatus::Ended => 0,
+    }
+}
+
 impl Render for LaboLaboApp {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let sidebar_el = sidebar::render(self, cx);
@@ -866,6 +1072,7 @@ impl Render for LaboLaboApp {
                     &task_id,
                     &workspace.model.root,
                     &workspace.runtimes,
+                    &workspace.pane_status,
                     focused_pane,
                     &spec,
                     cx,

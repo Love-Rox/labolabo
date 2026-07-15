@@ -423,6 +423,29 @@ mod tests {
         );
     }
 
+    /// Wave 5c (hooks integration): `Task::agent_bindings` (the
+    /// docs/hooks-protocol.md §6(a) fallback, `crate::store::AgentBindings`'s
+    /// JSON) round-trips through the DB like every other column -- this was
+    /// `None` for every pre-existing test's `sample_task`, so it's worth its
+    /// own assertion once a real value is set.
+    #[test]
+    fn agent_bindings_round_trips_through_upsert_and_all_tasks() {
+        let db = TaskDatabase::open_in_memory().unwrap();
+        let mut task = sample_task(0);
+        let mut bindings = crate::store::AgentBindings::default();
+        bindings.record("sess-1", Some("/tmp/t.jsonl"));
+        task.agent_bindings = Some(bindings.to_json());
+        db.upsert_task(&task).unwrap();
+
+        let all = db.all_tasks().unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].agent_bindings, task.agent_bindings);
+        assert_eq!(
+            crate::store::AgentBindings::from_json(all[0].agent_bindings.as_deref()),
+            bindings
+        );
+    }
+
     #[test]
     fn upsert_on_existing_id_updates_in_place_not_duplicates() {
         let db = TaskDatabase::open_in_memory().unwrap();

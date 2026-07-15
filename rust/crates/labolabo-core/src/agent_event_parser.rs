@@ -51,6 +51,10 @@ pub fn parse(data: &[u8]) -> Option<AgentStatusEvent> {
             .get("labolabo_pane_id")
             .and_then(Value::as_str)
             .map(String::from),
+        task_id: object
+            .get("labolabo_task_id")
+            .and_then(Value::as_str)
+            .map(String::from),
     })
 }
 
@@ -70,7 +74,7 @@ mod tests {
     #[test]
     fn parses_full_event() {
         let event = parse_str(
-            r#"{"hook_event_name":"SessionStart","session_id":"s1","transcript_path":"/t.jsonl","cwd":"/w","labolabo_pane_id":"P1"}"#,
+            r#"{"hook_event_name":"SessionStart","session_id":"s1","transcript_path":"/t.jsonl","cwd":"/w","labolabo_pane_id":"P1","labolabo_task_id":"T1"}"#,
         )
         .expect("event");
         assert_eq!(event.status, AgentStatus::Starting);
@@ -79,6 +83,7 @@ mod tests {
         assert_eq!(event.transcript_path.as_deref(), Some("/t.jsonl"));
         assert_eq!(event.cwd.as_deref(), Some("/w"));
         assert_eq!(event.pane_id.as_deref(), Some("P1"));
+        assert_eq!(event.task_id.as_deref(), Some("T1"));
     }
 
     #[test]
@@ -89,6 +94,18 @@ mod tests {
         assert_eq!(event.transcript_path, None);
         assert_eq!(event.cwd, None);
         assert_eq!(event.pane_id, None);
+        assert_eq!(event.task_id, None);
+    }
+
+    /// `labolabo_task_id` can be present without `labolabo_pane_id` (e.g. a
+    /// future task-level-only forwarder annotation) -- the two fields are
+    /// parsed independently.
+    #[test]
+    fn task_id_parses_independently_of_pane_id() {
+        let event = parse_str(r#"{"hook_event_name":"SessionEnd","labolabo_task_id":"T9"}"#)
+            .expect("event");
+        assert_eq!(event.pane_id, None);
+        assert_eq!(event.task_id.as_deref(), Some("T9"));
     }
 
     #[test]

@@ -180,3 +180,31 @@ pub use store::{Task, TaskDatabase, TaskKind, TaskStatus};
 //   product surface (see `store::task_database`'s module doc comment for
 //   why the Task model itself has none either).
 pub mod branch_naming;
+
+// Wave 5c (`plans/012-task-model-and-control-cli.md`'s hooks-integration
+// follow-up): Claude Code hooks wiring for `labolabo-app` -- agent status
+// display, per-tab session memory, and resume-on-restart. Appended at the
+// tail, same reasoning as the wave 4a/4b/4c/5b-3 blocks above.
+//
+// - `hook_settings`: pure functions for the `.claude/settings.local.json`
+//   merge, the forwarder command string, the socket path, and the Claude
+//   `--resume` launch command -- ported from the shape of
+//   `app/Sources/AgentSessionModel.swift`'s `installLocalSettings`/
+//   `hookEntry`/`shellQuoted` and `Sources/LaboLaboEngine/Agent/
+//   AgentAdapter.swift`'s `launchCommand`/`shellQuoted`. The actual file
+//   I/O (backup/restore) is `labolabo-app`'s job -- see this module's own
+//   doc comment.
+pub mod hook_settings;
+
+pub use hook_settings::{
+    claude_resume_command, hook_command, merge_hooks, shell_quote, socket_path_from_uuid,
+    MergedSettings, HOOK_EVENTS,
+};
+
+// `store::agent_bindings`: the Task-level (docs/hooks-protocol.md §6(a))
+// "last session id/transcript path" fallback record, persisted into
+// `Task::agent_bindings` (reserved since wave 5b-3). See its module doc
+// comment for why this is deliberately *not* where per-tab bindings live
+// (those already round-trip through `Task::layout`/`tiling::PaneItem`, see
+// `tiling.rs`'s module doc comment).
+pub use store::AgentBindings;

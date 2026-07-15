@@ -118,11 +118,14 @@ pub struct Task {
     /// plays today. DnD reordering (plan §3) is out of this wave's scope;
     /// new Tasks are appended (see `TaskDatabase::next_sort_order`).
     pub sort_order: i64,
-    /// Reserved for the plan's §1 `agentBindings` (per-tab agent-session
-    /// bindings, the Task-scoped analogue of `SessionRecord::
-    /// agent_session_id`/`transcript_path`) — always `None` until a future
-    /// wave populates it. The column exists today so that wave needs no
-    /// further migration.
+    /// The plan's §1 `agentBindings`: `Some(json)` (see
+    /// `crate::store::AgentBindings::to_json`/`from_json`) once a hooks
+    /// event with a `session_id` has been observed for this Task, `None`
+    /// until then. Scoped to the Task-level docs/hooks-protocol.md §6(a)
+    /// "last known session id/transcript path" fallback only -- per-tab
+    /// bindings live in `layout` instead (`tiling::PaneItem::
+    /// agent_session_id`/`agent_transcript_path`); see
+    /// `crate::store::agent_bindings`'s module doc comment for why.
     pub agent_bindings: Option<String>,
 }
 

@@ -77,6 +77,12 @@ pub struct AgentStatusEvent {
     /// `LABOLABO_PANE` environment variable. `None` for events from
     /// anything other than a LaboLabo-spawned terminal (e.g. an external one).
     pub pane_id: Option<String>,
+    /// Work/task id (UUID string) the forwarder attached from the
+    /// `LABOLABO_TASK` environment variable (`docs/hooks-protocol.md` §7's
+    /// reserved `labolabo_task_id` field; `plans/012` §1's Task model).
+    /// `None` for events without a resolvable task -- routing then falls
+    /// back to whatever `pane_id` resolves to on the consumer side.
+    pub task_id: Option<String>,
 }
 
 #[cfg(test)]
@@ -177,6 +183,7 @@ mod tests {
             transcript_path: Some("/tmp/transcript.jsonl".to_string()),
             cwd: Some("/Users/dev/repo".to_string()),
             pane_id: None,
+            task_id: None,
         };
         assert_eq!(event.hook_event, "Notification");
         assert_eq!(event.status, AgentStatus::WaitingForInput);
@@ -198,6 +205,7 @@ mod tests {
             transcript_path: None,
             cwd: None,
             pane_id: None,
+            task_id: None,
         };
         assert_eq!(event.hook_event, "SessionEnd");
         assert_eq!(event.status, AgentStatus::Ended);

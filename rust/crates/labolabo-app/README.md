@@ -12,9 +12,12 @@ model (`plans/012-task-model-and-control-cli.md` §1) on top: a left sidebar
 lists Tasks grouped by repository, **one Task owns one tile/tab tree**, each
 Task's terminal panes spawn in that Task's working directory (a dedicated
 git worktree, or an "attached" existing directory), and Tasks + layouts
-persist to a Rust-only SQLite database and are restored on relaunch. Still
-not the full production UI — the control CLI (plan §2), drag & drop (plan
-§3), and Task rename/done/archive are later waves' scope.
+persist to a Rust-only SQLite database and are restored on relaunch. **Wave
+5c** adds Claude Code hooks integration (`docs/hooks-protocol.md`): agent
+status dots (tab chip + sidebar row), per-tab Claude session memory, and
+resume-at-restore — see "Claude Code hooks integration" below. Still not the
+full production UI — the control CLI (plan §2), drag & drop (plan §3), and
+Task rename/done/archive are later waves' scope.
 
 Not in the workspace's `default-members` (see `rust/Cargo.toml`): gpui is a
 heavy desktop-UI dependency, and the existing `rust` CI job's fast,
@@ -45,9 +48,11 @@ ptys/scrollback alive in memory, same semantics as switching tabs.
 
 Quitting and relaunching restores every Task (sidebar entries + each one's
 split/tab layout + which Task was selected) from the database; each restored
-terminal pane gets a **fresh shell** in the Task's working directory (the
-container is restored, not terminal scrollback or agent-session content —
-that's future hooks-integration work).
+terminal pane spawns a fresh Claude session unless it previously observed one
+via hooks, in which case it spawns `claude --resume <id>` directly instead
+(gated on the recorded transcript still existing — see "Claude Code hooks
+integration" below). The container (splits, tabs, cwd) is always restored;
+scrollback itself is not (a fresh PTY either way).
 
 ### Where the data lives
 
@@ -86,6 +91,7 @@ GHOSTTY_SOURCE_DIR=/path/to/ghostty-zig016-src \
 | `sidebar.rs` | The Task sidebar: pure, unit-tested repo-grouping (`group_tasks_by_repo`) + minimal rendering (title + a one-glyph worktree/attached marker, "+ Attached"/"+ Worktree" buttons, error banner). |
 | `new_task.rs` | The new-Task flows' git side (gpui-free, integration-tested against real temp repos): repo-identity resolution for attached Tasks, and branch-generation + `git worktree add` for worktree Tasks. |
 | `focus.rs` | Pure tile-tree focus logic (gpui-independent, unit-tested): which pane to focus after a close, next/previous-pane cycling, Cmd+N tab lookup. See its module doc comment for the "focus is a `PaneId`, not a `NodeId`" invariant. |
+| `hooks.rs` | Claude Code hooks integration (wave 5c): the app-wide `AgentStatusBus`, `.claude/settings.local.json` injection/restore, and the `LABOLABO_PANE` routing table. See "Claude Code hooks integration" below. |
 | `ghostty_config.rs` | Pure-ish loader for the user's Ghostty config (`font-family`/`font-size`, `background`/`foreground`/`cursor-color`/`palette`/`theme`, `config-file` includes). Fixture-tested; never reads `$HOME` in tests. |
 | `grid.rs` | Pure function: pixel area + cell size -> terminal column/row count. No gpui types — unit-tested without a gpui `Application`. |
 | `keys.rs` | Pure function: `gpui::Keystroke` -> PTY input bytes. `Keystroke`/`Modifiers` are plain data, so this is unit-tested directly too. |
@@ -130,6 +136,117 @@ the pane stays in the tree with an empty canvas as a recoverable anchor:
 its "+"/Cmd+T opens a fresh tab in the Task's cwd, after which the dead tab
 closes normally. (Auto-respawning a shell into the dead pane was
 deliberately avoided — an immediately-exiting shell would respawn-loop.)
+
+### Claude Code hooks integration (wave 5c)
+
+Implements `docs/hooks-protocol.md` (the canonical wire spec, checked in at
+the repo root) end to end: hooks injection, the AF_UNIX bus, agent status
+display, per-tab session memory, and resume-at-restore. Ported from the
+Swift app's `app/Sources/AgentSessionModel.swift`/`HookForwarder.swift` at
+the logic level (`labolabo-core`'s `hook_settings`/`hooks`/`tiling`/
+`store::agent_bindings` modules — pure, unit-tested), with the app-layer
+wiring (`labolabo-app`'s `hooks.rs` + `app.rs`) making one deliberate
+architectural change from Swift, detailed below.
+
+**One shared socket per app process, not one per session.** Swift runs a
+dedicated `AgentStatusBus`/socket per `RepoSession` (1 worktree = 1 socket).
+This port instead starts exactly one `AgentStatusBus` for the whole
+`labolabo-app` process (`hooks::HookRuntime::new`, called once in
+`LaboLaboApp::new`) and routes every incoming event to the right
+`(task_id, PaneId)` purely via the `LABOLABO_PANE`/`LABOLABO_TASK` env vars
+injected at pane-spawn time (`docs/hooks-protocol.md` §7; `LABOLABO_TASK` is
+new in this port — `plans/012` §1's reserved `labolabo_task_id` wire field).
+Every injected directory's hook `command` therefore points at the *same*
+socket path regardless of which Task it belongs to. This sidesteps
+`plans/012` §1's flagged "同一 cwd の複数 Task と hooks の衝突" design
+question entirely (there is only ever one socket to route through, so two
+Tasks sharing a directory no longer implies two competing sockets) at the
+cost of a global (not per-Task) routing table, which `hooks::HookRuntime`
+owns (`register_pane`/`unregister_pane`/`resolve_pane`, updated at pane
+spawn/close in `app::LaboLaboApp::spawn_runtime_for_task`/`remove_pane`).
+
+**Injection** (`hooks::HookRuntime::ensure_injected`, called from
+`ensure_workspace_loaded` before a Task's panes spawn, idempotent per
+directory per process run): merges LaboLabo's hook entry into the Task's
+`.claude/settings.local.json` for all 7 events
+(`labolabo_core::hook_settings::HOOK_EVENTS`), preserving any existing
+entries (including another LaboLabo instance's or another tool's) exactly
+like the Swift app does. The forwarder binary is resolved as the sibling of
+the running `labolabo-app` executable (`labolabo-core`'s `labolabo-hook` bin
+target) — if it isn't there (e.g. `cargo run -p labolabo-app` without ever
+building `labolabo-core`'s bin targets), injection is skipped for the whole
+run with one stderr warning, not per directory. **Restore** happens at app
+quit (`cx.on_app_quit` in `LaboLaboApp::new`, which — unlike the plain
+`gpui::App::on_app_quit` — hands the closure `&mut LaboLaboApp` directly, so
+`HookRuntime::restore_all` needs no separate shared-ownership handle): a
+directory LaboLabo created the settings file for gets it deleted; a
+directory that had a real prior file gets it restored from the
+`.labolabo-bak` snapshot `ensure_injected` wrote. A stale backup found at
+injection time (a previous crash) is restored-then-re-snapshotted first, so
+double-injection can't happen across restarts.
+
+**Status display**: `TaskWorkspace::pane_status: HashMap<PaneId, AgentStatus>`
+is updated by `LaboLaboApp::handle_agent_event` (the sink
+`hooks::spawn_agent_event_bridge` dispatches every bus event to, mirroring
+`task_workspace::spawn_redraw_bridge`'s OS-thread → channel → gpui-task
+pattern) and rendered as a small colored dot — deliberately minimal, per the
+wave's brief, not the Swift sidebar's `PhaseAnimator` ping/breathing-halo
+treatment (`task_workspace::status_dot_color`) — on each tab chip and, as
+the highest-priority status across a Task's panes
+(`LaboLaboApp::task_agent_status`), on its sidebar row.
+
+**Session memory**: an event carrying `session_id` updates two records, both
+keyed off the routed pane/Task:
+
+- **Per-tab** (docs/hooks-protocol.md §6(b)): `PaneTilingModel::
+  record_agent_session` sets the routed `PaneItem`'s `agent_session_id`/
+  `agent_transcript_path`, which already round-trips through the Task's
+  `TileLayout` (`layout` column) — this is the primary mechanism, unchanged
+  from the tiling port done in an earlier wave.
+- **Task-level fallback** (docs/hooks-protocol.md §6(a)):
+  `labolabo_core::AgentBindings` (JSON in the reserved `Task::
+  agent_bindings` column) records the last-seen `(session_id,
+  transcript_path)` for the Task as a whole, resolved via the event's own
+  `labolabo_task_id` if present (validated against still-known Tasks) or
+  else the routed pane's Task. This is **not currently consulted at
+  restore** — restore only reads the per-tab record, which is populated
+  from the very first hooks event a fresh Rust-app Task ever sees, so there
+  is no "old data with no per-tab record" case to fall back for (unlike
+  Swift, which grew per-tab tracking after per-session tracking already
+  existed). It's kept for the docs' own (a) semantics and as a
+  ready-to-use Task-level record for a future control-CLI/introspection use.
+
+**Resume at restore** (`app::LaboLaboApp::spawn_runtime_for_task`): for each
+terminal pane about to spawn, if it already carries a persisted
+`agent_session_id` and `PaneItem::is_resumable` says its transcript is
+either unrecorded (old data) or actually present on disk, the pane is
+spawned with `claude --resume '<id>'` (`labolabo_core::
+claude_resume_command`) as its command instead of a login shell. **This
+differs from the Swift app's tab-resume behavior**: Swift always spawns a
+plain shell first and then *types* the resume command into it once ready
+(`PaneTilingModel.sendToTerminal`), so the pane still has a live shell
+prompt after Claude exits; this port execs `claude --resume` **directly**
+(`Terminal::spawn_with_cwd_options`'s `command: Some(...)` path is `sh -c
+<command>`, no login shell), which is simpler and race-free (no "was the
+shell ready yet" timing to get right) but means the pane's PTY exits along
+with `claude` when the session ends, rather than dropping back to a shell.
+Documented here per the porting brief's "どちらにしたか README に明記".
+
+**Known limitation — same-directory concurrent use.** Two LaboLabo
+instances (Rust and Rust, or Rust and the Swift app) with a Task/session
+open on the *same* directory at the *same* time is not fully safe: both
+independently merge their own hook entry into the shared
+`settings.local.json` (harmless — merges append, never overwrite each
+other's entries), but the `.labolabo-bak` snapshot/restore dance assumes
+single-writer semantics for that one file, and there is a real race if both
+processes inject or restore for that directory concurrently (e.g. one
+process's restore-at-quit racing the other's crash-recovery
+restore-then-reinject at startup). **Running the Rust and Swift apps (or
+two Rust instances) on the same worktree/attached directory at the same
+time is not recommended** — this matches `plans/012` §1's own "要設計" note
+on the same-cwd-multiple-Tasks case, which remains only partially resolved
+(the *socket* collision is solved by this wave's one-socket-per-process
+design; the *settings-file* backup race is not).
 
 ## Keybindings
 
@@ -340,9 +457,10 @@ that Tasks outlive their panes' sessions.
 
 **Not implemented this wave** (see `plans/012-task-model-and-control-cli.md`
 for where these land in the product model): the control CLI (§2), drag &
-drop (§3 — pane/tab DnD, sidebar reordering, OS file drops), Task
-rename/done/archive (§1's completion flow), and per-tab agent-session
-bindings (`agent_bindings` is a reserved column only).
+drop (§3 — pane/tab DnD, sidebar reordering, OS file drops), and Task
+rename/done/archive (§1's completion flow). Claude Code hooks integration
+(agent status, per-tab session memory, resume-at-restore) landed in wave 5c
+— see "Claude Code hooks integration" above.
 
 ## Known limitations
 
@@ -357,10 +475,13 @@ bindings (`agent_bindings` is a reserved column only).
 - **No repo registry.** "+ Worktree" asks for a repository directory every
   time via the OS picker; the plan's "registered repositories" notion (and
   reinterpreting "open folder" as registration) isn't built yet.
-- **Restore does not resume agent sessions or terminal content.** Fresh
-  shells in the right directories, with the right splits/tabs — nothing
-  else. Per-tab `--resume` (the Swift app's tab-resume behavior) needs the
-  hooks integration and `agent_bindings`, both future work.
+- **Restore resumes Claude sessions per tab (wave 5c), not terminal
+  scrollback.** A pane with a previously-observed Claude session (and an
+  existing or unrecorded transcript) spawns `claude --resume` directly
+  instead of a shell on restore -- see "Claude Code hooks integration"
+  above for how this differs from the Swift app's type-into-a-running-shell
+  approach. Raw terminal scrollback itself is never restored (a fresh PTY
+  either way).
 - **Keyboard focus placement is not persisted.** After a restart, a Task's
   focus defaults to its first leaf's selected tab.
 - **No interactive divider drag-resize**, and the sidebar width is fixed
@@ -484,3 +605,77 @@ is largely interactive UI, so the user needs to close these by hand:
 - The per-Task `persist_workspace` save-on-mutation path is unit-covered on
   the DB side but its UI triggering (split -> row updated) was not observed
   live.
+
+### Wave 5c (Claude Code hooks integration)
+
+Verified locally:
+
+- `cargo build -p labolabo-app`, `cargo clippy -p labolabo-app --all-targets
+  -- -D warnings`, and workspace-wide `cargo fmt --check` all pass.
+- `cargo test -p labolabo-app` (78 tests): the new `hooks` module's 12 tests
+  — routing-table round-trips (register/resolve/unregister/overwrite), real-
+  filesystem `ensure_injected`/`restore_all` coverage (fresh injection
+  writes all 7 events; idempotent re-injection; preserves another tool's
+  existing hook entries; restore deletes a freshly-created file vs. restores
+  a real prior file's exact original bytes; crash recovery from a stale
+  `.labolabo-bak` before re-injecting), and one real-socket end-to-end test
+  (`hook_runtime_receives_a_real_socket_event_and_resolves_its_route`: a
+  real `AgentStatusBus` bound by `HookRuntime::new`, a real
+  `labolabo_core::forward_hook` call over that socket with a
+  `LABOLABO_PANE`-annotated payload, delivered through the real channel and
+  resolved through the real routing table) — plus all pre-existing tests
+  unchanged.
+- `cargo test -p labolabo-core` (221 lib tests + goldens, up from 186 at the
+  end of wave 5b-3): the new `hook_settings` module (`shell_quote`/
+  `hook_command`/`claude_resume_command`/`socket_path_from_uuid`, and
+  `merge_hooks`'s create-vs-preserve/malformed-input/preserves-other-
+  entries/idempotent-shape/all-seven-events behaviors), `store::
+  agent_bindings` (round-trip, dedup, malformed-input degrade, plus a
+  DB-level `agent_bindings_round_trips_through_upsert_and_all_tasks` in
+  `task_database.rs`), `tiling::PaneItem::is_resumable`, and
+  `agent_event_parser`/`hooks::annotate_ids`'s new `labolabo_task_id`
+  coverage — plus the full pre-existing suite (goldens untouched).
+- Root `cargo build`/`cargo test`/`cargo clippy -- -D warnings` (workspace
+  `default-members`: `labolabo-core` + `labolabo-term`) all pass.
+- `cargo run -p labolabo-app`, run for ~8 seconds and killed: no panic/crash
+  output, `~/Library/Application Support/LaboLabo-rs/tasks.db` was touched
+  (confirming `LaboLaboApp::new`, including the new `HookRuntime::new` +
+  `cx.on_app_quit` wiring, ran to completion).
+
+**Important caveat on that last check.** This machine's shared `tasks.db`
+(used by other agents/sessions developing this same port in parallel) had a
+pre-existing selected Task pointing at a real worktree directory outside
+this crate's own scope. Because that Task was auto-restored at launch,
+`ensure_workspace_loaded` really injected a hooks entry into that
+directory's `.claude/settings.local.json`, and because the process was
+killed with `SIGTERM`/`SIGKILL` (not a graceful `cx.quit()`), `on_app_quit`
+never fired, so the injected file was **not** automatically cleaned up
+afterward. This was caught and (partially) remediated by hand — worth
+knowing before running `cargo run -p labolabo-app` again on a machine with
+an existing `tasks.db`: prefer a scratch/empty `tasks.db`
+(`XDG_DATA_HOME`/`%APPDATA%` env override, or run somewhere the default
+Application Support path is empty) for exploratory runs, and always quit
+gracefully (window close / Cmd+Q path) rather than killing the process, so
+`HookRuntime::restore_all` gets to run.
+
+**Not verified — no synthetic keyboard/mouse input, on explicit
+instruction, same as wave 5b-3 above:**
+
+- **No real Claude Code session was launched or observed end to end.** The
+  hooks wire protocol (forwarder → socket → bus → routing → UI) is
+  exercised for real (see the socket integration test above), but nothing
+  here has confirmed that a real `claude` process, hooked via a real
+  injected `settings.local.json`, actually fires these events as expected
+  in practice — that needs the user to run a real Claude Code session in a
+  Task's terminal and watch the tab/sidebar dot.
+- **The resume-at-restore path (`claude --resume` spawned directly as a
+  pane's command) has not been observed against a real prior session.**
+  `PaneItem::is_resumable`'s gating logic is unit-tested; the actual
+  `claude --resume <id>` invocation succeeding (or gracefully failing) was
+  not.
+- **Status dots have not been visually inspected** (colors, tab-chip/
+  sidebar placement) — no screenshot or window inspection was taken.
+- **The same-directory-concurrent-use race** (two LaboLabo instances
+  injecting/restoring hooks for the same directory at once — see "Known
+  limitations" above) is understood but not reproduced/tested; the advice
+  to avoid it is precautionary, not empirically validated.

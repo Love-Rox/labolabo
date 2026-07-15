@@ -17,6 +17,7 @@ use gpui::{
 use labolabo_core::{Task, TaskKind};
 
 use crate::app::LaboLaboApp;
+use crate::task_workspace::status_dot_color;
 
 /// Fixed sidebar width -- a simple constant is enough for this wave (no
 /// resize handle yet, same simplification the tile tree's divider-drag
@@ -77,6 +78,7 @@ pub fn render(app: &LaboLaboApp, cx: &mut Context<LaboLaboApp>) -> impl IntoElem
         for task in group.tasks {
             let task_id = task.id.clone();
             let is_selected = selected.as_deref() == Some(task.id.as_str());
+            let status_color = app.task_agent_status(&task.id).and_then(status_dot_color);
             let row = div()
                 .flex()
                 .flex_row()
@@ -89,6 +91,9 @@ pub fn render(app: &LaboLaboApp, cx: &mut Context<LaboLaboApp>) -> impl IntoElem
                 .text_color(rgb(0xe5e5e5))
                 .child(kind_marker(&task.kind))
                 .child(SharedString::from(task.title.clone()))
+                .when_some(status_color, |el, color| {
+                    el.child(div().w(px(6.0)).h(px(6.0)).rounded_full().bg(rgb(color)))
+                })
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _: &MouseDownEvent, window, cx| {
