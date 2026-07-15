@@ -31,7 +31,7 @@ use gpui::{
     MouseDownEvent, SharedString, Task as GpuiTask,
 };
 
-use labolabo_core::{PaneId, PaneTilingModel, TileNode, TileOrientation};
+use labolabo_core::{AgentStatus, PaneId, PaneTilingModel, TileNode, TileOrientation};
 use labolabo_term::{TermEvent, Terminal};
 
 use crate::app::LaboLaboApp;
@@ -51,6 +51,23 @@ const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const FOCUS_BORDER_COLOR: u32 = 0x5e9eff;
 /// Frame border color for every other (unfocused) pane.
 const IDLE_BORDER_COLOR: u32 = 0x1c1c1c;
+
+/// Status-dot color per [`AgentStatus`] -- deliberately minimal (a plain
+/// colored dot, per the wave brief: "見た目は最小限"), not the Swift
+/// sidebar's `PhaseAnimator`-driven ping/breathing-halo treatment. `None`
+/// means "no dot" (no event observed yet). Shared by this module's tab
+/// chips and `crate::sidebar`'s per-Task row (`LaboLaboApp::
+/// task_agent_status`'s aggregate).
+pub(crate) fn status_dot_color(status: AgentStatus) -> Option<u32> {
+    match status {
+        AgentStatus::None => None,
+        AgentStatus::Starting => Some(0xffa500), // orange: starting up
+        AgentStatus::Running => Some(0x30d158),  // green: thinking/tool use
+        AgentStatus::WaitingForInput => Some(0xffd60a), // yellow: needs attention
+        AgentStatus::Idle => Some(0x8e8e93),     // gray: done, waiting
+        AgentStatus::Ended => Some(0x555555),    // dark gray: session ended
+    }
+}
 
 /// What the per-pane bridge thread forwards to its gpui-side task.
 enum BridgeMsg {
@@ -74,6 +91,11 @@ pub struct PaneRuntime {
     /// without a `&mut LaboLaboApp` borrow available to it -- see
     /// `render_leaf`'s doc comment.
     pub last_size: Rc<Cell<(u16, u16)>>,
+    /// The `LABOLABO_PANE` value this pane's session was spawned with (a
+    /// fresh UUID minted at spawn time, see `crate::hooks`'s module doc
+    /// comment) -- kept so pane removal can unregister the routing table
+    /// entry (`crate::hooks::HookRuntime::unregister_pane`).
+    pub pane_uuid: String,
     /// Keeps the redraw-bridge task alive for the pane's lifetime; dropping
     /// it (on pane close) is the signal the bridge thread uses to stop.
     _redraw_task: GpuiTask<()>,
@@ -88,6 +110,12 @@ pub struct TaskWorkspace {
     pub model: PaneTilingModel,
     pub runtimes: HashMap<PaneId, PaneRuntime>,
     pub focused_pane: PaneId,
+    /// Live [`AgentStatus`] per terminal pane, from hooks events routed to
+    /// this Task (`crate::app::LaboLaboApp::handle_agent_event`) -- the tab
+    /// chip's status dot reads this (see `render_pane_tab_bar`). A pane
+    /// with no entry (never received an event, or was just spawned) shows
+    /// no dot -- same as `AgentStatus::None`'s Swift label ("—").
+    pub pane_status: HashMap<PaneId, AgentStatus>,
 }
 
 impl TaskWorkspace {
@@ -112,6 +140,7 @@ impl TaskWorkspace {
             model,
             runtimes: HashMap::new(),
             focused_pane,
+            pane_status: HashMap::new(),
         }
     }
 }
@@ -184,12 +213,14 @@ pub fn spawn_redraw_bridge(
 /// Registers a freshly spawned session as `pane_id`'s [`PaneRuntime`] inside
 /// `runtimes`. Split out of `LaboLaboApp::spawn_runtime_for_task` only to
 /// keep the borrow shape simple there (see that method's doc comment).
+#[allow(clippy::too_many_arguments)]
 pub fn insert_runtime(
     runtimes: &mut HashMap<PaneId, PaneRuntime>,
     pane_id: PaneId,
     session: Arc<Terminal>,
     cols: u16,
     rows: u16,
+    pane_uuid: String,
     redraw_task: GpuiTask<()>,
 ) {
     runtimes.insert(
@@ -197,6 +228,7 @@ pub fn insert_runtime(
         PaneRuntime {
             session,
             last_size: Rc::new(Cell::new((cols, rows))),
+            pane_uuid,
             _redraw_task: redraw_task,
         },
     );
@@ -205,30 +237,56 @@ pub fn insert_runtime(
 /// Recursively render one node of `task_id`'s tile tree -- identical
 /// tree-walk to wave 5b-2's `app::render_tile`, just carrying `task_id`
 /// through so leaf click handlers route back to the right Task.
+#[allow(clippy::too_many_arguments)]
 pub fn render_tile(
     task_id: &str,
     node: &TileNode,
     runtimes: &HashMap<PaneId, PaneRuntime>,
+    pane_status: &HashMap<PaneId, AgentStatus>,
     focused_pane: PaneId,
     spec: &RenderSpec,
     cx: &mut Context<LaboLaboApp>,
 ) -> AnyElement {
     if node.is_leaf() {
-        return render_leaf(task_id, node, runtimes, focused_pane, spec, cx);
+        return render_leaf(task_id, node, runtimes, pane_status, focused_pane, spec, cx);
     }
 
     let Some(first_child) = node.children.first() else {
         return div().size_full().into_any_element();
     };
     let Some(second_child) = node.children.get(1) else {
-        return render_tile(task_id, first_child, runtimes, focused_pane, spec, cx);
+        return render_tile(
+            task_id,
+            first_child,
+            runtimes,
+            pane_status,
+            focused_pane,
+            spec,
+            cx,
+        );
     };
 
     let is_row = node.orientation == TileOrientation::Horizontal;
     let ratio = (node.ratio as f32).clamp(0.05, 0.95);
 
-    let first_el = render_tile(task_id, first_child, runtimes, focused_pane, spec, cx);
-    let second_el = render_tile(task_id, second_child, runtimes, focused_pane, spec, cx);
+    let first_el = render_tile(
+        task_id,
+        first_child,
+        runtimes,
+        pane_status,
+        focused_pane,
+        spec,
+        cx,
+    );
+    let second_el = render_tile(
+        task_id,
+        second_child,
+        runtimes,
+        pane_status,
+        focused_pane,
+        spec,
+        cx,
+    );
 
     let (first_wrap, second_wrap) = if is_row {
         (
@@ -258,10 +316,12 @@ pub fn render_tile(
 /// 5b-2's `app::render_leaf` (see its doc comment for the per-pane sizing
 /// rationale -- unchanged) other than threading `task_id` through the
 /// click handler.
+#[allow(clippy::too_many_arguments)]
 fn render_leaf(
     task_id: &str,
     node: &TileNode,
     runtimes: &HashMap<PaneId, PaneRuntime>,
+    pane_status: &HashMap<PaneId, AgentStatus>,
     focused_pane: PaneId,
     spec: &RenderSpec,
     cx: &mut Context<LaboLaboApp>,
@@ -311,7 +371,7 @@ fn render_leaf(
     );
     let canvas_area = canvas_area.child(canvas_el);
 
-    let tab_bar = render_pane_tab_bar(task_id, node, is_focused_leaf, cx);
+    let tab_bar = render_pane_tab_bar(task_id, node, pane_status, is_focused_leaf, cx);
 
     div()
         .flex()
@@ -333,6 +393,7 @@ fn render_leaf(
 fn render_pane_tab_bar(
     task_id: &str,
     node: &TileNode,
+    pane_status: &HashMap<PaneId, AgentStatus>,
     is_focused: bool,
     cx: &mut Context<LaboLaboApp>,
 ) -> impl IntoElement {
@@ -353,6 +414,10 @@ fn render_pane_tab_bar(
             let title: SharedString = pane.title.clone().into();
             let select_task_id = task_id.to_string();
             let close_task_id = task_id.to_string();
+            let status_color = pane_status
+                .get(&pane_id)
+                .copied()
+                .and_then(status_dot_color);
             div()
                 .flex()
                 .flex_row()
@@ -362,6 +427,9 @@ fn render_pane_tab_bar(
                 .rounded_sm()
                 .when(selected, |el| el.bg(rgb(0x454545)))
                 .when(!selected, |el| el.bg(rgb(0x333333)))
+                .when_some(status_color, |el, color| {
+                    el.child(div().w(px(6.0)).h(px(6.0)).rounded_full().bg(rgb(color)))
+                })
                 .child(
                     div()
                         .px_1()

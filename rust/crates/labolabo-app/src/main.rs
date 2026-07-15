@@ -13,6 +13,7 @@ mod app;
 mod focus;
 mod ghostty_config;
 mod grid;
+mod hooks;
 mod keys;
 mod new_task;
 mod render;

@@ -320,11 +320,12 @@ mod unix_transport {
 pub use unix_transport::UnixSocketEventTransport;
 
 /// Sends one hook event to the LaboLabo instance listening on
-/// `socket_path`: annotates `stdin_bytes` with `labolabo_pane_id` (from
-/// `env["LABOLABO_PANE"]`) when applicable, then connects, writes the whole
-/// payload, and closes. Faithful port of `app/Sources/HookForwarder.swift`'s
-/// `forward` (minus the `exit(0)` call itself, which is the caller's job --
-/// see `src/bin/labolabo-hook.rs`, whose `main` always exits 0 regardless of
+/// `socket_path`: annotates `stdin_bytes` with `labolabo_pane_id`/
+/// `labolabo_task_id` (from `env["LABOLABO_PANE"]`/`env["LABOLABO_TASK"]`)
+/// when applicable, then connects, writes the whole payload, and closes.
+/// Faithful port of `app/Sources/HookForwarder.swift`'s `forward` (minus the
+/// `exit(0)` call itself, which is the caller's job -- see
+/// `src/bin/labolabo-hook.rs`, whose `main` always exits 0 regardless of
 /// this function's result, matching Swift's "hook の失敗で Claude を止めない"
 /// contract from docs/hooks-protocol.md §3).
 ///
@@ -333,9 +334,9 @@ pub use unix_transport::UnixSocketEventTransport;
 /// testable without mutating global process state.
 ///
 /// `labolabo_task_id` (docs/hooks-protocol.md §7: reserved for a future
-/// work/task model, injected from a would-be `LABOLABO_TASK` env var
-/// alongside `labolabo_pane_id`) is intentionally **not** implemented here
-/// -- reserved only, per the spec.
+/// work/task model) has no Swift counterpart -- `LABOLABO_TASK` is
+/// Rust-only (`plans/012` §1's Task model), so this annotation step is new
+/// here rather than a port of `HookForwarder.swift`.
 #[cfg(unix)]
 pub fn forward_hook(
     socket_path: &str,
@@ -345,32 +346,47 @@ pub fn forward_hook(
     use std::io::Write;
     use std::os::unix::net::UnixStream;
 
-    let payload = annotate_pane(stdin_bytes, env);
+    let payload = annotate_ids(stdin_bytes, env);
     let mut stream = UnixStream::connect(socket_path)?;
     stream.write_all(&payload)?;
     // `stream` closes on drop at the end of this function (write -> close).
     Ok(())
 }
 
-/// The `LABOLABO_PANE` -> `labolabo_pane_id` annotation step of the
-/// forwarder contract (docs/hooks-protocol.md §3.2): if `env` has a
-/// non-empty `LABOLABO_PANE` *and* `stdin_bytes` parses as a JSON object,
-/// adds/overwrites a top-level `"labolabo_pane_id"` string field and
-/// re-serializes. Otherwise (no pane id, invalid JSON, or a non-object JSON
-/// top level) returns `stdin_bytes` unchanged -- mirrors Swift's
-/// `guard let paneID = ..., var object = (try? JSONSerialization...) as?
-/// [String: Any] else { return input }`.
-fn annotate_pane(stdin_bytes: &[u8], env: &HashMap<String, String>) -> Vec<u8> {
-    let Some(pane_id) = env.get("LABOLABO_PANE").filter(|v| !v.is_empty()) else {
+/// The `LABOLABO_PANE`/`LABOLABO_TASK` -> `labolabo_pane_id`/
+/// `labolabo_task_id` annotation step of the forwarder contract
+/// (docs/hooks-protocol.md §3.2 for the pane half; §7 for the task half):
+/// if `stdin_bytes` parses as a JSON object, adds/overwrites a top-level
+/// `"labolabo_pane_id"` string field for a non-empty `env["LABOLABO_PANE"]`
+/// and/or a `"labolabo_task_id"` string field for a non-empty
+/// `env["LABOLABO_TASK"]` (independently -- either, both, or neither may be
+/// present) and re-serializes. Otherwise (neither env var set, invalid
+/// JSON, or a non-object JSON top level) returns `stdin_bytes` unchanged --
+/// mirrors Swift's `guard let paneID = ..., var object = (try?
+/// JSONSerialization...) as? [String: Any] else { return input }`, extended
+/// with the task id (which has no Swift counterpart -- see [`forward_hook`]'s
+/// doc comment).
+fn annotate_ids(stdin_bytes: &[u8], env: &HashMap<String, String>) -> Vec<u8> {
+    let pane_id = env.get("LABOLABO_PANE").filter(|v| !v.is_empty());
+    let task_id = env.get("LABOLABO_TASK").filter(|v| !v.is_empty());
+    if pane_id.is_none() && task_id.is_none() {
         return stdin_bytes.to_vec();
-    };
+    }
     let Ok(Value::Object(mut object)) = serde_json::from_slice::<Value>(stdin_bytes) else {
         return stdin_bytes.to_vec();
     };
-    object.insert(
-        "labolabo_pane_id".to_string(),
-        Value::String(pane_id.clone()),
-    );
+    if let Some(pane_id) = pane_id {
+        object.insert(
+            "labolabo_pane_id".to_string(),
+            Value::String(pane_id.clone()),
+        );
+    }
+    if let Some(task_id) = task_id {
+        object.insert(
+            "labolabo_task_id".to_string(),
+            Value::String(task_id.clone()),
+        );
+    }
     serde_json::to_vec(&Value::Object(object)).unwrap_or_else(|_| stdin_bytes.to_vec())
 }
 
@@ -379,11 +395,13 @@ mod tests {
     use super::*;
     use crate::AgentStatus;
 
-    // MARK: - annotate_pane (forwarder pane-id annotation)
+    // MARK: - annotate_ids (forwarder pane/task-id annotation)
     //
-    // Not ported from a Swift XCTest (HookForwarder.swift has none in the
-    // Swift codebase) -- these are the three scenarios named in the wave 4b
-    // porting brief: LABOLABO_PANE present, absent, and non-JSON stdin.
+    // The pane-id cases are not ported from a Swift XCTest
+    // (HookForwarder.swift has none in the Swift codebase) -- these are the
+    // three scenarios named in the wave 4b porting brief: LABOLABO_PANE
+    // present, absent, and non-JSON stdin. The task-id cases are new
+    // (LABOLABO_TASK/labolabo_task_id has no Swift counterpart).
 
     fn env_with_pane(value: &str) -> HashMap<String, String> {
         let mut env = HashMap::new();
@@ -391,20 +409,27 @@ mod tests {
         env
     }
 
+    fn env_with_task(value: &str) -> HashMap<String, String> {
+        let mut env = HashMap::new();
+        env.insert("LABOLABO_TASK".to_string(), value.to_string());
+        env
+    }
+
     #[test]
     fn annotate_pane_adds_field_when_pane_env_present_and_stdin_is_json_object() {
         let env = env_with_pane("PANE-1");
-        let out = annotate_pane(br#"{"hook_event_name":"SessionStart"}"#, &env);
+        let out = annotate_ids(br#"{"hook_event_name":"SessionStart"}"#, &env);
         let value: Value = serde_json::from_slice(&out).expect("valid json");
         assert_eq!(value["hook_event_name"], "SessionStart");
         assert_eq!(value["labolabo_pane_id"], "PANE-1");
+        assert!(value.get("labolabo_task_id").is_none());
     }
 
     #[test]
     fn annotate_pane_passes_through_unchanged_when_pane_env_absent() {
         let env = HashMap::new();
         let input = br#"{"hook_event_name":"Stop"}"#;
-        assert_eq!(annotate_pane(input, &env), input.to_vec());
+        assert_eq!(annotate_ids(input, &env), input.to_vec());
     }
 
     #[test]
@@ -412,12 +437,12 @@ mod tests {
         let env = env_with_pane("PANE-2");
         // Malformed JSON.
         let malformed: &[u8] = b"{ not json";
-        assert_eq!(annotate_pane(malformed, &env), malformed.to_vec());
+        assert_eq!(annotate_ids(malformed, &env), malformed.to_vec());
         // Syntactically valid JSON, but not an object (Swift's `as? [String:
         // Any]` cast also fails for this, matching `agent_event_parser`'s
         // `non_object_top_level_is_dropped` quirk).
         let array: &[u8] = b"[1,2,3]";
-        assert_eq!(annotate_pane(array, &env), array.to_vec());
+        assert_eq!(annotate_ids(array, &env), array.to_vec());
     }
 
     #[test]
@@ -426,7 +451,33 @@ mod tests {
         // annotate either.
         let env = env_with_pane("");
         let input = br#"{"hook_event_name":"Stop"}"#;
-        assert_eq!(annotate_pane(input, &env), input.to_vec());
+        assert_eq!(annotate_ids(input, &env), input.to_vec());
+    }
+
+    #[test]
+    fn annotate_task_adds_field_when_task_env_present_and_stdin_is_json_object() {
+        let env = env_with_task("TASK-1");
+        let out = annotate_ids(br#"{"hook_event_name":"SessionStart"}"#, &env);
+        let value: Value = serde_json::from_slice(&out).expect("valid json");
+        assert_eq!(value["labolabo_task_id"], "TASK-1");
+        assert!(value.get("labolabo_pane_id").is_none());
+    }
+
+    #[test]
+    fn annotate_task_empty_task_env_is_treated_as_absent() {
+        let env = env_with_task("");
+        let input = br#"{"hook_event_name":"Stop"}"#;
+        assert_eq!(annotate_ids(input, &env), input.to_vec());
+    }
+
+    #[test]
+    fn annotate_ids_adds_both_fields_when_both_env_vars_present() {
+        let mut env = env_with_pane("PANE-3");
+        env.insert("LABOLABO_TASK".to_string(), "TASK-3".to_string());
+        let out = annotate_ids(br#"{"hook_event_name":"SessionStart"}"#, &env);
+        let value: Value = serde_json::from_slice(&out).expect("valid json");
+        assert_eq!(value["labolabo_pane_id"], "PANE-3");
+        assert_eq!(value["labolabo_task_id"], "TASK-3");
     }
 
     // MARK: - AgentStatusBus transport injection contract

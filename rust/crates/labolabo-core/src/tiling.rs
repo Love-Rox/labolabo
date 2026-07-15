@@ -440,6 +440,29 @@ impl PaneItem {
             agent_transcript_path: Some(agent_transcript_path.into()),
         }
     }
+
+    /// Whether this pane should auto-resume its Claude session on restore
+    /// (`labolabo-app`'s per-tab-resume-at-spawn-time flow -- see
+    /// `crate::hook_settings::claude_resume_command`). A pure gate, taking
+    /// the transcript's existence as a caller-supplied bool so the
+    /// filesystem check itself stays at the I/O boundary. Mirrors the Swift
+    /// `resumable` filter in `ContentView.swift`'s
+    /// `triggerAutoResumeIfNeeded`: needs a non-empty `agent_session_id`,
+    /// and if an `agent_transcript_path` was recorded, it must actually
+    /// exist on disk (an unrecorded path -- old data -- is tried as before,
+    /// matching docs/hooks-protocol.md §6's resume guard).
+    pub fn is_resumable(&self, transcript_exists: bool) -> bool {
+        let Some(id) = &self.agent_session_id else {
+            return false;
+        };
+        if id.is_empty() {
+            return false;
+        }
+        if self.agent_transcript_path.is_some() && !transcript_exists {
+            return false;
+        }
+        true
+    }
 }
 
 /// A node in the binary tile tree: a leaf (tab group, `panes` non-empty) or
@@ -1775,5 +1798,40 @@ mod tests {
         );
         assert_eq!(*call_count.borrow(), 1);
         assert_eq!(model.panes()[0].agent_session_id.as_deref(), Some("sid-1"));
+    }
+
+    // MARK: - PaneItem::is_resumable (resume-at-restore gate)
+
+    #[test]
+    fn is_resumable_false_without_a_session_id() {
+        let pane = PaneItem::new(PaneKind::Terminal, "t");
+        assert!(!pane.is_resumable(true));
+        assert!(!pane.is_resumable(false));
+    }
+
+    #[test]
+    fn is_resumable_false_for_an_empty_session_id() {
+        let pane = PaneItem::with_agent_session(PaneKind::Terminal, "t", "", "/tmp/x.jsonl");
+        assert!(!pane.is_resumable(true));
+    }
+
+    #[test]
+    fn is_resumable_true_with_session_id_and_no_recorded_transcript_path() {
+        // Old data with no transcript path recorded is tried as before
+        // (docs/hooks-protocol.md §6: "パス未記録（旧データ）は従来どおり試す").
+        let mut pane = PaneItem::with_agent_session(PaneKind::Terminal, "t", "sid-1", "/tmp/x");
+        pane.agent_transcript_path = None;
+        assert!(pane.is_resumable(false));
+    }
+
+    #[test]
+    fn is_resumable_requires_transcript_to_exist_when_a_path_is_recorded() {
+        let pane =
+            PaneItem::with_agent_session(PaneKind::Terminal, "t", "sid-1", "/tmp/gone.jsonl");
+        assert!(
+            !pane.is_resumable(false),
+            "missing transcript blocks resume"
+        );
+        assert!(pane.is_resumable(true), "existing transcript allows resume");
     }
 }

@@ -39,3 +39,10 @@ mod task_record;
 pub use data_dir::rust_app_data_dir;
 pub use task_database::TaskDatabase;
 pub use task_record::{Task, TaskKind, TaskStatus};
+
+// Wave 5c (hooks integration): `Task::agent_bindings`'s decoded shape. See
+// `agent_bindings`'s module doc comment for why this is scoped to the
+// Task-level docs/hooks-protocol.md §6(a) fallback only.
+mod agent_bindings;
+
+pub use agent_bindings::AgentBindings;
