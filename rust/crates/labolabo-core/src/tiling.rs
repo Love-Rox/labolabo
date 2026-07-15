@@ -888,6 +888,30 @@ impl PaneTilingModel {
         self.bump();
     }
 
+    /// Adds `new_pane` as a new tab in the tab group (leaf) that contains
+    /// `pane_id`, selecting it. Returns whether `pane_id` was found (a
+    /// caller that already spawned a resource for `new_pane`, e.g. a PTY,
+    /// needs to know whether to tear it back down on failure). No-op (and
+    /// returns `false`) if `pane_id` isn't found.
+    ///
+    /// Not present in the Swift source -- `PaneTilingModel.swift`'s UI never
+    /// needed a keyboard-driven "new tab in this pane" affordance (tabs are
+    /// only ever created by dragging one leaf's tab onto another's center,
+    /// i.e. [`PaneTilingModel::move_pane`]'s [`DropEdge::Center`] case, which
+    /// requires the pane to already exist in the tree). This is the same
+    /// "append and select" logic as that case, but for a pane that doesn't
+    /// exist in the tree yet -- e.g. a Rust-UI-only "new tab" shortcut
+    /// (Cmd+T) with no drag source to move.
+    pub fn add_tab(&mut self, pane_id: PaneId, new_pane: PaneItem) -> bool {
+        let Some(node) = self.root.find_leaf_mut(pane_id) else {
+            return false;
+        };
+        node.panes.push(new_pane);
+        node.selected_index = node.panes.len() - 1;
+        self.bump();
+        true
+    }
+
     pub fn add_pane(&mut self, pane: PaneItem) {
         let added = TileNode::leaf(pane);
         let old_root = std::mem::take(&mut self.root);
@@ -1284,6 +1308,64 @@ mod tests {
         );
         assert_eq!(model.panes().len(), 1);
         assert!(model.root.is_leaf());
+    }
+
+    // MARK: - addTab (Rust-only: no Swift port, see the method's doc comment)
+
+    #[test]
+    fn add_tab_appends_and_selects_new_tab_in_existing_group() {
+        let mut model = make_single_pane_model(PaneKind::Terminal);
+        model.add_pane(PaneItem::new(PaneKind::Files, "f")); // now a 2-leaf split
+        let files_id = model.panes()[1].id;
+        assert_eq!(model.panes()[1].kind, PaneKind::Files);
+
+        let ok = model.add_tab(files_id, PaneItem::new(PaneKind::Terminal, "t2"));
+
+        assert!(ok);
+        let group = model.root.find_leaf(files_id).unwrap();
+        assert_eq!(
+            group.panes.iter().map(|p| p.kind).collect::<Vec<_>>(),
+            vec![PaneKind::Files, PaneKind::Terminal],
+            "the new tab should be appended to files' tab group, not create a new split"
+        );
+        assert_eq!(
+            group.selected_pane().map(|p| p.kind),
+            Some(PaneKind::Terminal),
+            "the new tab should become selected"
+        );
+        assert_eq!(model.panes().len(), 3);
+    }
+
+    #[test]
+    fn add_tab_unknown_pane_is_no_op_and_reports_failure() {
+        let mut model = make_single_pane_model(PaneKind::Terminal);
+        let revision_before = model.revision();
+
+        let ok = model.add_tab(PaneId::new(), PaneItem::new(PaneKind::Files, "f"));
+
+        assert!(!ok);
+        assert_eq!(model.panes().len(), 1);
+        assert_eq!(
+            model.revision(),
+            revision_before,
+            "a no-op add_tab must not bump revision"
+        );
+    }
+
+    #[test]
+    fn add_tab_bumps_revision_and_fires_layout_callback() {
+        let mut model = make_single_pane_model(PaneKind::Terminal);
+        let only_id = model.panes()[0].id;
+        let call_count = Rc::new(RefCell::new(0));
+        let call_count_cb = Rc::clone(&call_count);
+        model.on_layout_changed = Some(Box::new(move || {
+            *call_count_cb.borrow_mut() += 1;
+        }));
+
+        model.add_tab(only_id, PaneItem::new(PaneKind::Terminal, "t2"));
+
+        assert_eq!(model.revision(), 1);
+        assert_eq!(*call_count.borrow(), 1);
     }
 
     /// Port of `testAddPaneIncreasesPaneCount`.

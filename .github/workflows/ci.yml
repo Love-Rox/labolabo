@@ -113,8 +113,8 @@ jobs:
         run: cargo build -p labolabo-app
       - name: cargo clippy -p labolabo-app
         run: cargo clippy -p labolabo-app --all-targets -- -D warnings
-      # ユニットテストは grid/keys の純関数のみ（ウィンドウ生成なし）なので
-      # ヘッドレスな CI ランナーでもそのまま走る。
+      # ユニットテストは grid/keys/focus/ghostty_config の純関数のみ（ウィンドウ生成なし）
+      # なのでヘッドレスな CI ランナーでもそのまま走る。
       - name: cargo test -p labolabo-app
         run: cargo test -p labolabo-app
 

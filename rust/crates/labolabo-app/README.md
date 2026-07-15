@@ -1,11 +1,16 @@
 # labolabo-app (Rust, gpui)
 
 A [gpui](https://www.gpui.rs/) binary: the first UI layer of LaboLabo's Rust
-cross-platform port. This is **wave 5a/5b** — a bootable skeleton, not the
-production terminal UI. It exists to prove the shape of the gpui <->
-`labolabo-term` wiring (window, keyboard input, resize, event-driven
-redraw, a minimal tab bar, the user's Ghostty font *and color* settings)
-before a real task/tile UI is built on top of it.
+cross-platform port. Wave 5a proved the shape of the gpui <-> `labolabo-term`
+wiring (window, keyboard input, resize, event-driven redraw, the user's
+Ghostty font *and color* settings) with a placeholder flat tab bar. **Wave
+5b-2** replaces that placeholder with the real tile/tab tree
+(`labolabo_core::tiling::PaneTilingModel`, ported from the Swift app's
+`PaneTilingModel.swift`): split panes, each holding its own tab group, with
+keyboard-driven split/tab/focus operations. Still not the full production
+UI — the sidebar/Task list, the control CLI, drag & drop, and layout
+persistence (`plans/012-task-model-and-control-cli.md`) are later waves'
+scope.
 
 Not in the workspace's `default-members` (see `rust/Cargo.toml`): gpui is a
 heavy desktop-UI dependency, and the existing `rust` CI job's fast,
@@ -20,13 +25,14 @@ cd rust
 cargo run -p labolabo-app
 ```
 
-Opens one window, spawns a login-shell `TermSession` (backend-alacritty,
-`labolabo-term`'s default feature) sized to the window, and renders it with
-the font from your Ghostty config (see "Ghostty configuration" below). Type
-into it like a normal terminal. Click "+" to open another tab, click a tab's
-title to switch to it, click its "×" to close it. A tab whose shell exits
-(`exit`, Ctrl-D, crash) closes itself; closing the last tab — either way —
-quits the app, like Ghostty.
+Opens one window with a single terminal pane (backend-alacritty,
+`labolabo-term`'s default feature), filling the window and rendered with the
+font from your Ghostty config (see "Ghostty configuration" below). Type into
+it like a normal terminal. Split it (Cmd+D / Cmd+Shift+D), add tabs to a pane
+(Cmd+T or its "+"), switch panes/tabs by clicking or with the keybindings
+below (see "Keybindings"). A tab whose shell exits (`exit`, Ctrl-D, crash)
+closes itself; closing the tree's last tab — either way — quits the app,
+like Ghostty.
 
 To exercise the intended production VT backend instead
 (`backend-ghostty-vt`, real `libghostty-vt` — needs a local Ghostty source
@@ -48,12 +54,38 @@ GHOSTTY_SOURCE_DIR=/path/to/ghostty-zig016-src \
 
 | Module | Responsibility |
 |---|---|
-| `main.rs` | Entry point: reads the Ghostty font config, opens the one window at a starting size. |
-| `app.rs` | The gpui root view (`TerminalApp`): tab model, key/click routing, the redraw-bridge thread, session-exit handling, the render tree. |
+| `main.rs` | Entry point: reads the Ghostty font config, registers the tile/tab keybindings (`cx.bind_keys`), opens the one window at a starting size. |
+| `app.rs` | The gpui root view (`TerminalApp`): owns a `labolabo_core::tiling::PaneTilingModel` + one `PaneRuntime` (real `Terminal` session + redraw bridge) per terminal pane, key/click routing, the recursive split/tab-bar render tree, action handlers for every keybinding. |
+| `focus.rs` | Pure tile-tree focus logic (gpui-independent, unit-tested): which pane to focus after a close, next/previous-pane cycling, Cmd+N tab lookup. See its module doc comment for the "focus is a `PaneId`, not a `NodeId`" invariant. |
 | `ghostty_config.rs` | Pure-ish loader for the user's Ghostty config (`font-family`/`font-size`, `background`/`foreground`/`cursor-color`/`palette`/`theme`, `config-file` includes). Fixture-tested; never reads `$HOME` in tests. |
 | `grid.rs` | Pure function: pixel area + cell size -> terminal column/row count. No gpui types — unit-tested without a gpui `Application`. |
 | `keys.rs` | Pure function: `gpui::Keystroke` -> PTY input bytes. `Keystroke`/`Modifiers` are plain data, so this is unit-tested directly too. |
 | `render.rs` | `RenderSpec` (font resolution + cell measurement) and painting one `labolabo_term::GridSnapshot` into a gpui canvas (background, glyphs, cursor). |
+
+## Keybindings
+
+Registered globally (`main.rs`'s `cx.bind_keys`) and dispatched to whichever
+pane/tab is affected via `app.rs`'s action handlers. Cmd-modified keystrokes
+never reach a terminal's own input — `keys::keystroke_to_bytes` reserves the
+whole `platform` modifier for these, so there's no conflict with typing.
+
+| Keys | Action |
+|---|---|
+| Cmd+T | New tab in the focused pane |
+| Cmd+W | Close the focused pane's active tab (last tab in the tree quits the app) |
+| Cmd+D | Split the focused pane right (new terminal, focus moves to it) |
+| Cmd+Shift+D | Split the focused pane down (new terminal, focus moves to it) |
+| Cmd+1 .. Cmd+9 | Select the Nth tab in the focused pane (no-op if it has fewer tabs) |
+| Cmd+] | Focus the next pane (cycles leaves in tree order, wraps around) |
+| Cmd+[ | Focus the previous pane (cycles leaves in tree order, wraps around) |
+
+"Next/previous pane" cycles the tree's leaves in depth-first order rather
+than true on-screen (left/right/up/down) adjacency — the simpler of the two
+options the wave's brief allowed, and the one `focus::adjacent_pane` is
+unit-tested against. Clicking a tab chip or a pane's terminal area also moves
+focus there, and the focused pane's frame gets a subtle accent-colored
+border. There is no keybinding (or UI) for divider drag-resize this wave —
+see "Known limitations".
 
 ### Ghostty configuration (font-family / font-size / colors)
 
@@ -105,23 +137,23 @@ then override it field-by-field (and, for `palette`, index-by-index) —
 matching upstream's documented "additional colors... override the colors
 specified in the theme" rule, regardless of where `theme = ` appears in the
 user's own files. The result is a `labolabo_term::ColorScheme`, passed to
-every tab's `Terminal::spawn_with_options` call
-(`app::TerminalApp::open_tab`) so the embedded terminal's default
-fg/bg/cursor/palette match what the user configured. Color *values* only
-support `#rgb`/`#rrggbb` hex (with or without the `#`) — see "Known
-limitations" for what's deliberately unsupported.
+every pane's `Terminal::spawn_with_options` call (`app::TerminalApp::
+spawn_runtime`) so the embedded terminal's default fg/bg/cursor/palette
+match what the user configured. Color *values* only support `#rgb`/
+`#rrggbb` hex (with or without the `#`) — see "Known limitations" for
+what's deliberately unsupported.
 
 ### Keyboard input path
 
 gpui delivers a `KeyDownEvent` (via `div::on_key_down`, on a focused,
 `track_focus`-ed root div) -> `keys::keystroke_to_bytes` turns it into raw
-bytes (pure function, see `grid.rs`/`keys.rs` unit tests) -> `TermSession::
-write_input` writes them to the PTY. Handled: printable characters (via
-gpui's own `key_char`), Enter/Backspace/Tab/Escape/Space, the four arrow
-keys (CSI sequences), and a bare Ctrl-<letter> (C0 control codes,
-Ctrl-A..Ctrl-Z). Cmd/Super combinations are swallowed (reserved for
-future application-level shortcuts, e.g. Cmd-T/Cmd-W for tabs) rather than
-forwarded to the terminal.
+bytes (pure function, see `grid.rs`/`keys.rs` unit tests) -> the focused
+pane's `Terminal::write_input` writes them to its PTY. Handled: printable
+characters (via gpui's own `key_char`), Enter/Backspace/Tab/Escape/Space,
+the four arrow keys (CSI sequences), and a bare Ctrl-<letter> (C0 control
+codes, Ctrl-A..Ctrl-Z). Cmd/Super combinations are never forwarded to a
+terminal (reserved for application-level shortcuts — see "Keybindings"
+above for what they're bound to as of this wave).
 
 **Not implemented (TODO, see `keys.rs`'s module doc comment):**
 
@@ -135,26 +167,42 @@ forwarded to the terminal.
   Ctrl+Alt/Ctrl+Shift combination beyond "fall back to whatever `key_char`
   gpui reports".
 
-### Resize path
+### Resize path (per pane)
 
-`Context::observe_window_bounds` fires on window resize ->
-`TerminalApp::handle_window_resized` re-derives the terminal grid size from
-the new `Window::viewport_size()` via `grid::grid_size_for_window` (which
-subtracts the tab bar's fixed height, then floor-divides by the *measured*
-cell size in `RenderSpec`) -> for every tab whose column/row count actually
-changed, `TermSession::resize` is called (which resizes both the kernel PTY,
-so full-screen programs see `SIGWINCH`, and the VT core's own grid). The
-same `grid_size_for_window` function computes the *initial* grid at tab
-creation, so there's exactly one place that answers "how big is a tab's
-grid right now" — no separately-hardcoded initial column/row count to drift
-out of sync with the resize path.
+Each leaf's terminal canvas is sized from its own laid-out on-screen area,
+not the whole window — necessary once panes can be split into unequal
+fractions of it. `render_leaf` builds each pane's canvas with a `prepaint`
+closure that receives that canvas's actual `Bounds<Pixels>` (post-flex,
+post-split-ratio — gpui has already done the layout math by the time
+`prepaint` runs, so this module never reimplements it): `grid::
+grid_size_for_area` turns that into a column/row count, and if it differs
+from the pane's last known size (tracked in a small `Rc<Cell<(u16, u16)>>`
+shared between repaints — `prepaint` runs outside any `&mut TerminalApp`
+borrow, so this is the one piece of state it needs on its own), `Terminal::
+resize` is called. This reacts uniformly to a window resize (`Context::
+observe_window_bounds` just forces a fresh layout/paint pass via
+`cx.notify()`) and to a split/tab-count change (a fresh tree shape lays out
+differently the very next frame) without a separate code path for each.
+
+The very first pane (`TerminalApp::new`) is sized from the full window
+viewport up front (`grid::grid_size_for_window`, subtracting the tab bar's
+height) so it doesn't have to wait a frame to reach its correct size; every
+pane created afterward (new tab, split) starts at a fixed default (80x24)
+and is corrected on the next frame by the same per-pane `prepaint` path.
+
+**Not implemented:** interactive divider drag-resize. Split ratios come only
+from where a leaf was created (always 0.5) — there is no keybinding or
+mouse-drag UI to change a `TileNode::ratio` after the fact this wave (the
+wave's keybinding list doesn't call for it, and it wasn't in scope). The
+model itself already supports arbitrary ratios (persisted, clamped to
+`[0.05, 0.95]`); wiring a divider drag up to it is a reasonable follow-up.
 
 ### Event-driven redraw (no polling)
 
-`labolabo_term::TermSession` has no async event stream — `recv_event`
-blocks the calling thread until a `TermEvent` arrives or a timeout elapses.
+`labolabo_term::Terminal` has no async event stream — `recv_event` blocks
+the calling thread until a `TermEvent` arrives or a timeout elapses.
 `app::spawn_redraw_bridge` reconciles that with gpui's async, `cx.notify()`-
-driven redraw model per tab:
+driven redraw model per pane:
 
 1. A dedicated OS thread blocks on `session.recv_event(EVENT_POLL_TIMEOUT)`
    in a loop and forwards each `TermEvent::Wakeup`/`Exit` as a `BridgeMsg`
@@ -164,8 +212,8 @@ driven redraw model per tab:
    (so a flood of PTY output collapses into one redraw), then sleeps
    `FRAME_INTERVAL` (16ms, matching `labolabo_term::session`'s own snapshot
    throttle) before draining and notifying again. An `Exit` seen at any
-   point (awaited or drained) instead closes the tab
-   (`TerminalApp::handle_session_exit`) and ends the task.
+   point (awaited or drained) instead closes the pane
+   (`TerminalApp::handle_pane_exit`) and ends the task.
 
 This is the same two-stage "coalesce, then pace" design as the
 `gpui-term-poc` spike's `spawn_redraw_task` (see `labolabo-spikes`), adapted
@@ -174,46 +222,75 @@ one-off session type built directly on a `futures::channel::mpsc` stream) to
 `labolabo-term`'s blocking `recv_event` API — hence the extra
 thread-to-channel bridge step. `Render::render` (and therefore the paint
 work in `render.rs`) only ever re-runs from an actual `cx.notify()` call, so
-there is no polling redraw loop and no idle CPU cost: an idle tab's bridge
+there is no polling redraw loop and no idle CPU cost: an idle pane's bridge
 thread sits blocked in `recv_event` doing no work until either real PTY
-output arrives or the tab is closed.
+output arrives or the pane is closed.
 
 `EVENT_POLL_TIMEOUT` (250ms) is *not* a redraw-cadence knob — real events
 are delivered immediately regardless of its value. It only bounds how
-quickly a bridge thread notices its gpui `Task` was dropped (tab closed, so
+quickly a bridge thread notices its gpui `Task` was dropped (pane closed, so
 no one is listening any more) and exits.
 
-### Tab bar and session lifecycle
+### Tile tree, tab bars, and session lifecycle
 
-A row of `div`s above the terminal canvas: a title (click to switch) and a
-"×" (click to close) per tab as *sibling* elements (not nested, on purpose —
-gpui's click-hit-testing doesn't stop a parent's `on_click` from also firing
-when a nested child inside its bounds is clicked, so overlapping hitboxes
-were avoided by construction rather than needing a stop-propagation
-workaround), plus a trailing "+" to open a new one.
+`TerminalApp` owns one `labolabo_core::tiling::PaneTilingModel` (the same
+tile/tab tree ported from the Swift app's `PaneTilingModel.swift`) and a
+`PaneRuntime` (real `Terminal` session + redraw bridge) per `terminal`-kind
+pane in the tree — including hidden (non-selected) tabs, so their pty and
+scrollback survive tab switches and structural changes elsewhere in the
+tree, matching the Swift app's behavior. `app::render_tile` recursively
+turns a split node into a flex row/column sized by `node.ratio` and a leaf
+node into `render_leaf`: a per-pane tab bar (chip per tab — click to select,
+"×" to close — plus a trailing "+") above that pane's terminal canvas.
 
-A tab closes two ways, both funneled through id-based removal (never by
-index — indices shift as tabs come and go):
+Focus (which pane's active tab receives keystrokes) is tracked as a single
+`PaneId` on `TerminalApp`; see `focus.rs`'s module doc comment for why a
+`PaneId` (not a leaf's `NodeId`, which doesn't survive a split) is the right
+thing to track, and for the pure, unit-tested resolution logic
+split/close/Cmd+]/Cmd+[/Cmd+1..9 all go through.
+
+A tab closes two ways, both funneled through `TerminalApp::remove_pane`
+(id-based, never by tree position — positions shift as the tree changes):
 
 - **The shell exits**: the redraw bridge sees `TermEvent::Exit` and calls
-  `handle_session_exit(tab_id)`.
-- **"×" click**: `close_tab(tab_id)` first calls `TermSession::shutdown()`
-  (added to `labolabo-term` this wave: SIGHUP to the child, the same signal
-  a real terminal delivers on window close; the session then winds down
-  through its normal exit path), then removes the tab.
+  `handle_pane_exit(pane_id)` (no shutdown signal — the child is already
+  dead).
+- **A tab's "×", or Cmd+W** (the focused pane's active tab):
+  `close_pane_user(pane_id)` first calls `Terminal::shutdown()` (SIGHUP to
+  the child, the same signal a real terminal delivers on window close),
+  then removes the pane.
 
-Either way, when the last tab is gone the app quits (`cx.quit()`), matching
-Ghostty's close-last-surface behavior.
+Either way, when the tree's last pane's last tab is gone the app quits
+(`cx.quit()`), matching Ghostty's close-last-surface behavior — the same
+rule wave 5a's flat tab bar had, now decided from `model.panes().len() ==
+1` instead of an empty `Vec<Tab>`.
 
-**TODO(W5b):** the `Tab`/`tabs: Vec<Tab>` model in `app.rs` is a deliberately
-minimal placeholder. `plans/012-task-model-and-control-cli.md` describes a
-real task/tile model (`labolabo-core::tiling`, already ported from the
-Swift `PaneTilingModel`) that a later wave will replace this window's tab
-model with. Do not build further UI on top of `app::Tab` expecting it to
-survive that replacement.
+**Not implemented this wave** (see `plans/012-task-model-and-control-cli.md`
+for where these land in the product model): the sidebar/Task list, the
+control CLI, drag & drop (moving a tab between panes by dragging), and
+layout persistence (`PaneTilingModel::snapshot`/`apply` exist and are
+tested in `labolabo-core`, but nothing in this crate calls them yet — every
+window starts from a single terminal pane, and the tree is lost on quit).
 
 ## Known limitations
 
+- **No interactive divider drag-resize** (see "Resize path" above) — split
+  ratios are fixed at 0.5 for the life of the pane; there is no mouse-drag
+  or keybinding to change them.
+- **No drag & drop.** Moving a tab into another pane (merge) or splitting it
+  out by dragging is a later wave, per `plans/012`; `PaneTilingModel::
+  move_pane` (the underlying operation) is already ported and tested in
+  `labolabo-core`, just not wired to any gesture here.
+- **No layout persistence.** Every window starts from a single terminal
+  pane; the tree (and any splits/tabs the user made) is not saved and is
+  lost on quit. `PaneTilingModel::snapshot`/`::apply` (the serialize/restore
+  API) exist and are tested, but nothing in this crate calls them yet.
+- **"Next/previous pane" is DFS tree order, not geometric adjacency.**
+  Cmd+]/Cmd+[ cycle `TileNode::leaves()` in depth-first order, not by
+  on-screen position — the simplest option the wave's brief explicitly
+  allowed. In a layout where DFS order doesn't match visual left-to-right/
+  top-to-bottom order (e.g. after several splits), the cycle direction may
+  feel surprising.
 - **No IME support** (see "Keyboard input path" above) — the biggest
   functional gap in this wave.
 - **Colors: light/dark theme switching is out of scope.** Ghostty's `theme
@@ -264,66 +341,59 @@ survive that replacement.
 
 ## What was and wasn't verified
 
+This section reflects wave 5b-2 (the tile/tab tree). See git history for
+earlier waves' own verification notes (colors, ghostty-vt backend, IME
+scope, etc. — unchanged by this wave and not re-verified here).
+
 Verified locally:
 
 - `cargo build -p labolabo-app`, `cargo clippy -p labolabo-app --all-targets
-  -- -D warnings`, and workspace-wide `cargo fmt --check` all pass, on
-  **both** backends (`--no-default-features --features backend-ghostty-vt`
-  too, with `GHOSTTY_SOURCE_DIR`/Zig 0.16 on `PATH`).
-- `cargo test -p labolabo-app`: the `grid`/`keys` pure-function unit tests
-  plus the `ghostty_config` parser/loader tests -- font *and* color/theme
-  extraction, all fixture-tree-based (`fixtures/ghostty_config/`; no test
-  touches `$HOME`, `/Applications`, or the real user config/theme files).
-- `cargo test -p labolabo-term` on **both** backends (alacritty and
-  ghostty-vt), including the new `shutdown` integration tests
-  (`shutdown_kills_child_and_fires_exit`,
-  `shutdown_is_idempotent_and_safe_after_natural_exit`) and the new color
-  integration tests (`colors_background_override_reflected_in_snapshot`,
-  `colors_foreground_override_reflected_in_unstyled_cell`,
-  `colors_palette_override_reflected_in_sgr_colored_cell`,
-  `default_color_scheme_matches_spawn_with_command`) -- headless, real PTY
-  children whose SGR-colored/unstyled output is asserted against the
-  extracted `GridSnapshot`.
-- While building this wave's color support, the headless ghostty-vt
-  integration tests caught a real upstream quirk before it shipped:
-  `libghostty-vt`'s `RenderState.update` only resolves the effective
-  background/foreground pair when **both** are set at the `Terminal` level
-  (a labeled-block `orelse break` in `terminal/render.zig` bails on the
-  *whole pair* if either is left unset) -- worked around in
-  `backend/ghostty.rs` by always configuring both, falling back to this
-  crate's own default constants for whichever side a `ColorScheme` leaves
-  unconfigured (see that file's comment for the exact upstream source
-  quoted).
-- Root `cargo build`/`cargo test`/`cargo clippy` (the workspace's
-  `default-members`, unchanged) still pass and do not build gpui.
-- `cargo run -p labolabo-app`, run for ~5 seconds and killed, on **both**
-  backends: the window opens and the process does not crash or panic, with
-  a real user Ghostty config present (`font-family` resolved without a
-  fallback warning; no color/theme parsing warnings on stderr against a
-  config using a user-authored theme file with bare-hex colors).
+  -- -D warnings`, and workspace-wide `cargo fmt --check` all pass (default
+  `backend-alacritty` feature; `backend-ghostty-vt` was not re-checked this
+  wave — this change doesn't touch backend selection).
+- `cargo test -p labolabo-app` (60 tests): `focus.rs`'s pure focus-resolution
+  tests (close-time refocus, next/previous-pane DFS cycling with wraparound,
+  Cmd+N tab lookup) plus the pre-existing `grid`/`keys`/`ghostty_config`
+  tests, all still green.
+- `cargo test -p labolabo-core` (165 lib tests + golden fixtures): the new
+  `PaneTilingModel::add_tab` method's 3 tests, plus the full existing
+  `tiling` suite (unaffected) and the `tiling_golden` fixture tests (byte-
+  for-byte Swift-compatibility contract untouched — `add_tab` doesn't change
+  `TileLayout`'s serialized shape).
+- Root `cargo build`/`cargo test`/`cargo clippy -- -D warnings` (the
+  workspace's `default-members`: `labolabo-core` + `labolabo-term`,
+  unchanged) all pass and do not build gpui.
+- `cargo run -p labolabo-app`, run for several seconds and killed: the
+  window opens and the process does not crash, panic, or print anything to
+  stderr.
 
-**Not verified — no synthetic keyboard/mouse input and no window
-inspection were used anywhere in this work, on explicit instruction
-(`osascript keystroke`/`cliclick t:`/`kp:` and similar are banned).** As a
-direct consequence:
+**Not verified — no synthetic keyboard/mouse input and no window inspection
+were used anywhere in this work, on explicit instruction.** This wave is
+almost entirely interactive UI (split/tab/focus operations, click targets,
+the focus border, per-pane resize-on-layout), so this is a large gap the
+user needs to close by hand:
 
-- **The actual on-screen colors have not been visually confirmed.** The
-  parsing/merging/backend-plumbing is unit- and integration-tested (see
-  above), and the headless ghostty-vt tests assert on real resolved cell
-  colors, but "does the running window actually look like my Ghostty" is
-  the user's call -- this is the single biggest thing to check by hand.
-
-- `keys::keystroke_to_bytes` has never been exercised against a real
-  keypress by the author — only its unit tests (hand-constructed
-  `gpui::Keystroke` values) have run. (The user has since exercised basic
-  typing interactively and reported it working.)
-- The **look** of the configured font (correct family/size/metrics on a
-  real screen) has not been visually confirmed by the author — the config
-  loader and measurement are unit-tested/compiled, but "does it look like
-  my Ghostty" is the user's call.
-- Exit-closes-tab / last-tab-quits and "×"-closes-with-shutdown were not
-  interactively exercised by the author (mouse clicks on a live window);
-  the underlying `shutdown`/Exit-event path *is* covered headlessly by the
-  `labolabo-term` integration tests.
-- Window drag-resizing was not interactively exercised; the grid math is
-  unit-tested and the `observe_window_bounds` wiring compiles.
+- **No keybinding has been exercised against a real keypress.** Cmd+T/W/D/
+  Shift+D/]/[/1..9 are covered only by `focus.rs`'s pure-logic unit tests
+  (which test the tree-resolution math, not gpui's key dispatch/keymap
+  matching) and by reading gpui's own dispatch code (`dispatch_key_event`/
+  `dispatch_action_on_node` in the vendored `gpui-0.2.2` source) to confirm
+  a matched action keybinding consumes the keystroke before it would
+  otherwise reach `on_key_down`/`keystroke_to_bytes` — not by pressing the
+  keys.
+- **No click has been exercised** (tab chip select/close, "+", clicking a
+  pane's terminal area to focus it, the focused-pane border rendering
+  correctly).
+- **Split rendering/resizing has not been visually confirmed.** The
+  `flex_row`/`flex_col` + `relative(ratio)` layout, the per-pane canvas
+  `prepaint`-driven resize, and the focus border are all unverified beyond
+  "compiles and the app doesn't crash with the single default pane" — no
+  split was ever actually created and observed on screen.
+- **Exit-closes-tab / last-pane-quits / "×"-closes-with-shutdown on the new
+  tree model** were not interactively exercised (only `remove_pane`'s logic
+  was read/reasoned through against the model's own tested `close`/`panes`
+  behavior).
+- Whether the tile tree's visual behavior (split proportions, tab bar
+  layout, border highlight) matches the Swift app's *look* (not required by
+  the brief, which only asks for matching modeling semantics) was not
+  assessed at all.
