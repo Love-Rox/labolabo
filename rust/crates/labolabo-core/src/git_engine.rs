@@ -465,15 +465,27 @@ mod tests {
         dir
     }
 
+    // These helpers (and every test below that calls `init_repo_with_commit`)
+    // spawn the real `git` binary through `git_runner::run`, which resolves
+    // `git` via the real `ToolLocator` -- `#[cfg(not(unix))]`
+    // (`tool_locator.rs`) is an `unimplemented!()` stub, so any of these
+    // would panic on Windows. Windows-side `ToolLocator` support is future
+    // work (see `tool_locator.rs`'s module doc comment); gated out here
+    // rather than working around the stub. `discover_repos_*` and
+    // `repo_name_from_remote_variants` below never spawn `git` (pure
+    // filesystem / string logic) and stay cross-platform.
+    #[cfg(unix)]
     fn git(args: &[&str], dir: &Path) {
         let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
         git_runner::run(&args, dir).unwrap();
     }
 
+    #[cfg(unix)]
     fn write_file(dir: &Path, name: &str, content: &str) {
         std::fs::write(dir.join(name), content).unwrap();
     }
 
+    #[cfg(unix)]
     fn init_repo_with_commit(dir: &Path) {
         git(&["init", "-b", "main"], dir);
         git(&["config", "user.email", "test@example.com"], dir);
@@ -483,6 +495,7 @@ mod tests {
         git(&["-c", "commit.gpgsign=false", "commit", "-m", "init"], dir);
     }
 
+    #[cfg(unix)]
     #[test]
     fn status_diff_numstat_and_file_contents() {
         let repo = scratch_dir("labolabo-git-engine");
@@ -527,6 +540,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&repo);
     }
 
+    #[cfg(unix)]
     #[test]
     fn worktree_add_list_remove() {
         let repo = scratch_dir("labolabo-git-engine");
@@ -616,6 +630,7 @@ mod tests {
         assert_eq!(repo_name_from_remote("https://github.com"), None);
     }
 
+    #[cfg(unix)]
     #[test]
     fn repo_info_reports_root_key_and_remote_derived_name() {
         let repo = scratch_dir("labolabo-git-engine-repoinfo");
@@ -639,6 +654,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&repo);
     }
 
+    #[cfg(unix)]
     #[test]
     fn last_commit_subject_and_local_branches() {
         let repo = scratch_dir("labolabo-git-engine-misc");

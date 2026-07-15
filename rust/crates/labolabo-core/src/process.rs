@@ -231,14 +231,25 @@ mod tests {
     // The Swift source's two flavors (async `run` / sync-with-timeout
     // `runSync`) collapse into `run` / `run_with_timeout` here -- see the
     // module doc comment.
+    //
+    // Every test below except `missing_executable_*` spawns `/bin/echo` or
+    // `/bin/sh`, which don't exist on Windows -- gated `#[cfg(unix)]` rather
+    // than reimplemented against `cmd.exe`/PowerShell (out of scope for this
+    // wave; see rust/README.md's known-scope-limits section). The
+    // `missing_executable_*` tests only assert that spawning a nonexistent
+    // path errors, which holds on every platform, so they stay
+    // cross-platform.
 
+    #[cfg(unix)]
     fn echo() -> &'static Path {
         Path::new("/bin/echo")
     }
+    #[cfg(unix)]
     fn sh() -> &'static Path {
         Path::new("/bin/sh")
     }
 
+    #[cfg(unix)]
     #[test]
     fn echo_captures_stdout_and_zero_status() {
         let out = run(echo(), &["hello".to_string()], None, None).unwrap();
@@ -247,6 +258,7 @@ mod tests {
         assert!(out.stderr.is_empty());
     }
 
+    #[cfg(unix)]
     #[test]
     fn non_zero_exit_and_stderr_are_propagated() {
         let out = run(
@@ -261,6 +273,7 @@ mod tests {
         assert_eq!(out.stderr.trim(), "bad");
     }
 
+    #[cfg(unix)]
     #[test]
     fn empty_output_completes() {
         let out = run(sh(), &["-c".to_string(), "exit 0".to_string()], None, None).unwrap();
@@ -271,6 +284,7 @@ mod tests {
 
     /// Pushes well past a pipe buffer's (~64KB) capacity on both streams at
     /// once, to prove concurrent draining prevents a deadlock.
+    #[cfg(unix)]
     #[test]
     fn large_output_on_both_pipes() {
         let size = 300_000;
@@ -289,6 +303,7 @@ mod tests {
         assert_eq!(out.stderr.len(), size);
     }
 
+    #[cfg(unix)]
     #[test]
     fn signal_death_maps_to_shell_convention() {
         // SIGKILL against self (undeferrable) -> 128 + 9 = 137.
@@ -308,6 +323,7 @@ mod tests {
         assert!(run(missing, &[], None, None).is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn runs_in_specified_directory() {
         let base = std::env::temp_dir().join(format!(
@@ -335,6 +351,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    #[cfg(unix)]
     #[test]
     fn environment_is_passed_through() {
         let mut env = HashMap::new();
@@ -350,6 +367,7 @@ mod tests {
         assert_eq!(out.stdout, "wired");
     }
 
+    #[cfg(unix)]
     #[test]
     fn timeout_returns_none_when_command_outlives_deadline() {
         let out = run_with_timeout(
@@ -363,6 +381,7 @@ mod tests {
         assert!(out.is_none());
     }
 
+    #[cfg(unix)]
     #[test]
     fn fast_command_completes_within_timeout() {
         let out = run_with_timeout(

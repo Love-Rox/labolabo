@@ -118,6 +118,22 @@ fn home_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/"))
 }
 
+// `app_data_dir`/`rust_app_data_dir`'s `#[cfg(target_os = "windows")]`
+// branches above already fall back to this when `APPDATA` is unset -- that
+// fallback exists but had no Windows-side `home_dir()` to call (a
+// pre-existing gap: nothing had ever compiled this module for `target_os =
+// "windows"` before this CI wave), which failed to compile. `USERPROFILE`
+// is Windows' closest analog to Unix's `$HOME` (the user's profile
+// directory, e.g. `C:\Users\<name>`); `C:\` is the same
+// "give up, use the drive root" last resort `home_dir`'s Unix arm uses
+// (`/`).
+#[cfg(windows)]
+fn home_dir() -> PathBuf {
+    std::env::var_os("USERPROFILE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("C:\\"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -62,14 +62,21 @@ jobs:
   # rust/ ワークスペース（labolabo-core, クロスプラットフォーム化の Rust 移植先）。
   # golden fixtures（fixtures/expected/**）は Swift オラクルで生成済みのものをコミット
   # 済みなので、CI では swift 側の再生成は不要 -- cargo test はチェックイン済みの
-  # 期待値と突き合わせるだけ。ubuntu / macOS 両方でツールチェイン差を早期に検知する。
+  # 期待値と突き合わせるだけ。ubuntu / macOS / windows 3 プラットフォームでツール
+  # チェイン差を早期に検知する（windows は Rust 移植のクロスプラットフォーム化を
+  # 謳う以上、purely-logic なコア層（labolabo-core）とターミナルコア（labolabo-term,
+  # 既定の backend-alacritty）が実際に Windows でも build+test green であることを
+  # 毎 PR で担保するために追加。Named Pipe transport 等の Windows 固有の新規実装は
+  # 別フェーズの仕事 -- ここで通っているのは「既存の unix 専用機能は #[cfg(unix)] で
+  # 正しくゲートされていて、その他の純ロジック層は OS 非依存である」ことだけ。詳細は
+  # rust/README.md の known-scope-limits を参照）。
   rust:
     name: rust (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-15]
+        os: [ubuntu-latest, macos-15, windows-latest]
     defaults:
       run:
         working-directory: rust

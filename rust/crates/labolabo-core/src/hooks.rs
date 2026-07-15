@@ -366,6 +366,14 @@ pub fn forward_hook(
 /// JSONSerialization...) as? [String: Any] else { return input }`, extended
 /// with the task id (which has no Swift counterpart -- see [`forward_hook`]'s
 /// doc comment).
+///
+/// Its only production caller ([`forward_hook`]) is `#[cfg(unix)]`, but the
+/// pure-function tests in `mod tests` below exercise it directly on every
+/// platform (no socket I/O needed) -- so it stays compiled everywhere, and
+/// the `dead_code` lint that would otherwise fire in a non-test, non-unix
+/// build (no caller reachable there) is silenced explicitly rather than by
+/// accident.
+#[cfg_attr(not(unix), allow(dead_code))]
 fn annotate_ids(stdin_bytes: &[u8], env: &HashMap<String, String>) -> Vec<u8> {
     let pane_id = env.get("LABOLABO_PANE").filter(|v| !v.is_empty());
     let task_id = env.get("LABOLABO_TASK").filter(|v| !v.is_empty());

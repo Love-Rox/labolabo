@@ -17,10 +17,15 @@
 
 // ログインシェル解決（locate_via_login_shell）が macOS 限定のため、これらの import は
 // Linux ビルドでは未使用になる。clippy -D warnings（CI の ubuntu ジョブ）を通すために
-// 同じ cfg でゲートする。
+// 同じ cfg でゲートする。`Path`（`PathBuf` と違いトレイトシグネチャでは使わない）も
+// 同様に、実際に使う関数（is_executable_file/locate_fixed_or_path/
+// locate_via_login_shell）がすべて unix 限定になったため `#[cfg(unix)]` でゲートする
+// （Windows ビルドで未使用 import になるのを防ぐ）。
 #[cfg(target_os = "macos")]
 use crate::process;
-use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::path::Path;
+use std::path::PathBuf;
 #[cfg(target_os = "macos")]
 use std::time::Duration;
 
@@ -45,6 +50,12 @@ pub struct ToolLocator;
 /// supports -- harmless on Linux even where a given path (e.g.
 /// `/opt/homebrew`) never exists, since `is_executable_file` just returns
 /// `false` for it.
+///
+/// `#[cfg(unix)]`: only called from `locate_fixed_or_path`, which only the
+/// macOS/Linux `ToolLocating::locate` impls call -- the `#[cfg(not(unix))]`
+/// impl below is a Windows stub that never reaches it. Ungated, this (and
+/// its callees) would be `dead_code` on Windows.
+#[cfg(unix)]
 fn fixed_candidates(name: &str) -> Vec<PathBuf> {
     let home = std::env::var("HOME").unwrap_or_default();
     [
@@ -69,26 +80,25 @@ fn fixed_candidates(name: &str) -> Vec<PathBuf> {
 /// inspects the raw mode bits) but is equivalent for every path this
 /// resolver actually probes (world- or group-executable binaries installed
 /// by a package manager).
+///
+/// `#[cfg(unix)]`: same "only reachable from the macOS/Linux `locate`
+/// impls" reasoning as `fixed_candidates` above -- its own body already had
+/// a `#[cfg(not(unix))]` arm (a `true` stub) that was *never actually
+/// reachable*, since nothing on a non-unix target called this function in
+/// the first place; that dead branch is removed here rather than kept
+/// around unreachable.
+#[cfg(unix)]
 fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
     let Ok(metadata) = std::fs::metadata(path) else {
         return false;
     };
-    if !metadata.is_file() {
-        return false;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        metadata.permissions().mode() & 0o111 != 0
-    }
-    #[cfg(not(unix))]
-    {
-        true
-    }
+    metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
 }
 
 /// Fixed candidates, then a linear scan of `PATH`. Shared by every
 /// platform's `locate` (macOS layers the login-shell fallback on top).
+#[cfg(unix)]
 fn locate_fixed_or_path(name: &str) -> Option<PathBuf> {
     for candidate in fixed_candidates(name) {
         if is_executable_file(&candidate) {
@@ -170,7 +180,11 @@ impl ToolLocating for ToolLocator {
     }
 }
 
-#[cfg(test)]
+// Every test below calls the real `ToolLocator`, whose `#[cfg(not(unix))]`
+// arm is an `unimplemented!()` stub (see the module doc comment above) --
+// gate the whole module rather than work around the stub, matching this
+// wave's "cfg ゲートの整理のみ, Windows 実装はしない" scope.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
