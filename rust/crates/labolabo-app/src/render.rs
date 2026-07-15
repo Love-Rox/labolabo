@@ -178,15 +178,26 @@ fn to_hsla_with_alpha(color: Rgb, alpha: f32) -> Hsla {
     hsla
 }
 
-/// Paint `snapshot`'s grid within `bounds`: the base background first, then
-/// each cell's own background (only where it differs -- see
-/// `CellSnapshot::has_bg`), then a translucent highlight over any cell
-/// [`Selection::contains`]s (see `crate::selection`'s module doc comment for
-/// what a selection's coordinates mean against a possibly-scrolled
-/// `snapshot`), then non-blank glyphs (painted last, so selected text stays
-/// legible over the highlight), then a cursor overlay. `selection: None`
-/// paints no highlight at all -- the common case (most panes have no active
-/// selection most of the time).
+/// Paint `snapshot`'s grid within `bounds` in two passes: first **every**
+/// cell's background and selection highlight (base background, then per-cell
+/// `CellSnapshot::has_bg`, then a translucent highlight over any cell
+/// [`Selection::contains`]s -- see `crate::selection`'s module doc comment
+/// for what a selection's coordinates mean against a possibly-scrolled
+/// `snapshot`), and only then **every** glyph, then a cursor overlay.
+///
+/// The two-pass split is load-bearing, not style: a glyph may extend past
+/// its own cell's rectangle -- a double-width (CJK) glyph spans two cells
+/// but is painted once from its leading cell, and even a single-width glyph
+/// can overhang by a fraction of a pixel when the font's advance rounds
+/// down to the cell pitch. With the old single interleaved loop, the *next*
+/// cell's background/selection quad painted **after** that glyph and
+/// clipped its right half -- most visibly as "the right half of every
+/// selected full-width character disappears" (the wide glyph's trailing
+/// spacer cell is part of the selection, so its highlight quad landed on
+/// top of the glyph; reported on-device with Japanese text).
+///
+/// `selection: None` paints no highlight at all -- the common case (most
+/// panes have no active selection most of the time).
 pub fn paint_grid(
     snapshot: &GridSnapshot,
     spec: &RenderSpec,
@@ -202,6 +213,7 @@ pub fn paint_grid(
         return;
     }
 
+    // Pass 1: backgrounds + selection highlight, for every cell.
     for (index, cell) in snapshot.cells.iter().enumerate() {
         let row = (index / cols) as f32;
         let col = (index % cols) as f32;
@@ -221,6 +233,14 @@ pub fn paint_grid(
                 to_hsla_with_alpha(SELECTION_HIGHLIGHT_RGB, SELECTION_HIGHLIGHT_ALPHA),
             ));
         }
+    }
+
+    // Pass 2: glyphs, over all backgrounds/highlights.
+    for (index, cell) in snapshot.cells.iter().enumerate() {
+        let row = (index / cols) as f32;
+        let col = (index % cols) as f32;
+        let x = bounds.origin.x + px(col * spec.cell_width);
+        let y = bounds.origin.y + px(row * spec.cell_height);
 
         if cell.text.is_empty() || cell.text == " " {
             continue;
@@ -304,7 +324,15 @@ pub fn paint_preedit(
         return;
     }
     let y = bounds.origin.y + px(cursor.row as f32 * spec.cell_height);
-    for cell in ime::layout_preedit(text, cursor.col, cols) {
+    let cells = ime::layout_preedit(text, cursor.col, cols);
+
+    // Glyphs first, with no per-run underline: a per-glyph underline only
+    // spans that glyph's own advance, which is narrower than the cell pitch
+    // (full-width glyphs especially), so the composition underline rendered
+    // as one dash per character instead of one continuous line (reported
+    // on-device with Japanese IME input). The underline is painted below as
+    // explicit quads over each contiguous cell span instead.
+    for cell in &cells {
         let x = bounds.origin.x + px(cell.col as f32 * spec.cell_width);
         let text = SharedString::from(cell.ch.to_string());
         let run = TextRun {
@@ -312,11 +340,7 @@ pub fn paint_preedit(
             font: spec.font.clone(),
             color: gpui::white(),
             background_color: None,
-            underline: Some(UnderlineStyle {
-                thickness: px(1.0),
-                color: None,
-                wavy: false,
-            }),
+            underline: None,
             strikethrough: None,
         };
         let shaped = window
@@ -324,6 +348,39 @@ pub fn paint_preedit(
             .shape_line(text, px(spec.font_size), &[run], None);
         let _ = shaped.paint(point(x, y), px(spec.cell_height), window, cx);
     }
+
+    // One continuous underline quad per contiguous run of preedit cells
+    // (layout_preedit can split the preedit when it shifts/wraps at the
+    // right edge, so spans are derived from the actual cell columns, each
+    // extended by its character's own cell width).
+    let underline_y = y + px(spec.cell_height - 2.0);
+    for (start_col, end_col) in preedit_underline_spans(&cells) {
+        let x = bounds.origin.x + px(start_col as f32 * spec.cell_width);
+        let width = px((end_col - start_col) as f32 * spec.cell_width);
+        window.paint_quad(fill(
+            Bounds::new(point(x, underline_y), size(width, px(1.0))),
+            gpui::white(),
+        ));
+    }
+}
+
+/// Collapses laid-out preedit cells into contiguous `[start_col, end_col)`
+/// column spans (each cell covering its character's full 1- or 2-column
+/// width), so the composition underline can be painted as one unbroken quad
+/// per span rather than one dash per glyph.
+fn preedit_underline_spans(cells: &[ime::PreeditCell]) -> Vec<(u16, u16)> {
+    use unicode_width::UnicodeWidthChar;
+
+    let mut spans: Vec<(u16, u16)> = Vec::new();
+    for cell in cells {
+        let width = cell.ch.width().unwrap_or(1).max(1) as u16;
+        let end = cell.col.saturating_add(width);
+        match spans.last_mut() {
+            Some((_, last_end)) if *last_end == cell.col => *last_end = end,
+            _ => spans.push((cell.col, end)),
+        }
+    }
+    spans
 }
 
 #[cfg(test)]
@@ -354,5 +411,46 @@ mod tests {
     fn bogus_scale_factor_falls_back_to_one() {
         assert_eq!(round_to_device_pixels(8.06, 0.0), 8.0);
         assert_eq!(round_to_device_pixels(8.06, f32::NAN), 8.0);
+    }
+}
+
+#[cfg(test)]
+mod preedit_span_tests {
+    use super::preedit_underline_spans;
+    use crate::ime::PreeditCell;
+
+    fn cell(ch: char, col: u16) -> PreeditCell {
+        PreeditCell { ch, col }
+    }
+
+    #[test]
+    fn ascii_run_is_one_span() {
+        let cells = vec![cell('a', 5), cell('b', 6), cell('c', 7)];
+        assert_eq!(preedit_underline_spans(&cells), vec![(5, 8)]);
+    }
+
+    #[test]
+    fn fullwidth_run_is_one_span_covering_both_columns_per_char() {
+        // Each CJK char occupies 2 columns; the span must be continuous.
+        let cells = vec![cell('あ', 4), cell('い', 6), cell('う', 8)];
+        assert_eq!(preedit_underline_spans(&cells), vec![(4, 10)]);
+    }
+
+    #[test]
+    fn mixed_width_run_is_one_span() {
+        let cells = vec![cell('a', 0), cell('あ', 1), cell('b', 3)];
+        assert_eq!(preedit_underline_spans(&cells), vec![(0, 4)]);
+    }
+
+    #[test]
+    fn discontinuous_cells_split_into_separate_spans() {
+        // e.g. layout wrapped/shifted at the right edge.
+        let cells = vec![cell('a', 78), cell('b', 79), cell('c', 0)];
+        assert_eq!(preedit_underline_spans(&cells), vec![(78, 80), (0, 1)]);
+    }
+
+    #[test]
+    fn empty_input_produces_no_spans() {
+        assert_eq!(preedit_underline_spans(&[]), Vec::<(u16, u16)>::new());
     }
 }
