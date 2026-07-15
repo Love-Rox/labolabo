@@ -32,6 +32,7 @@ use libghostty_vt::{Terminal, TerminalOptions};
 
 use crate::backend::VtBackend;
 use crate::color::ColorScheme;
+use crate::mouse::{MouseMode, MouseTracking};
 use crate::session::SharedWriter;
 use crate::snapshot::{CellSnapshot, CursorSnapshot, GridSnapshot, Rgb};
 
@@ -323,6 +324,38 @@ impl VtBackend for GhosttyBackend {
 
     fn alt_screen_active(&self) -> bool {
         matches!(self.terminal.active_screen(), Ok(Screen::Alternate))
+    }
+
+    fn alternate_scroll_active(&self) -> bool {
+        // Default `true` on a query error -- matches libghostty-vt's own
+        // documented default for this mode (see `VtBackend::
+        // alternate_scroll_active`'s doc comment).
+        self.terminal.mode(Mode::ALT_SCROLL).unwrap_or(true)
+    }
+
+    fn mouse_mode(&self) -> MouseMode {
+        // The four tracking DECSET modes are mutually exclusive at the
+        // libghostty-vt level (`flags.mouse_event` is a single tagged
+        // field, confirmed by reading the vendored Zig source's
+        // `terminal/modes.zig`: `modeFromInt` maps DECSET 9/1000/1002/1003
+        // each to a distinct `mouse_event_*` enum tag), so at most one of
+        // these four `mode()` queries is ever `true` -- checked most-
+        // specific (any-event) first purely so a hypothetical future
+        // relaxation of that invariant degrades to the most capable mode
+        // rather than the least.
+        let tracking = if self.terminal.mode(Mode::ANY_MOUSE).unwrap_or(false) {
+            MouseTracking::Any
+        } else if self.terminal.mode(Mode::BUTTON_MOUSE).unwrap_or(false) {
+            MouseTracking::Button
+        } else if self.terminal.mode(Mode::NORMAL_MOUSE).unwrap_or(false) {
+            MouseTracking::Normal
+        } else if self.terminal.mode(Mode::X10_MOUSE).unwrap_or(false) {
+            MouseTracking::X10
+        } else {
+            MouseTracking::Off
+        };
+        let sgr = self.terminal.mode(Mode::SGR_MOUSE).unwrap_or(false);
+        MouseMode { tracking, sgr }
     }
 }
 

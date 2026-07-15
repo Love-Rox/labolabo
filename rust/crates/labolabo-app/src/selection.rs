@@ -28,7 +28,7 @@
 //! selection endpoints against that instead. Flagged here as a known,
 //! accepted limitation for this wave -- see the crate README.
 
-use labolabo_term::GridSnapshot;
+use labolabo_term::{CellSnapshot, GridSnapshot};
 
 /// One terminal-grid cell, 0-based `(row, col)` within a [`GridSnapshot`]'s
 /// current viewport (row 0 = the top on-screen row, regardless of
@@ -159,6 +159,181 @@ fn row_range_text(snapshot: &GridSnapshot, row: u16, col_start: u16, col_end: u1
         }
     }
     out.trim_end().to_string()
+}
+
+// MARK: - double-click word selection / triple-click line selection (W5j #3)
+
+/// Ghostty's default word-boundary character set for double-click word
+/// selection: whitespace, quotes, common bracket-pair punctuation, and a
+/// handful of separator symbols. Confirmed by reading the vendored Ghostty
+/// source's `terminal/selection_codepoints.zig` (`default_word_boundaries`,
+/// the built-in default backing `selection-word-chars` when unconfigured):
+///
+/// ```text
+/// pub const default_word_boundaries = [_]u21{
+///     0, ' ', '\t', '\'', '"', '│', '`', '|', ':', ';', ',',
+///     '(', ')', '[', ']', '{', '}', '<', '>', '$',
+/// };
+/// ```
+///
+/// (the `\u{2502}` below is `│`, U+2502 BOX DRAWINGS LIGHT VERTICAL -- the
+/// character `tmux`/box-drawn UIs use for pane borders, included so
+/// double-clicking a word up against one doesn't pull the border glyph into
+/// the selection).
+pub const WORD_BOUNDARY_CHARS: &str = "\t '\"\u{2502}`|:;,()[]{}<>$";
+
+/// Whether `cell` counts as a word-boundary cell for [`word_bounds_at`]'s
+/// purposes: its text is exactly one [`WORD_BOUNDARY_CHARS`] character, or
+/// it's blank. A blank cell is treated the same as a space (itself already
+/// in [`WORD_BOUNDARY_CHARS`]) -- mirrors how [`row_range_text`] already
+/// renders a blank cell as a space when extracting text, so "boundary-ness"
+/// and "text extraction" agree on what a blank cell means.
+fn is_boundary_cell(cell: &CellSnapshot) -> bool {
+    cell.text.is_empty() || WORD_BOUNDARY_CHARS.contains(cell.text.as_str())
+}
+
+/// The word under `pos` in `snapshot`, as a `(start, end)` cell range on
+/// `pos.row` -- ported from real Ghostty's own `Screen.selectWord`
+/// algorithm (confirmed by reading the vendored source, `terminal/
+/// Screen.zig`): classify the clicked cell as "boundary" or "not a
+/// boundary" ([`is_boundary_cell`]), then extend left and right while
+/// neighboring cells share that same classification. Double-clicking a
+/// space (or any [`WORD_BOUNDARY_CHARS`] character) therefore selects the
+/// contiguous run of boundary characters it's part of, exactly as
+/// double-clicking a word selects the contiguous run of non-boundary
+/// characters it's part of -- both are "select the word" from the user's
+/// point of view.
+///
+/// Out-of-range input (`pos` past the snapshot's bounds, or an empty grid)
+/// returns `(pos, pos)` -- a harmless zero-length range, same fallback
+/// shape [`selected_text`] already uses for an out-of-range selection.
+///
+/// **Scope**: single-row only -- unlike Ghostty's own algorithm, this does
+/// not cross a soft-wrapped line boundary to continue a word onto the next
+/// row. A word selection landing exactly at the last/first column of a
+/// wrapped line stops there rather than continuing onto the wrapped
+/// continuation. Documented, accepted limitation for this wave (see the
+/// crate README).
+pub fn word_bounds_at(snapshot: &GridSnapshot, pos: CellPos) -> (CellPos, CellPos) {
+    if snapshot.cols == 0 || pos.row >= snapshot.rows || pos.col >= snapshot.cols {
+        return (pos, pos);
+    }
+    let cols = snapshot.cols;
+    let idx = |col: u16| pos.row as usize * cols as usize + col as usize;
+    let Some(start_cell) = snapshot.cells.get(idx(pos.col)) else {
+        return (pos, pos);
+    };
+    let expect_boundary = is_boundary_cell(start_cell);
+
+    let mut start_col = pos.col;
+    while start_col > 0 {
+        let candidate = start_col - 1;
+        let Some(cell) = snapshot.cells.get(idx(candidate)) else {
+            break;
+        };
+        if is_boundary_cell(cell) != expect_boundary {
+            break;
+        }
+        start_col = candidate;
+    }
+
+    let mut end_col = pos.col;
+    while end_col + 1 < cols {
+        let candidate = end_col + 1;
+        let Some(cell) = snapshot.cells.get(idx(candidate)) else {
+            break;
+        };
+        if is_boundary_cell(cell) != expect_boundary {
+            break;
+        }
+        end_col = candidate;
+    }
+
+    (
+        CellPos {
+            row: pos.row,
+            col: start_col,
+        },
+        CellPos {
+            row: pos.row,
+            col: end_col,
+        },
+    )
+}
+
+/// `row`'s content span as a `(start, end)` cell range for triple-click
+/// line selection: from column `0` to the row's last non-blank column, or
+/// `(0, 0)` if the row is entirely blank. Trimming trailing blanks (rather
+/// than always spanning the full grid width) keeps a triple-click from
+/// visually highlighting a wall of empty cells out to the right edge on a
+/// mostly-empty line -- the same "don't include trailing blanks" instinct
+/// [`selected_text`]'s own `row_range_text` already applies when
+/// *extracting* text, just also applied to what gets *highlighted*.
+///
+/// Out-of-range input (`row` past the snapshot's bounds, or an empty grid)
+/// returns `(pos, pos)` at column `0` of that row -- the same harmless
+/// zero-length-range shape [`word_bounds_at`] uses.
+pub fn line_bounds_at(snapshot: &GridSnapshot, row: u16) -> (CellPos, CellPos) {
+    let start = CellPos { row, col: 0 };
+    if snapshot.cols == 0 || row >= snapshot.rows {
+        return (start, start);
+    }
+    let cols = snapshot.cols;
+    let row_base = row as usize * cols as usize;
+    let mut last_nonblank: u16 = 0;
+    for col in 0..cols {
+        if let Some(cell) = snapshot.cells.get(row_base + col as usize) {
+            if !cell.text.is_empty() {
+                last_nonblank = col;
+            }
+        }
+    }
+    (
+        start,
+        CellPos {
+            row,
+            col: last_nonblank,
+        },
+    )
+}
+
+/// The [`Selection`] a mouse-down with `click_count` should produce at
+/// `pos`: a single click (`click_count <= 1`) is a plain zero-length click
+/// (unchanged, pre-existing behavior -- [`crate::app::LaboLaboApp::
+/// begin_selection`]'s drag then extends it as before); a double-click
+/// (`click_count == 2`) selects the word under `pos` ([`word_bounds_at`]);
+/// a triple-click or more (`click_count >= 3`) selects `pos.row`'s whole
+/// content span ([`line_bounds_at`]) -- matching every desktop terminal's
+/// click-count convention (and macOS's own text-view convention more
+/// broadly), and mirroring real Ghostty's own default click-count-to-
+/// behavior mapping (`SelectionGesture.default_behaviors`: cell, word,
+/// line -- confirmed by reading the vendored source).
+///
+/// **Scope**: continuing to *drag* after a double/triple-click extends the
+/// selection cell-by-cell (this crate's existing `extend_selection`
+/// behavior, unchanged), not word-by-word/line-by-line the way Ghostty's
+/// own drag gesture does. Documented, accepted simplification for this
+/// wave -- the word/line *classification* logic itself
+/// ([`word_bounds_at`]/[`line_bounds_at`]) is what's ported and tested;
+/// drag-time re-snapping is future work (see the crate README).
+pub fn selection_for_click(snapshot: &GridSnapshot, pos: CellPos, click_count: usize) -> Selection {
+    match click_count {
+        0 | 1 => Selection::at(pos),
+        2 => {
+            let (start, end) = word_bounds_at(snapshot, pos);
+            Selection {
+                anchor: start,
+                cursor: end,
+            }
+        }
+        _ => {
+            let (start, end) = line_bounds_at(snapshot, pos.row);
+            Selection {
+                anchor: start,
+                cursor: end,
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -354,5 +529,140 @@ mod tests {
             cursor: CellPos { row: 0, col: 500 },
         };
         assert_eq!(selected_text(&snap, &sel), "hi");
+    }
+
+    // MARK: - word_bounds_at (double-click)
+
+    #[test]
+    fn word_bounds_at_selects_the_clicked_word_only() {
+        let snap = snapshot_from_rows(&["hello world"], 20);
+        // Click inside "world" (columns 6..=10).
+        let (start, end) = word_bounds_at(&snap, CellPos { row: 0, col: 8 });
+        assert_eq!(start, CellPos { row: 0, col: 6 });
+        assert_eq!(end, CellPos { row: 0, col: 10 });
+    }
+
+    #[test]
+    fn word_bounds_at_click_on_first_or_last_letter_still_spans_the_whole_word() {
+        let snap = snapshot_from_rows(&["hello world"], 20);
+        let (start, end) = word_bounds_at(&snap, CellPos { row: 0, col: 0 });
+        assert_eq!((start.col, end.col), (0, 4));
+        let (start, end) = word_bounds_at(&snap, CellPos { row: 0, col: 10 });
+        assert_eq!((start.col, end.col), (6, 10));
+    }
+
+    #[test]
+    fn word_bounds_at_click_on_a_boundary_char_selects_the_boundary_run() {
+        // "a::b" -- clicking the first colon selects both colons (the
+        // contiguous run of boundary characters), not the letters.
+        let snap = snapshot_from_rows(&["a::b"], 10);
+        let (start, end) = word_bounds_at(&snap, CellPos { row: 0, col: 1 });
+        assert_eq!((start.col, end.col), (1, 2));
+    }
+
+    #[test]
+    fn word_bounds_at_click_on_blank_cell_selects_the_run_of_blanks() {
+        let snap = snapshot_from_rows(&["a   b"], 10);
+        let (start, end) = word_bounds_at(&snap, CellPos { row: 0, col: 2 });
+        assert_eq!((start.col, end.col), (1, 3));
+    }
+
+    #[test]
+    fn word_bounds_at_stops_at_default_ghostty_separators() {
+        // Each of Ghostty's default `selection-word-chars` should itself
+        // act as a one-character-wide boundary between two words either
+        // side of it.
+        let snap = snapshot_from_rows(&["foo(bar)"], 10);
+        let (start, end) = word_bounds_at(&snap, CellPos { row: 0, col: 0 });
+        assert_eq!((start.col, end.col), (0, 2), "\"foo\"");
+        let (start, end) = word_bounds_at(&snap, CellPos { row: 0, col: 4 });
+        assert_eq!((start.col, end.col), (4, 6), "\"bar\"");
+    }
+
+    #[test]
+    fn word_bounds_at_single_word_fills_the_whole_row() {
+        let snap = snapshot_from_rows(&["hello"], 5);
+        let (start, end) = word_bounds_at(&snap, CellPos { row: 0, col: 2 });
+        assert_eq!((start.col, end.col), (0, 4));
+    }
+
+    #[test]
+    fn word_bounds_at_out_of_range_position_is_a_harmless_zero_length_range() {
+        let snap = snapshot_from_rows(&["hi"], 10);
+        let pos = CellPos { row: 5, col: 0 };
+        assert_eq!(word_bounds_at(&snap, pos), (pos, pos));
+        let pos = CellPos { row: 0, col: 50 };
+        assert_eq!(word_bounds_at(&snap, pos), (pos, pos));
+    }
+
+    // MARK: - line_bounds_at (triple-click)
+
+    #[test]
+    fn line_bounds_at_trims_trailing_blanks_not_the_full_row_width() {
+        let snap = snapshot_from_rows(&["hi"], 20);
+        let (start, end) = line_bounds_at(&snap, 0);
+        assert_eq!(start, CellPos { row: 0, col: 0 });
+        assert_eq!(end, CellPos { row: 0, col: 1 });
+    }
+
+    #[test]
+    fn line_bounds_at_leading_blanks_are_kept_only_trailing_are_trimmed() {
+        let snap = snapshot_from_rows(&["  hi"], 20);
+        let (start, end) = line_bounds_at(&snap, 0);
+        assert_eq!(start.col, 0, "leading blanks stay in the selection");
+        assert_eq!(end.col, 3);
+    }
+
+    #[test]
+    fn line_bounds_at_entirely_blank_row_is_a_single_cell_at_column_zero() {
+        let snap = snapshot_from_rows(&[""], 20);
+        let (start, end) = line_bounds_at(&snap, 0);
+        assert_eq!(start, CellPos { row: 0, col: 0 });
+        assert_eq!(end, CellPos { row: 0, col: 0 });
+    }
+
+    #[test]
+    fn line_bounds_at_out_of_range_row_is_a_harmless_zero_length_range() {
+        let snap = snapshot_from_rows(&["hi"], 10);
+        let (start, end) = line_bounds_at(&snap, 9);
+        assert_eq!(start, CellPos { row: 9, col: 0 });
+        assert_eq!(end, CellPos { row: 9, col: 0 });
+    }
+
+    // MARK: - selection_for_click (click-count dispatch)
+
+    #[test]
+    fn selection_for_click_single_click_is_a_zero_length_selection() {
+        let snap = snapshot_from_rows(&["hello world"], 20);
+        let pos = CellPos { row: 0, col: 3 };
+        let sel = selection_for_click(&snap, pos, 1);
+        assert!(sel.is_empty());
+        assert_eq!(sel.anchor, pos);
+        let sel = selection_for_click(&snap, pos, 0);
+        assert!(
+            sel.is_empty(),
+            "click_count 0 behaves like a plain click too"
+        );
+    }
+
+    #[test]
+    fn selection_for_click_double_click_selects_the_word() {
+        let snap = snapshot_from_rows(&["hello world"], 20);
+        let sel = selection_for_click(&snap, CellPos { row: 0, col: 8 }, 2);
+        assert_eq!(selected_text(&snap, &sel), "world");
+    }
+
+    #[test]
+    fn selection_for_click_triple_click_selects_the_line() {
+        let snap = snapshot_from_rows(&["hello world"], 20);
+        let sel = selection_for_click(&snap, CellPos { row: 0, col: 8 }, 3);
+        assert_eq!(selected_text(&snap, &sel), "hello world");
+    }
+
+    #[test]
+    fn selection_for_click_click_count_above_three_still_selects_the_line() {
+        let snap = snapshot_from_rows(&["hello world"], 20);
+        let sel = selection_for_click(&snap, CellPos { row: 0, col: 8 }, 4);
+        assert_eq!(selected_text(&snap, &sel), "hello world");
     }
 }
