@@ -13,7 +13,7 @@
 
 use std::time::Duration;
 
-use labolabo_term::{ColorScheme, Rgb, Terminal};
+use labolabo_term::{ColorScheme, Rgb, TermEvent, Terminal};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -276,6 +276,34 @@ fn cwd_none_matches_spawn_with_options() {
     );
 }
 
+/// DECSET `2004` (bracketed paste) toggles `Terminal::bracketed_paste()`:
+/// off before the child runs, on once it enables it, off again once it
+/// disables it. This is the mode-query API `labolabo-app`'s Cmd+V paste
+/// handler uses to decide whether to wrap pasted text in
+/// `ESC[200~...ESC[201~`.
+#[test]
+fn bracketed_paste_mode_reflects_decset_2004() {
+    let term = Terminal::spawn_with_command(
+        80,
+        24,
+        Some(r#"printf '\033[?2004h'; sleep 0.3; printf '\033[?2004l'; sleep 0.3"#),
+        &[],
+    )
+    .expect("spawn");
+    assert!(
+        !term.bracketed_paste(),
+        "bracketed paste should be off before the child runs"
+    );
+    assert!(
+        wait_for_bracketed_paste(&term, TIMEOUT, true),
+        "expected bracketed paste to turn on after DECSET 2004h"
+    );
+    assert!(
+        wait_for_bracketed_paste(&term, TIMEOUT, false),
+        "expected bracketed paste to turn back off after DECSET 2004l"
+    );
+}
+
 /// Find the first cell whose text matches `needle` (a single grapheme, as
 /// printed by the tests above -- there's no ambiguity to resolve).
 fn find_cell<'a>(
@@ -290,9 +318,29 @@ fn wait_for_exit(term: &Terminal, timeout: Duration) -> bool {
     let deadline = std::time::Instant::now() + timeout;
     while std::time::Instant::now() < deadline {
         match term.recv_event(Duration::from_millis(200)) {
-            Some(labolabo_term::TermEvent::Exit) => return true,
+            Some(TermEvent::Exit) => return true,
             _ => continue,
         }
     }
     false
+}
+
+/// Poll `term.bracketed_paste()` until it equals `expected` or `timeout`
+/// elapses -- `bracketed_paste()` has no dedicated event of its own (see
+/// `TermSession::bracketed_paste`'s doc comment: it's a plain flag refreshed
+/// alongside snapshot publishing), so this polls on the same wakeup/exit
+/// channel `wait_for` itself blocks on rather than busy-spinning.
+fn wait_for_bracketed_paste(term: &Terminal, timeout: Duration, expected: bool) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if term.bracketed_paste() == expected {
+            return true;
+        }
+        let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else {
+            return term.bracketed_paste() == expected;
+        };
+        if term.recv_event(remaining.min(Duration::from_millis(50))) == Some(TermEvent::Exit) {
+            return term.bracketed_paste() == expected;
+        }
+    }
 }

@@ -94,6 +94,20 @@ running the **same** integration tests as ghostty (`tests/backend_common.rs`).
   the same final-snapshot + `TermEvent::Exit` path as a natural exit.
   Idempotent; see the method docs for the (inherited) stale-pid caveat and
   the fact that only the direct child is signalled, not its descendants.
+- **Bracketed-paste mode query via `TermSession::bracketed_paste()`**
+  (added for the gpui shell's Cmd+V paste handler, `labolabo-app`'s
+  `app::LaboLaboApp::action_paste`): a small `bracketed_paste(&self) ->
+  bool` addition to `VtBackend`, reporting whether the foreground program
+  has enabled DECSET `2004` (`alacritty_terminal::term::TermMode::
+  BRACKETED_PASTE`; `libghostty_vt::terminal::Mode::BRACKETED_PASTE` --
+  identical semantics on both backends). Like `GridSnapshot`, this is
+  backend state that lives on the worker thread; the flag is mirrored into
+  a plain `AtomicBool` the caller thread reads without blocking, refreshed
+  by the worker after every processed PTY byte batch (not throttled to the
+  snapshot cadence -- it's a single cheap bool, and a paste can land at any
+  time). Covered by a shared (`tests/backend_common.rs`) headless test on
+  both backends: `printf '\033[?2004h'`/`...l` in a spawned shell toggles
+  `bracketed_paste()`.
 
 ### PTY unification (design decision)
 

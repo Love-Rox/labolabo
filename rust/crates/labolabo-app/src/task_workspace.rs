@@ -27,14 +27,14 @@ use std::time::Duration;
 use futures::channel::mpsc;
 use futures::StreamExt;
 use gpui::{
-    canvas, div, prelude::*, px, relative, rgb, AnyElement, Context, IntoElement, MouseButton,
-    MouseDownEvent, SharedString, Task as GpuiTask,
+    canvas, div, prelude::*, px, relative, rgb, AnyElement, Context, ElementInputHandler,
+    FocusHandle, IntoElement, MouseButton, MouseDownEvent, SharedString, Task as GpuiTask,
 };
 
 use labolabo_core::{AgentStatus, PaneId, PaneTilingModel, TileNode, TileOrientation};
 use labolabo_term::{TermEvent, Terminal};
 
-use crate::app::LaboLaboApp;
+use crate::app::{LaboLaboApp, PreeditState};
 use crate::grid;
 use crate::render::RenderSpec;
 
@@ -245,10 +245,22 @@ pub fn render_tile(
     pane_status: &HashMap<PaneId, AgentStatus>,
     focused_pane: PaneId,
     spec: &RenderSpec,
+    focus_handle: &FocusHandle,
+    active_preedit: Option<&PreeditState>,
     cx: &mut Context<LaboLaboApp>,
 ) -> AnyElement {
     if node.is_leaf() {
-        return render_leaf(task_id, node, runtimes, pane_status, focused_pane, spec, cx);
+        return render_leaf(
+            task_id,
+            node,
+            runtimes,
+            pane_status,
+            focused_pane,
+            spec,
+            focus_handle,
+            active_preedit,
+            cx,
+        );
     }
 
     let Some(first_child) = node.children.first() else {
@@ -262,6 +274,8 @@ pub fn render_tile(
             pane_status,
             focused_pane,
             spec,
+            focus_handle,
+            active_preedit,
             cx,
         );
     };
@@ -276,6 +290,8 @@ pub fn render_tile(
         pane_status,
         focused_pane,
         spec,
+        focus_handle,
+        active_preedit,
         cx,
     );
     let second_el = render_tile(
@@ -285,6 +301,8 @@ pub fn render_tile(
         pane_status,
         focused_pane,
         spec,
+        focus_handle,
+        active_preedit,
         cx,
     );
 
@@ -314,8 +332,9 @@ pub fn render_tile(
 
 /// Render one leaf (tab group) of `task_id`'s tree. Identical to wave
 /// 5b-2's `app::render_leaf` (see its doc comment for the per-pane sizing
-/// rationale -- unchanged) other than threading `task_id` through the
-/// click handler.
+/// rationale -- unchanged) other than threading `task_id` through the click
+/// handler, plus (this wave) wiring up IME input handling and the preedit
+/// overlay for whichever pane is the app's *focused* one.
 #[allow(clippy::too_many_arguments)]
 fn render_leaf(
     task_id: &str,
@@ -324,17 +343,38 @@ fn render_leaf(
     pane_status: &HashMap<PaneId, AgentStatus>,
     focused_pane: PaneId,
     spec: &RenderSpec,
+    focus_handle: &FocusHandle,
+    active_preedit: Option<&PreeditState>,
     cx: &mut Context<LaboLaboApp>,
 ) -> AnyElement {
     let is_focused_leaf = node.panes.iter().any(|p| p.id == focused_pane);
     let selected_id = node.selected_pane().map(|p| p.id);
     let runtime = selected_id.and_then(|id| runtimes.get(&id));
+    // This leaf's selected tab *is* the app's single focused pane -- the
+    // only canvas that should register the IME input handler / paint the
+    // preedit overlay this frame (there's exactly one focused pane app-
+    // wide, so at most one leaf's canvas ever matches).
+    let is_input_target = selected_id == Some(focused_pane);
 
     let session_for_resize = runtime.map(|rt| rt.session.clone());
     let last_size = runtime.map(|rt| rt.last_size.clone());
     let snapshot = runtime.map(|rt| rt.session.snapshot());
     let prepaint_spec = spec.clone();
     let paint_spec = spec.clone();
+
+    // `ElementInputHandler::new` needs the bounds `canvas` only hands us
+    // inside the paint closure, so just the (focus_handle, entity) pair is
+    // captured here -- constructed fresh every frame, matching
+    // `Window::handle_input`'s "active for the upcoming frame only"
+    // contract.
+    let input_handler_setup = is_input_target.then(|| (focus_handle.clone(), cx.entity()));
+    let preedit_text = is_input_target
+        .then(|| {
+            active_preedit
+                .filter(|p| p.task_id == task_id && p.pane_id == focused_pane)
+                .map(|p| p.text.clone())
+        })
+        .flatten();
 
     let canvas_el = canvas(
         move |bounds, _window, _cx| {
@@ -352,8 +392,22 @@ fn render_leaf(
             }
         },
         move |bounds, _, window, cx| {
+            if let Some((focus_handle, entity)) = input_handler_setup {
+                window.handle_input(&focus_handle, ElementInputHandler::new(bounds, entity), cx);
+            }
             if let Some(snapshot) = &snapshot {
                 crate::render::paint_grid(snapshot, &paint_spec, bounds, window, cx);
+                if let Some(text) = &preedit_text {
+                    crate::render::paint_preedit(
+                        text,
+                        &snapshot.cursor,
+                        snapshot.cols,
+                        &paint_spec,
+                        bounds,
+                        window,
+                        cx,
+                    );
+                }
             }
         },
     )

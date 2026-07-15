@@ -21,6 +21,8 @@ use gpui::{
 };
 use labolabo_term::{CursorSnapshot, GridSnapshot, Rgb};
 
+use crate::ime;
+
 /// The fallback font family when the user's `font-family` (or an empty
 /// config) can't be resolved. Menlo ships with macOS; on Linux, gpui's own
 /// fallback font stack kicks in at shape time if Menlo is missing too.
@@ -257,6 +259,48 @@ fn paint_cursor(
         Bounds::new(point(x, y), size(px(spec.cell_width), px(spec.cell_height))),
         color,
     ));
+}
+
+/// Paint an in-progress IME composition (preedit/marked text) inline over
+/// the cursor's row, underlined -- the standard terminal convention (see
+/// the vendored Ghostty source's `Surface.preeditCallback`/`renderer/
+/// State.zig`, referenced as the behavioral spec this mirrors). Column
+/// layout (including the wide-character and right-edge-shift handling) is
+/// `ime::layout_preedit`'s job -- this function only shapes and paints each
+/// laid-out character. A no-op for empty `text` (nothing being composed).
+pub fn paint_preedit(
+    text: &str,
+    cursor: &CursorSnapshot,
+    cols: u16,
+    spec: &RenderSpec,
+    bounds: Bounds<Pixels>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if text.is_empty() {
+        return;
+    }
+    let y = bounds.origin.y + px(cursor.row as f32 * spec.cell_height);
+    for cell in ime::layout_preedit(text, cursor.col, cols) {
+        let x = bounds.origin.x + px(cell.col as f32 * spec.cell_width);
+        let text = SharedString::from(cell.ch.to_string());
+        let run = TextRun {
+            len: text.len(),
+            font: spec.font.clone(),
+            color: gpui::white(),
+            background_color: None,
+            underline: Some(UnderlineStyle {
+                thickness: px(1.0),
+                color: None,
+                wavy: false,
+            }),
+            strikethrough: None,
+        };
+        let shaped = window
+            .text_system()
+            .shape_line(text, px(spec.font_size), &[run], None);
+        let _ = shaped.paint(point(x, y), px(spec.cell_height), window, cx);
+    }
 }
 
 #[cfg(test)]

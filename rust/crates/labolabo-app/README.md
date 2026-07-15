@@ -110,8 +110,8 @@ GHOSTTY_SOURCE_DIR=/path/to/ghostty-zig016-src \
 | Module | Responsibility |
 |---|---|
 | `main.rs` | Entry point: reads the Ghostty font config, registers the tile/tab keybindings (`cx.bind_keys`), opens the one window at a starting size. |
-| `app.rs` | The gpui root view (`LaboLaboApp`): owns the `TaskDatabase`, the Task list, one `TaskWorkspace` per loaded Task, Task selection/persistence, the new-Task flows' orchestration, key routing, and the action handlers for every keybinding. |
-| `task_workspace.rs` | One Task's live workspace: its `PaneTilingModel` + one `PaneRuntime` (real `Terminal` session + redraw bridge) per terminal pane, and the recursive split/tab-bar render tree (wave 5b-2's tree, made per-Task — every render/click path carries a `task_id`). |
+| `app.rs` | The gpui root view (`LaboLaboApp`): owns the `TaskDatabase`, the Task list, one `TaskWorkspace` per loaded Task, Task selection/persistence, the new-Task flows' orchestration, key routing, the action handlers for every keybinding (including Cmd+V paste), and the `EntityInputHandler` impl that wires up IME composition. |
+| `task_workspace.rs` | One Task's live workspace: its `PaneTilingModel` + one `PaneRuntime` (real `Terminal` session + redraw bridge) per terminal pane, and the recursive split/tab-bar render tree (wave 5b-2's tree, made per-Task — every render/click path carries a `task_id`). The focused pane's leaf also registers the IME input handler and paints the preedit overlay each frame. |
 | `sidebar.rs` | The Task sidebar: pure, unit-tested repo-grouping (`group_tasks_by_repo`) + minimal rendering (title + a one-glyph worktree/attached marker, "+ Attached"/"+ Worktree" buttons, error banner). |
 | `new_task.rs` | The new-Task flows' git side (gpui-free, integration-tested against real temp repos): repo-identity resolution for attached Tasks, and branch-generation + `git worktree add` for worktree Tasks. |
 | `focus.rs` | Pure tile-tree focus logic (gpui-independent, unit-tested): which pane to focus after a close, next/previous-pane cycling, Cmd+N tab lookup. See its module doc comment for the "focus is a `PaneId`, not a `NodeId`" invariant. |
@@ -120,8 +120,10 @@ GHOSTTY_SOURCE_DIR=/path/to/ghostty-zig016-src \
 | `bin/labolabo.rs` | The `labolabo` CLI binary — a thin client for the control socket (argv parsing, `ControlRequest` construction, printing the response). See "Control CLI" below. |
 | `ghostty_config.rs` | Pure-ish loader for the user's Ghostty config (`font-family`/`font-size`, `background`/`foreground`/`cursor-color`/`palette`/`theme`, `config-file` includes). Fixture-tested; never reads `$HOME` in tests. |
 | `grid.rs` | Pure function: pixel area + cell size -> terminal column/row count. No gpui types — unit-tested without a gpui `Application`. |
-| `keys.rs` | Pure function: `gpui::Keystroke` -> PTY input bytes. `Keystroke`/`Modifiers` are plain data, so this is unit-tested directly too. |
-| `render.rs` | `RenderSpec` (font resolution + cell measurement) and painting one `labolabo_term::GridSnapshot` into a gpui canvas (background, glyphs, cursor). |
+| `keys.rs` | Pure function: `gpui::Keystroke` -> PTY input bytes, for the keys that must bypass the platform's text-input/IME machinery (control keys, a bare Ctrl-<letter>) — everything else is `app.rs`'s `EntityInputHandler` impl's job. `Keystroke`/`Modifiers` are plain data, so this is unit-tested directly too. |
+| `ime.rs` | Pure IME helpers: `layout_preedit` (column layout of an in-progress composition string on the terminal grid, unicode-width-aware) and UTF-8/UTF-16 length/slice conversions gpui's `EntityInputHandler` trait needs. No gpui types — unit-tested directly. |
+| `paste.rs` | Pure function: a clipboard string -> the PTY bytes for a paste (`encode_paste`) — unsafe control byte stripping, newline normalization to `"\r"`, optional bracketed-paste wrapping. Unit-tested directly. |
+| `render.rs` | `RenderSpec` (font resolution + cell measurement) and painting one `labolabo_term::GridSnapshot` into a gpui canvas (background, glyphs, cursor, and — via `ime.rs` — the IME preedit overlay). |
 
 ### The Task model (wave 5b-3)
 
@@ -337,6 +339,7 @@ so there's no conflict with typing.
 | Cmd+1 .. Cmd+9 | Select the Nth tab in the focused pane (no-op if it has fewer tabs) |
 | Cmd+] | Focus the next pane (cycles leaves in tree order, wraps around) |
 | Cmd+[ | Focus the previous pane (cycles leaves in tree order, wraps around) |
+| Cmd+V | Paste the system clipboard's text into the focused pane (see "Clipboard paste" below) |
 
 "Next/previous pane" cycles the tree's leaves in depth-first order rather
 than true on-screen (left/right/up/down) adjacency — the simpler of the two
@@ -405,28 +408,96 @@ what's deliberately unsupported.
 
 ### Keyboard input path
 
-gpui delivers a `KeyDownEvent` (via `div::on_key_down`, on a focused,
-`track_focus`-ed root div) -> `keys::keystroke_to_bytes` turns it into raw
-bytes (pure function, see `grid.rs`/`keys.rs` unit tests) -> the selected
-Task's focused pane's `Terminal::write_input` writes them to its PTY.
-Handled: printable characters (via gpui's own `key_char`),
-Enter/Backspace/Tab/Escape/Space, the four arrow keys (CSI sequences), and a
-bare Ctrl-<letter> (C0 control codes, Ctrl-A..Ctrl-Z). Cmd/Super
-combinations are never forwarded to a terminal (reserved for
-application-level shortcuts — see "Keybindings" above for what they're bound
-to as of this wave).
+Two parallel paths feed a pane's PTY, split by *what kind* of input a
+keystroke represents — see `keys.rs`'s module doc comment for the full
+reasoning and `app::LaboLaboApp`'s `EntityInputHandler` impl doc comment for
+the IME side:
 
-**Not implemented (TODO, see `keys.rs`'s module doc comment):**
+- **Control keys** (Enter/Backspace/Tab/Escape/arrows, a bare
+  Ctrl-<letter>): gpui delivers a `KeyDownEvent` (via `div::on_key_down`, on
+  a focused, `track_focus`-ed root div) -> `keys::keystroke_to_bytes` turns
+  it into raw bytes (pure function, see `keys.rs` unit tests) -> the
+  selected Task's focused pane's `Terminal::write_input` writes them to its
+  PTY. `app::LaboLaboApp::key_down` calls `cx.stop_propagation()` on a
+  claimed keystroke, which is what stops gpui from *also* forwarding it to
+  the platform's text-input/IME machinery once one is registered (see
+  below) — without it, e.g. Ctrl-A would additionally reach macOS's
+  `doCommandBySelector:` (Cocoa's default key bindings map it to
+  `moveToBeginningOfLine:`), re-dispatching the same handler a second time.
+- **Everything else — plain printable text, space, and IME composition**:
+  routed through gpui's `EntityInputHandler` trait instead (implemented on
+  `LaboLaboApp` in `app.rs`), which gpui wires to the platform's real
+  text-input machinery (macOS's `NSTextInputContext`; X11/Wayland's
+  IBus/fcitx bridge). `task_workspace::render_leaf` registers an
+  `ElementInputHandler<LaboLaboApp>` (via `Window::handle_input`) against
+  the focused pane's canvas every frame. `replace_text_in_range` writes a
+  committed string (a plain character, or an IME composition's final
+  confirmed text) straight to the focused pane's PTY;
+  `replace_and_mark_text_in_range` tracks an in-progress composition's
+  preedit string *without* writing anything to the PTY, and
+  `task_workspace::render_leaf` paints it inline over the cursor
+  (`render::paint_preedit`, underlined, using `ime::layout_preedit`'s pure
+  column-layout math — unicode-width-aware, so CJK fullwidth characters
+  occupy two cells); `unmark_text` clears it on cancel (e.g. Escape while
+  composing) with nothing written to the PTY.
 
-- **IME composition.** gpui's `EntityInputHandler` (marked text, composition
-  events) is not wired up. This means CJK input methods, dead-key
-  compositions, and similar multi-keystroke-per-character input do not work
-  — only single dispatched key-down events are handled. This remains the
-  headline input gap; see "What was and wasn't verified" below.
+  **Design decision — no double-send.** `keys::keystroke_to_bytes`
+  deliberately does *not* handle any keystroke carrying a `key_char` other
+  than a bare Ctrl-<letter> (this used to include a "printable fallback"
+  and a `"space"` case; both were removed this wave). Traced through gpui's
+  own macOS/X11/Wayland backends: once an input handler is registered, all
+  three platforms route every plain/shift-only `key_char` keystroke through
+  it (self-inserting, or starting an IME composition) rather than through
+  the raw `KeyDownEvent` a `div::on_key_down` listener sees. Handling such
+  a keystroke in both places would either double-send it, or — worse —
+  send the *unconverted* Roman letter to the PTY before the IME ever gets
+  a chance to compose it. So printable text now flows through exactly one
+  path, chosen by whether it needs IME/text-input's cooperation.
+
+- Cmd/Super combinations are never forwarded to a terminal (reserved for
+  application-level shortcuts — see "Keybindings" above for what they're
+  bound to as of this wave), including Cmd+V (paste — see "Clipboard paste"
+  below, a separate path from either of the above).
+
+**Not implemented:**
+
 - Delete (forward-delete)/Home/End/PageUp/PageDown/function keys.
 - Ctrl combined with anything other than a single letter, and any
-  Ctrl+Alt/Ctrl+Shift combination beyond "fall back to whatever `key_char`
-  gpui reports".
+  Ctrl+Alt/Ctrl+Shift combination (falls to the `EntityInputHandler` path
+  like any other `key_char`-carrying keystroke, same as a plain letter).
+- Text selection, and therefore copy (Cmd+C) and IME candidate-window
+  positioning that depends on an existing selection range —
+  `EntityInputHandler::selected_text_range` always reports an empty
+  selection at the composition's end, never an actual document selection
+  (there is no addressable "document" to select from — see the impl's doc
+  comment).
+
+### Clipboard paste (Cmd+V)
+
+`app::LaboLaboApp::action_paste` reads the system clipboard
+(`cx.read_from_clipboard()`), and — if it has text — encodes it via
+`paste::encode_paste` (pure function, unit tested): unsafe control bytes
+stripped (in particular `ESC`, so a crafted clipboard payload can't embed a
+literal bracketed-paste end marker to break out early), line endings
+normalized to `"\r"` (a real terminal's Enter-key convention; `"\r\n"` and
+lone `"\n"` both collapse to it), and — when the focused pane's
+`Terminal::bracketed_paste()` reports the foreground program has enabled
+DECSET `2004` — wrapped in `ESC[200~...ESC[201~`. The mode query itself is
+a small addition to `labolabo-term`'s `VtBackend` trait
+(`bracketed_paste(&self) -> bool`), implemented identically for both
+backends (`alacritty_terminal::Term::mode().contains(TermMode::
+BRACKETED_PASTE)`; `libghostty_vt::Terminal::mode(Mode::BRACKETED_PASTE)`)
+and exposed to the caller thread as a plain, non-blocking flag
+(`TermSession::bracketed_paste`) refreshed by the worker thread after every
+processed PTY byte batch — the same "publish a cheap plain-data value for
+the caller thread" shape `GridSnapshot` itself already uses, just for a
+single `bool`. Covered by a shared (`tests/backend_common.rs`) headless test
+on both backends: enabling/disabling DECSET `2004` via `printf` in the
+spawned shell is reflected in `bracketed_paste()`.
+
+**Copy is out of scope** for this wave (see "Not implemented" above — text
+selection isn't implemented yet, so there's nothing to copy); a future
+scrollback/selection wave is the natural place for it.
 
 ### Resize path (per pane)
 
@@ -571,8 +642,15 @@ remain reserved/future work (docs/control-protocol.md §5.5).
   allowed. In a layout where DFS order doesn't match visual left-to-right/
   top-to-bottom order (e.g. after several splits), the cycle direction may
   feel surprising.
-- **No IME support** (see "Keyboard input path" above) — the biggest
-  functional gap, carried since wave 5a.
+- **IME composition support landed this wave** (see "Keyboard input path"
+  above) but real Japanese/CJK input has not been verified interactively —
+  synthetic keyboard/IME input is off-limits for this port's own
+  verification discipline (`README.md`'s "What was and wasn't verified"
+  convention), so this needs a human to actually type through a real IME
+  before it's considered confirmed working, not just "compiles and the
+  design traces correctly through gpui's platform backends".
+- **No text selection, and therefore no copy** (see "Keyboard input path"
+  above) — a future scrollback/selection wave's job.
 - **Colors: light/dark theme switching is out of scope.** Ghostty's `theme
   = light:NAME,dark:NAME` syntax picks a theme based on the desktop
   appearance; this port only ever resolves the **light** side and has no
@@ -758,3 +836,77 @@ instruction, same as wave 5b-3 above:**
   injecting/restoring hooks for the same directory at once — see "Known
   limitations" above) is understood but not reproduced/tested; the advice
   to avoid it is precautionary, not empirically validated.
+
+### Wave 5e (IME composition + clipboard paste)
+
+Landed: `EntityInputHandler` wired to the focused pane's canvas
+(`app::LaboLaboApp`'s impl; `task_workspace::render_leaf` registers it and
+paints the preedit overlay), `keys::keystroke_to_bytes` narrowed to only the
+keys that must bypass the platform's text-input machinery (see "Keyboard
+input path" above for the full double-send-prevention reasoning), Cmd+V
+clipboard paste (`app::LaboLaboApp::action_paste`, `paste::encode_paste`),
+and a small `bracketed_paste(&self) -> bool` addition to `labolabo-term`'s
+`VtBackend` trait (implemented for both backends, exposed to the caller
+thread via `TermSession::bracketed_paste`).
+
+Verified locally:
+
+- `cargo build -p labolabo-app`, `cargo clippy -p labolabo-app --all-targets
+  -- -D warnings`, and workspace-wide `cargo fmt --check` all pass.
+- `cargo test -p labolabo-app` (105 lib tests + 8 `control_cli` integration
+  tests): the new `ime` module (preedit column layout, including the
+  wide-character and right-edge-shift cases mirrored from the vendored
+  Ghostty source's own `Preedit.range` tests, plus UTF-16 length/slice
+  helpers), the new `paste` module (newline normalization, unsafe-
+  control-byte stripping including the bracketed-paste-end-marker-injection
+  case, bracketed wrapping), and `keys.rs`'s updated contract (printable
+  text/space now assert `None`, since they're the input handler's job) —
+  plus the full pre-existing suite (unchanged where not directly touched).
+- `cargo build/clippy/test -p labolabo-term` on **both** backends: default
+  `backend-alacritty`, and `backend-ghostty-vt` (a Zig 0.16 toolchain and
+  the fork-pinned Ghostty source tree were both available this time — see
+  the crate README's "Building the ghostty-vt backend"). The new
+  `bracketed_paste_mode_reflects_decset_2004` test (in the shared
+  `tests/backend_common.rs`, so it runs against both backends unmodified)
+  enables/disables DECSET `2004` via `printf` in a spawned shell and asserts
+  `Terminal::bracketed_paste()` tracks it, off -> on -> off.
+- Root `cargo build`/`cargo test`/`cargo clippy -- -D warnings` (workspace
+  `default-members`: `labolabo-core` + `labolabo-term`) all pass.
+- `cargo run -p labolabo-app` smoke run (`LABOLABO_RS_DATA_DIR=$(mktemp
+  -d)`, ~6 seconds, then killed): no panic/crash output (one benign AppKit
+  console line, `error messaging the mach port for
+  IMKCFRunLoopWakeUpReliable` — a known harmless Input Method Kit warning
+  Cocoa apps commonly print on window creation, not an error from this
+  code), process exited cleanly on kill, no leftover process.
+
+**Not verified — no synthetic keyboard/mouse input, on explicit
+instruction, same as every wave above:**
+
+- **Real Japanese (or any CJK) IME input has not been typed through the
+  app.** This is the one thing that actually proves the feature works —
+  everything above confirms the design traces correctly through gpui's own
+  platform-backend source (macOS's `NSTextInputContext` dispatch, X11/
+  Wayland's IBus/fcitx bridge, all read directly rather than assumed) and
+  that the pure layout/encoding logic is correct in isolation, but **the
+  user needs to actually switch to a Japanese input source, type a romaji
+  sequence, watch the preedit render inline with the correct underline/
+  column position, confirm it, and see the composed characters land in the
+  shell** before this is confirmed working end to end.
+- **Plain (non-IME) typing has not been re-verified interactively either.**
+  This wave changed the base path (printable text/space no longer write
+  directly from `key_down`; they rely on `EntityInputHandler::
+  replace_text_in_range` being reached instead) — the design was traced
+  through gpui's own dispatch code on all three platforms and is exercised
+  transitively by the app not crashing at startup, but no actual keystroke
+  was sent, so a regression in ordinary typing (not just IME) can't be
+  ruled out without a human trying it.
+- **Cmd+V paste has not been exercised against a real clipboard or a real
+  bracketed-paste-aware program** (e.g. a shell with readline's bracketed
+  paste enabled, or `vim`/`less`). `paste::encode_paste`'s logic is unit-
+  tested and `bracketed_paste()`'s mode tracking is integration-tested
+  against a real PTY, but the two have not been observed wired together
+  through an actual Cmd+V keypress.
+- **The IME candidate window's on-screen position has not been visually
+  confirmed** — `bounds_for_range`'s cursor-cell math is straightforward
+  (mirrors `render::paint_cursor`'s own coordinate math) but was not
+  screenshotted against a real candidate popover.

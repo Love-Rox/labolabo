@@ -13,7 +13,7 @@ use std::io::Write;
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::cell::Flags;
-use alacritty_terminal::term::{Config, Term};
+use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{
     Color as AnsiColor, CursorShape, NamedColor, Processor, Rgb as AnsiRgb,
 };
@@ -202,6 +202,10 @@ impl VtBackend for AlacrittyBackend {
             cells,
             cursor,
         })
+    }
+
+    fn bracketed_paste(&self) -> bool {
+        self.term.mode().contains(TermMode::BRACKETED_PASTE)
     }
 }
 

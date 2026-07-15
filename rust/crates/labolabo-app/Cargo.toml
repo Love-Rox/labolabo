@@ -67,3 +67,9 @@ uuid = { version = "1", features = ["v4"] }
 # (`hooks::tests` asserted on merged `.claude/settings.local.json`
 # structure); now needed at runtime too.
 serde_json = "1"
+
+# IME wave: `ime::layout_preedit` measures each preedit character's on-
+# screen cell width (1 for narrow, 2 for wide/fullwidth -- e.g. CJK --
+# characters) so the inline composition overlay lines up with the terminal
+# grid it's painted over.
+unicode-width = "0.2"

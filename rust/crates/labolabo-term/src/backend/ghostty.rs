@@ -26,6 +26,7 @@ use std::io::Write;
 use anyhow::anyhow;
 use libghostty_vt::render::{CellIterator, RenderState, RowIterator};
 use libghostty_vt::style::{RgbColor, Underline};
+use libghostty_vt::terminal::Mode;
 use libghostty_vt::{Terminal, TerminalOptions};
 
 use crate::backend::VtBackend;
@@ -259,6 +260,10 @@ impl VtBackend for GhosttyBackend {
             cells,
             cursor,
         })
+    }
+
+    fn bracketed_paste(&self) -> bool {
+        self.terminal.mode(Mode::BRACKETED_PASTE).unwrap_or(false)
     }
 }
 
