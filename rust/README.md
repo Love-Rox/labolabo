@@ -714,14 +714,20 @@ A few design decisions worth calling out:
   (separate `LSApplicationCategoryType`/data dirs/preferences; the Rust
   port's own on-disk data directory, `store::rust_app_data_dir`, is
   similarly named `LaboLabo-rs`, not `LaboLabo` — see "Wave 5b-3" above).
-- **Version**: `CFBundleShortVersionString` is a hand-set `1.0.0`, *not*
-  the workspace crates' own `Cargo.toml` `version` (still `0.1.0` — this
-  port is pre-1.0 internally) — per explicit product direction, this
-  bundle is versioned as a major bump from the current Swift app's release
-  line (`Config/Version.xcconfig`'s `MARKETING_VERSION`, 0.7.x as of this
-  wave), not a continuation of either the Swift 0.x line or the crates' own
-  0.1.0. `CFBundleVersion` (the build number) follows the Swift app's own
-  convention: `git rev-list --count HEAD`.
+- **Version**: `CFBundleShortVersionString` is *not* the workspace crates'
+  own `Cargo.toml` `version` (still `0.1.0` — this port is pre-1.0
+  internally) — per explicit product direction, this bundle is versioned as
+  a major bump from the Swift app's release line
+  (`Config/Version.xcconfig`'s `MARKETING_VERSION`), not a continuation of
+  either the Swift 0.x line or the crates' own 0.1.0. As of the RC release
+  wave (see "RC リリース手順" below) this is single-sourced from
+  `rust/VERSION` (one plain-text line, e.g. `1.0.0-rc.1`), with a
+  `LABOLABO_RS_VERSION` env-var override that `bundle-macos.sh` also
+  forwards into the `cargo build` it runs — so the packaged zip's file name
+  *and* the compiled binary's own About-panel version (`crates/labolabo-app/
+  src/menus.rs` `APP_VERSION`, injected by `build.rs`) always agree, with no
+  manual sync step. `CFBundleVersion` (the build number) follows the Swift
+  app's own convention: `git rev-list --count HEAD`.
 - **Icon**: reuses the Swift app's own artwork
   (`app/Sources/Assets.xcassets/AppIcon.appiconset/*.png`) rather than
   shipping unbranded or placeholder icons — those PNGs already use
@@ -804,3 +810,56 @@ process-runner tests, and the `windows_pipe_security` SDDL tests. Local
 verification from macOS: `cargo check/clippy/build --target
 x86_64-pc-windows-gnu` (mingw-w64), including a full link of the
 `labolabo` CLI bin.
+
+## RC リリース手順（RC release wave）
+
+`.github/workflows/rust-release.yml` は、Rust 版 labolabo-app を Mac/
+Linux/Windows 3 アーティファクト付きの GitHub **pre-release**（draft）
+として発行するための配管。**この workflow 自体は pre-release の実発行・
+タグ付けは行わない** — `--draft` フラグにより、GitHub は draft のままでは
+タグを実際にリポジトリへは打たない（人間が Releases 画面で "Publish
+release" するまでタグは作られない）。手順は次の通り:
+
+1. **`workflow_dispatch` の実行** -- GitHub の Actions タブから
+   "Rust release (RC)" を選び、`tag` 入力に `rs-v` プレフィクス付きの
+   タグ（例 `rs-v1.0.0-rc.1`）を指定して実行する。既存の release-please
+   管理下の Swift 版タグ（`v*`）と衝突しないよう、この `rs-v*` プレフィクス
+   は必須（`resolve-version` ジョブが検証・拒否する）。タグから `rs-v` を
+   剥がした残りがそのままバージョン文字列（`1.0.0-rc.1`）になり、3 プラット
+   フォームのビルド・パッケージング（`bundle-macos.sh`/`package-linux.sh`/
+   `package-windows.ps1`、いずれも `LABOLABO_RS_VERSION` env 経由でこの
+   ワークフローが明示的に渡す）と `crates/labolabo-app/src/menus.rs`
+   `APP_VERSION`（`build.rs` 経由でコンパイル時に注入）の両方に一致する
+   — リポジトリの `rust/VERSION` ファイルを都度書き換える必要はない。
+2. **draft release の確認** -- 3 ジョブ（`bundle-macos`/`package-linux`/
+   `package-windows`）が green になった後、`create-release` ジョブが
+   3 アーティファクトを集約して `gh release create --prerelease --draft`
+   する。GitHub の Releases 画面で draft を開き、3 アーティファクトが
+   揃っていること・リリースノート（`rust/RELEASE_NOTES_TEMPLATE.md` を
+   バージョン/タグで埋めたもの）の内容を確認する。
+3. **publish** -- 内容に問題なければ、GitHub の Releases 画面で "Publish
+   release" を押す。この操作で初めてタグ（`rs-v1.0.0-rc.1` 等）が実際に
+   リポジトリへ作られ、pre-release が公開される。
+4. **サイト（labolabo-site PR #1）マージ** -- publish 後、ダウンロード
+   リンクを最新の RC に向けるサイト側の変更（labolabo-site リポジトリの
+   該当 PR）をマージする。
+
+`rust-app-bundle.yml`（既存の Rust 手動ビルド、`workflow_dispatch` のみ・
+アーティファクトの workflow 出力止まりでリリース化はしない）とは独立した
+別ファイルのまま運用する — 統合は将来判断（過剰な工事はしないという方針）。
+
+### アップデート確認（Rust 版、`crate::update_check`）
+
+Rust 版アプリは起動時に一度だけ、バックグラウンドで GitHub Releases を
+確認し、新しいバージョンが見つかればサイドバーに控えめなバナーを表示する
+（`crates/labolabo-app/src/update_check.rs`、Swift 版 `UpdateChecker` の
+軽量移植 — 常駐ポーリングはせず、OS 通知も出さない）。HTTP は新規依存を
+増やさず `curl -fsSL --max-time 5` を子プロセスとして呼ぶだけで、`curl`
+不在やネットワーク失敗は静かに無視する（UI には一切出ない）。RC ビルド
+（バージョン文字列に `-rc` を含む）は `rs-v*` タグの最新（pre-release 込み、
+`/releases?per_page=10` をフィルタ）、安定版ビルドは `/releases/latest`
+（`rs-v*` でなければ Swift 版のタグとみなして無視）を見る。バナーの「×」
+（閉じる）操作は「今後このバージョンを通知しない」を兼ねる（appState の
+`ignoredUpdateVersion` へ永続化）。設定画面の「アップデートを自動確認」
+トグル（既定 on）と、スモークテスト/CI 向けの `LABOLABO_NO_UPDATE_CHECK=1`
+環境変数の両方で独立に無効化できる。

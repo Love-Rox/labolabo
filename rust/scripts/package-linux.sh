@@ -11,7 +11,10 @@
 # known limitations (GUI launch is unverified -- built and headless-tested
 # in CI only, see that section).
 #
-# Usage: rust/scripts/package-linux.sh
+# Usage: rust/scripts/package-linux.sh [version]
+#   version: optional -- see bundle-macos.sh's usage comment for the exact
+#            resolution order and how it also stamps the compiled binary's
+#            own About-panel version (LABOLABO_RS_VERSION).
 # Output: rust/target/package/LaboLabo-rs-linux-<version>-<arch>.tar.gz
 set -euo pipefail
 
@@ -31,16 +34,21 @@ REPO_ROOT="$(cd "$RUST_DIR/.." && pwd)"
 # Same marketing version as the macOS bundle (`bundle-macos.sh`) -- one
 # version number across every platform's packaged artifact, deliberately
 # decoupled from the workspace crates' own (unbumped, pre-1.0) Cargo.toml
-# `version`. Keep in sync with `crates/labolabo-app/src/menus.rs`
-# `APP_VERSION` and `bundle-macos.sh`'s own `VERSION`.
-VERSION="1.0.0"
+# `version`. Same resolution order as `bundle-macos.sh` ($1 > env >
+# rust/VERSION file > literal fallback) -- see that script's comment for
+# the full rationale, including why this is exported before `cargo build`.
+VERSION="${1:-${LABOLABO_RS_VERSION:-$(cat "$RUST_DIR/VERSION" 2>/dev/null | tr -d '[:space:]')}}"
+if [ -z "$VERSION" ]; then
+    VERSION="1.0.0-rc.1"
+fi
+export LABOLABO_RS_VERSION="$VERSION"
 ARCH="$(uname -m)"
 
 PACKAGE_DIR="$RUST_DIR/target/package"
 STAGE_NAME="LaboLabo-rs-linux-$VERSION-$ARCH"
 STAGE_DIR="$PACKAGE_DIR/$STAGE_NAME"
 
-echo "==> cargo build --release (labolabo-app, labolabo, labolabo-hook)"
+echo "==> cargo build --release (labolabo-app, labolabo, labolabo-hook), version $VERSION"
 # Same two `-p` flags as bundle-macos.sh: `-p labolabo-app` builds this
 # package's two bin targets (labolabo-app, the gpui GUI; labolabo, the
 # control CLI); `-p labolabo-core` additionally builds its own
