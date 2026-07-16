@@ -75,6 +75,86 @@ if [ -z "$VERSION" ]; then
 fi
 export LABOLABO_RS_VERSION="$VERSION"
 
+# --- VT backend selection ---------------------------------------------------
+#
+# Distribution builds default to **ghostty-vt** (real `libghostty-vt` --
+# this project's intended production VT core, the Ghostty identity being the
+# whole premise -- see `rust/README.md`'s "配布 vs 開発の既定バックエンド"
+# section), even though a plain `cargo build`/`cargo test` still defaults to
+# `backend-alacritty` (`crates/labolabo-term/Cargo.toml`'s `default`) so
+# day-to-day development never needs a Zig toolchain. This mirrors
+# `.github/workflows/ci.yml`'s `rust-term-ghostty` job's own toolchain
+# expectations exactly -- same fork pin (vancluever/ghostty, Zig 0.16; see
+# that job's `GHOSTTY_REF` comment for the exact SHA and why upstream isn't
+# used yet) -- but unlike that CI job, this script does **not** fetch either
+# the Zig toolchain or the Ghostty source for you; both must already be on
+# disk (see the error message below for setup steps). CI wires them up itself
+# (`.github/workflows/rust-release.yml`/`rust-app-bundle.yml`'s macOS/Linux
+# jobs, which check out the same pinned fork and `mlugg/setup-zig@v2` the
+# same version) before calling this script, so it "just works" there.
+#
+# `LABOLABO_VT_BACKEND=alacritty` is an explicit escape hatch back to the
+# previous crates.io-only build, for anyone who doesn't have the ghostty
+# toolchain set up locally and just wants *a* working bundle now.
+VT_BACKEND="${LABOLABO_VT_BACKEND:-ghostty}"
+CARGO_FEATURE_ARGS=""
+case "$VT_BACKEND" in
+    ghostty)
+        if ! command -v zig >/dev/null 2>&1; then
+            cat >&2 <<EOF
+error: the ghostty-vt backend requires Zig 0.16 on PATH, but no 'zig' binary was found.
+
+Set up:
+  1. Install Zig 0.16.0 (https://ziglang.org/download/) and put it on PATH
+     ('zig version' must print 0.16.x).
+  2. Clone the Zig-0.16-compatible Ghostty fork this project pins in CI (see
+     .github/workflows/ci.yml's 'rust-term-ghostty' job -- vancluever/ghostty,
+     GHOSTTY_REF for the exact pinned commit) and export:
+       export GHOSTTY_SOURCE_DIR=/path/to/that/checkout
+
+Or fall back to the alacritty backend (not the intended production backend --
+see rust/README.md):
+  LABOLABO_VT_BACKEND=alacritty $0 ${1:-}
+EOF
+            exit 1
+        fi
+        ZIG_VERSION="$(zig version)"
+        case "$ZIG_VERSION" in
+            0.16.*) ;;
+            *)
+                echo "error: the ghostty-vt backend requires Zig 0.16.x; found '$(command -v zig)' reporting version $ZIG_VERSION. Put a 0.16.x zig first on PATH, or set LABOLABO_VT_BACKEND=alacritty to fall back." >&2
+                exit 1
+                ;;
+        esac
+        if [ -z "${GHOSTTY_SOURCE_DIR:-}" ] || [ ! -f "${GHOSTTY_SOURCE_DIR}/build.zig" ]; then
+            cat >&2 <<EOF
+error: the ghostty-vt backend requires GHOSTTY_SOURCE_DIR to point at a
+Ghostty source checkout containing build.zig, but it is $( [ -z "${GHOSTTY_SOURCE_DIR:-}" ] && echo "unset" || echo "set to '$GHOSTTY_SOURCE_DIR', which has no build.zig" ).
+
+Clone the Zig-0.16-compatible fork this project pins in CI (see
+.github/workflows/ci.yml's 'rust-term-ghostty' job -- vancluever/ghostty,
+GHOSTTY_REF for the exact pinned commit) and export:
+  export GHOSTTY_SOURCE_DIR=/path/to/that/checkout
+
+Or fall back to the alacritty backend (not the intended production backend --
+see rust/README.md):
+  LABOLABO_VT_BACKEND=alacritty $0 ${1:-}
+EOF
+            exit 1
+        fi
+        CARGO_FEATURE_ARGS="--no-default-features --features backend-ghostty-vt"
+        VT_BACKEND_LABEL="libghostty-vt"
+        ;;
+    alacritty)
+        VT_BACKEND_LABEL="alacritty (fallback -- see rust/README.md)"
+        ;;
+    *)
+        echo "error: unknown LABOLABO_VT_BACKEND '$VT_BACKEND' (expected 'ghostty' or 'alacritty')" >&2
+        exit 1
+        ;;
+esac
+echo "==> VT backend: $VT_BACKEND_LABEL"
+
 echo "==> cargo build --release (labolabo-app, labolabo, labolabo-hook), version $VERSION"
 # `-p labolabo-app` builds this package's two bin targets (labolabo-app,
 # the gpui GUI; labolabo, the control CLI, see its Cargo.toml). `-p
@@ -82,8 +162,12 @@ echo "==> cargo build --release (labolabo-app, labolabo, labolabo-hook), version
 # target (the hooks forwarder) -- labolabo-core is otherwise just a library
 # dependency of labolabo-app, so its bin isn't produced by the first `-p`
 # alone. Release, matching the Swift app's Release-configuration release
-# build.
-(cd "$RUST_DIR" && cargo build --release -p labolabo-app -p labolabo-core)
+# build. `$CARGO_FEATURE_ARGS` (unquoted, deliberately: either empty or a
+# fixed pair of flag literals -- see "VT backend selection" above) selects
+# the VT backend; labolabo-core has no such feature, but cargo resolves the
+# feature name against whichever of the two `-p` packages declares it.
+# shellcheck disable=SC2086
+(cd "$RUST_DIR" && cargo build --release -p labolabo-app -p labolabo-core $CARGO_FEATURE_ARGS)
 
 BUILD_DIR="$RUST_DIR/target/release"
 for bin in labolabo-app labolabo labolabo-hook; do

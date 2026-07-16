@@ -60,6 +60,20 @@ pub type ActiveBackend = backend::ghostty::GhosttyBackend;
 #[cfg(all(feature = "backend-alacritty", not(feature = "backend-ghostty-vt")))]
 pub type ActiveBackend = backend::alacritty::AlacrittyBackend;
 
+/// Human-readable name of the [`ActiveBackend`] selected for this build --
+/// display-only (e.g. `labolabo-app`'s About overlay, "VT: <name>" --
+/// `crates/labolabo-app/src/menus.rs`'s `VT_BACKEND` constant, which reads
+/// this rather than re-deriving the same feature-cfg precedence itself, so
+/// the two can never disagree). Resolves via the exact same `#[cfg(...)]`
+/// pairing as `ActiveBackend` above (ghostty wins when both features are
+/// enabled).
+#[cfg(feature = "backend-ghostty-vt")]
+pub const ACTIVE_BACKEND_NAME: &str = "libghostty-vt";
+
+/// See [`ACTIVE_BACKEND_NAME`] above.
+#[cfg(all(feature = "backend-alacritty", not(feature = "backend-ghostty-vt")))]
+pub const ACTIVE_BACKEND_NAME: &str = "alacritty";
+
 /// A ready-to-use terminal session on the active backend. This is the type
 /// callers (and the shared integration tests) should use.
 #[cfg(any(feature = "backend-alacritty", feature = "backend-ghostty-vt"))]

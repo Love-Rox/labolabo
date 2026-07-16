@@ -84,17 +84,45 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "::notice title=Resolved version::tag=$TAG -> version=$VERSION"
 
+  # macOS/Linux バンドルは既定で ghostty-vt バックエンド（配布物の本命 --
+  # rust/README.md「配布 vs 開発の既定バックエンド」参照）でビルドする。
+  # `scripts/bundle-macos.sh`/`package-linux.sh` 自身がこの既定を持つが、
+  # ツールチェイン（Zig 0.16 + Ghostty ソース）はスクリプトが用意しない
+  # （明確なセットアップエラーで停止するだけ）ので、`ci.yml`の
+  # `rust-term-ghostty` ジョブと**全く同じ**段取り（同じ fork ピン SHA・同じ
+  # Zig バージョン）をここで用意する。GHOSTTY_REF はそちらのジョブの
+  # コメントで管理する唯一のソース -- 更新する際は両方の workflow を
+  # 揃えること。
   bundle-macos:
     name: bundle (macos-15)
     needs: resolve-version
     runs-on: macos-15
+    env:
+      # ci.yml の rust-term-ghostty ジョブと同じピン SHA（vancluever/ghostty
+      # zig-0.16 ブランチ）。継続的な実証は ci.yml が担う
+      # （`continue-on-error: true`）が、この GHOSTTY_REF 自体は正式配布物の
+      # ビルドにも使う -- 更新時は ci.yml 側も揃える。
+      GHOSTTY_REF: 4c729855e1ad03689d94af3e0a173b81ca423eb8
+      GHOSTTY_SOURCE_DIR: ${{ github.workspace }}/ghostty-src
+      LIBGHOSTTY_VT_SYS_OPTIMIZE: ReleaseFast
     defaults:
       run:
         working-directory: rust
     steps:
       - uses: actions/checkout@v4
 
+      - name: Checkout vancluever/ghostty (pinned)
+        uses: actions/checkout@v4
+        with:
+          repository: vancluever/ghostty
+          ref: ${{ env.GHOSTTY_REF }}
+          path: ghostty-src
+
       - uses: dtolnay/rust-toolchain@stable
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -114,11 +142,23 @@ jobs:
     name: package (ubuntu-latest)
     needs: resolve-version
     runs-on: ubuntu-latest
+    env:
+      # bundle-macos ジョブと同じピン SHA/Zig バージョン -- コメントもそちら参照。
+      GHOSTTY_REF: 4c729855e1ad03689d94af3e0a173b81ca423eb8
+      GHOSTTY_SOURCE_DIR: ${{ github.workspace }}/ghostty-src
+      LIBGHOSTTY_VT_SYS_OPTIMIZE: ReleaseFast
     defaults:
       run:
         working-directory: rust
     steps:
       - uses: actions/checkout@v4
+
+      - name: Checkout vancluever/ghostty (pinned)
+        uses: actions/checkout@v4
+        with:
+          repository: vancluever/ghostty
+          ref: ${{ env.GHOSTTY_REF }}
+          path: ghostty-src
 
       # rust-app-bundle.yml の package-linux ジョブ / ci.yml の rust-app-linux
       # ジョブと同じリンク時依存（コメントもそちらを参照）。
@@ -130,6 +170,10 @@ jobs:
             libfreetype-dev
 
       - uses: dtolnay/rust-toolchain@stable
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -145,6 +189,12 @@ jobs:
           path: rust/target/package/*.tar.gz
           if-no-files-found: error
 
+  # Windows は alacritty のまま（第12波の判断） -- libghostty の Windows
+  # ビルドは未検証（rust/README.md「配布 vs 開発の既定バックエンド」参照）
+  # なので、`package-windows.ps1` に ghostty-vt 切替は入れていない。ここは
+  # 何も変えていない: `scripts/package-windows.ps1` はバックエンド選択の
+  # 概念自体を持たず、`cargo build`（labolabo-app の既定 feature =
+  # `backend-alacritty`）をそのまま呼ぶだけ。
   package-windows:
     name: package (windows-latest)
     needs: resolve-version

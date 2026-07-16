@@ -33,6 +33,7 @@ menu:
 
 about:
   version_line: "バージョン %{version}（ビルド %{build}）"
+  backend_line: "VT: %{backend}"
   tagline: "LaboLabo の Rust クロスプラットフォーム版"
 
 settings:
