@@ -1,5 +1,80 @@
 # Changelog
 
+## [0.8.0](https://github.com/Love-Rox/labolabo/compare/v0.7.0...v0.8.0) (2026-07-16)
+
+
+### 新機能
+
+* LABOLABO_RS_DATA_DIR でデータディレクトリを上書き可能にする ([f34bf7a](https://github.com/Love-Rox/labolabo/commit/f34bf7aed11f98da9c006541ea65f70355445879))
+* labolabo-app の Linux 対応（第7波 a: CI ジョブ・フォント解決・tar.gz パッケージング） ([c76dbce](https://github.com/Love-Rox/labolabo/commit/c76dbce4fdbd943571b0a1bb4ded92b279c784b4))
+* labolabo-core にセッション永続化（SQLite ストア）を移植（第4波 c） ([6a42c43](https://github.com/Love-Rox/labolabo/commit/6a42c439f7e71c1e74ac34d66141b209a8a66d4c))
+* labolabo-core にタイル/タブ木モデルを移植（保存形式バイト互換 + Swift テスト完全移植） ([6040259](https://github.com/Love-Rox/labolabo/commit/6040259d8855b719cb9d99f83f674787b69fc19b))
+* labolabo-core（Rust）に commit graph・worktree・agent 状態/使用量パーサを移植（第2波） ([8d709f6](https://github.com/Love-Rox/labolabo/commit/8d709f6a15e60a005af0e647df79c15013d3a230))
+* labolabo-core（Rust）に hooks バス + フォワーダを移植（第4波b） ([0dda544](https://github.com/Love-Rox/labolabo/commit/0dda544d4bc53204f2e1c8e0f640d84211a110e9))
+* labolabo-core（Rust）に porcelain v2 / unified diff パーサを移植し Swift 版との出力照合を追加 ([6d77dce](https://github.com/Love-Rox/labolabo/commit/6d77dced570fa9d99306eb657b638c7ebf7dfa16))
+* labolabo-core（Rust）にプロセス実行系 + git 実行を移植（第4波a） ([580a403](https://github.com/Love-Rox/labolabo/commit/580a403ad2ebaa5d7586bc710cd8a75316f88ce0))
+* **rust-app:** Git 表示をタイルペインとして開けるように ([9498181](https://github.com/Love-Rox/labolabo/commit/949818170981ef6969a577713991949b3a861d64))
+* **rust-app:** IME 入力対応とクリップボード貼り付け ([1bc359d](https://github.com/Love-Rox/labolabo/commit/1bc359dab3c9b69e8e32bbb820140ee19b53cd71))
+* **rust-app:** labolabo-app の Windows 対応（第7波 c） ([9f38706](https://github.com/Love-Rox/labolabo/commit/9f38706082c5b20c42c443876ce35a45bf52c845))
+* **rust-app:** Swift版インポートを起動時の確認ダイアログ方式に変更(第8波d) ([bbb9c62](https://github.com/Love-Rox/labolabo/commit/bbb9c62a872bb2730dca167bf7a4a1b1e0a65785))
+* **rust-app:** Swift版セッションをRust版Taskへ読み取り専用インポート ([fa69ea4](https://github.com/Love-Rox/labolabo/commit/fa69ea441323f7c6c846c4e8ce5ebc0c41530c5c))
+* **rust-app:** UI クロームを ja/en の 2 言語対応に（rust-i18n + OS ロケール自動選択） ([04854fd](https://github.com/Love-Rox/labolabo/commit/04854fd9962d1462303431b0cda426a4e5c5b2e2))
+* **rust-app:** UIクロームをモダン化(第8波a) ([984abe3](https://github.com/Love-Rox/labolabo/commit/984abe3478b845b5e6b82c18c548cb6beffd611f))
+* **rust-app:** アプリ内表記を LaboLabo に改名 ([20d4972](https://github.com/Love-Rox/labolabo/commit/20d4972d2cbe7375873297d5b071f7f7d38a9599))
+* **rust-app:** サイドバーのパーソナライズ(第10波) — タスクの名前変更・色設定、選択タスクのブランド強調、パス省略表示、端末タブの色付け ([7adad5f](https://github.com/Love-Rox/labolabo/commit/7adad5fc33cafd8586a743138ce9a13256477155))
+* **rust-app:** ペイン/タブ・サイドバー・OSファイルのドラッグ&ドロップを実装 ([2949390](https://github.com/Love-Rox/labolabo/commit/2949390c97034df8cfcef2aef07efc7cd53c3130))
+* **rust-app:** メニューバー・タスクのアーカイブ/削除・ウィンドウ位置記憶・IDE で開く ([c3f8b9c](https://github.com/Love-Rox/labolabo/commit/c3f8b9c9639128b5169b915de255931c0f7f65f1))
+* **rust-app:** 端末タブに OSC 0/2 のライブタイトルを反映（第11波） ([26b340e](https://github.com/Love-Rox/labolabo/commit/26b340e5a070894c214bed7848f0f4e57ebe8502))
+* **rust-app:** 見つからないワークツリーをサイドバーで検出・整理できるようにする ([aceefe5](https://github.com/Love-Rox/labolabo/commit/aceefe528cb690edcfac8e3057f53811a11e7451))
+* **rust-app:** 起動時アップデート確認とサイドバーバナーを追加 ([5e5569d](https://github.com/Love-Rox/labolabo/commit/5e5569db911d107ee4c34c073fcd80209e5bc917))
+* **rust-core:** appState に windowBounds キーの get/set を追加 ([e60d6c9](https://github.com/Love-Rox/labolabo/commit/e60d6c907c2a0988961947549f4b02698a0c743e))
+* **rust-core:** hooks/control の Windows Named Pipe トランスポートを実装 ([c3a074d](https://github.com/Love-Rox/labolabo/commit/c3a074d66c0a9ef474535bfd58f455b2cf191360))
+* **rust-core:** ToolLocator の Windows 実装と process タイムアウト kill の Windows 対応 ([f44907a](https://github.com/Love-Rox/labolabo/commit/f44907ab8178eb5b270d410a9f6fcf0c34181055))
+* **rust-core:** データディレクトリを LaboLabo へ統一し旧 LaboLabo-rs から自動移行 ([37cdc4e](https://github.com/Love-Rox/labolabo/commit/37cdc4e019fad7fcc61c0561cf44c0bbea7e37d1))
+* **rust:** Git ペイン（変更ファイル一覧・差分・ライブ更新）を実装 ([d23d0da](https://github.com/Love-Rox/labolabo/commit/d23d0da41502e1fe97b68a4385db4d12fc723c3d))
+* **rust:** labolabo-app に Ghostty の色設定（background/foreground/cursor-color/palette/theme）を反映 ([3b3389d](https://github.com/Love-Rox/labolabo/commit/3b3389d149f36974d92d34adf0b7c2408e6d4fb2))
+* **rust:** labolabo-app のタブモデルを labolabo-core::tiling のタイル木に置換（第5波b-2） ([42f4b8c](https://github.com/Love-Rox/labolabo/commit/42f4b8c846f2d81f7837216eea2beaef7af2413e))
+* **rust:** labolabo-app（gpui 端末シェル）を新設（第5波a） ([89480ec](https://github.com/Love-Rox/labolabo/commit/89480ecdd600cada3fe29f12e153153f44997a68))
+* **rust:** labolabo-term クレートを新設（PTY 端末セッションコア） ([3ea0c8c](https://github.com/Love-Rox/labolabo/commit/3ea0c8ce2c0c97bcb5b0c6ab8ba0416a8768d298))
+* **rust:** macOS .app バンドル化スクリプトと手動 CI ジョブを追加 ([a1ae389](https://github.com/Love-Rox/labolabo/commit/a1ae3891b739937b4d535b7bbf268876393c5391))
+* **rust:** RC リリース配管とバージョン単一ソース化 ([cc5a1b6](https://github.com/Love-Rox/labolabo/commit/cc5a1b6e3533c2390b28c843e8e0c2afd6c9c45e))
+* **rust:** UI デザイントークン導入とクローム整備 ([c7ca294](https://github.com/Love-Rox/labolabo/commit/c7ca2940131b6952769d39abe4ddff9c7914298e))
+* **rust:** エージェント使用量表示・セッション間競合バッジ・設定画面を追加 ([8a0e52c](https://github.com/Love-Rox/labolabo/commit/8a0e52c7b7be6f85c6bdb9460b15be8fef8b7a88))
+* **rust:** コントロール CLI と control-protocol の仕様/実装を追加 ([e2fcb87](https://github.com/Love-Rox/labolabo/commit/e2fcb8717e4f0c1346ae8cbcdba9b94848047643))
+* **rust:** タスクモデル実装 — サイドバー + 1 作業 = 1 タイル木 + SQLite 永続化 (plans/012 §1) ([6707ebd](https://github.com/Love-Rox/labolabo/commit/6707ebd88249349171c55049c754d92515fb548e))
+* Rust版 labolabo-app に Claude Code hooks 統合を実装 ([d7d2a62](https://github.com/Love-Rox/labolabo/commit/d7d2a62e01a53701ce8edeecd06579f0fd4aeb5d))
+* **rust:** 端末のスクロールバック表示・テキスト選択・Cmd+C コピーを実装 ([cd015b1](https://github.com/Love-Rox/labolabo/commit/cd015b1ea834d72860bf7380d42db0782189ee40))
+* **rust:** 端末のマウスレポーティング・仕切りドラッグリサイズ・単語/行選択を追加 ([88b601c](https://github.com/Love-Rox/labolabo/commit/88b601cd15cd1ca2a373a9f8335f9cde0e1c9fc3))
+
+
+### バグ修正
+
+* Linux ビルドで dead code になる macOS 専用 UI ヘルパーの clippy エラーを解消 ([d249e55](https://github.com/Love-Rox/labolabo/commit/d249e55d67af6ab7be5123844240f699630c9003))
+* Linux ビルドで未使用になる import を cfg でゲート（clippy -D warnings 対応） ([3494c9d](https://github.com/Love-Rox/labolabo/commit/3494c9dcb29b489184772fb0ac87c8bad4bcec77))
+* **rust-core:** swift_import のテストを実git依存分だけ #[cfg(unix)] に ([b60381a](https://github.com/Love-Rox/labolabo/commit/b60381a835111075a9d6b904e8a495e28636de1f))
+* **rust:** attached 作業のディレクトリはピッカーで選んだパスをそのまま使う ([ba57f01](https://github.com/Love-Rox/labolabo/commit/ba57f0165b80bf90ad162ea57bf06bca84825826))
+* **rust:** FileWatcher テストの Windows パス区切り依存を除去 ([0a89737](https://github.com/Love-Rox/labolabo/commit/0a8973795659a5a3397061d339da72e52530c816))
+* **rust:** labolabo-app の実機フィードバック2件を修正（exit 終了処理・Ghostty フォント設定） ([d8bf0de](https://github.com/Love-Rox/labolabo/commit/d8bf0debeb726b2d76c724a9bef7c98f51b8cadf))
+* **rust:** labolabo-hook が --hook フラグ形式の呼び出しを受け付けるようにする ([2543723](https://github.com/Love-Rox/labolabo/commit/25437235c4b0a1ea05843affe1b0397ab2ce3587))
+* **rust:** scrollback キャップの回帰テストを backend-ghostty-vt の実挙動に合わせる ([e0b89c8](https://github.com/Love-Rox/labolabo/commit/e0b89c858a296eb58e910e9b5bd3352c4316a1f0))
+* **rust:** 端末セルの寸法をデバイスピクセル四捨五入にする（字間が空く問題の修正） ([c3d10ee](https://github.com/Love-Rox/labolabo/commit/c3d10ee82e5cde8df094df4f3e016be895843c9d))
+* **rust:** 選択中の全角文字の右半分欠けと IME 下線の分断を修正 ([7ee677e](https://github.com/Love-Rox/labolabo/commit/7ee677e5341e5d2849949fe0606780ba009a6e1e))
+
+
+### リファクタリング
+
+* Darwin 依存を条件コンパイルで分離し Linux ビルドを可能にする ([15bec9a](https://github.com/Love-Rox/labolabo/commit/15bec9a6da0018d0cc798b45afdce2159006036e))
+* hooks のトランスポートと解釈を分離し、ワイヤプロトコル仕様書を追加 ([ed63f0f](https://github.com/Love-Rox/labolabo/commit/ed63f0f3094c1059aaf30423d05c88cacd1cd828))
+* エンジンの OS 依存面（プロセス実行・ツール解決・ファイル監視）を protocol 化 ([6124c04](https://github.com/Love-Rox/labolabo/commit/6124c04dd3bd9ff1f5c1e0812588bce9cdf3dabf))
+* タイル/タブ木モデルを UI 非依存ファイルへ分離（AppKit 依存を除去） ([d57f7d8](https://github.com/Love-Rox/labolabo/commit/d57f7d825c12ae91c6790556c4970ae57f320181))
+* 永続化を SessionPersisting protocol の背後へ隔離し、データディレクトリ解決を集約 ([b520580](https://github.com/Love-Rox/labolabo/commit/b52058043f0313fae4e95676861260215bb0480f))
+
+
+### ドキュメント
+
+* **rust:** README に Windows コア波（Named Pipe / ToolLocator / taskkill）の節を追記 ([7777845](https://github.com/Love-Rox/labolabo/commit/77778456aa0f4942b7b706e43ddae04c3a3eee46))
+* **rust:** README を LaboLabo 改名に追随 ([b10b4a3](https://github.com/Love-Rox/labolabo/commit/b10b4a3048d65bdc8454fe3192f2d90a7960433d))
+
 ## [0.7.0](https://github.com/Love-Rox/labolabo/compare/v0.6.2...v0.7.0) (2026-07-12)
 
 
