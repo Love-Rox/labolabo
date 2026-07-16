@@ -142,14 +142,19 @@ fn run_open(args: &[String]) -> Result<(), String> {
     }
 }
 
+// These two errors only ever reach `eprintln!` (`app.rs`'s
+// `open_task_in_editor`/`reveal_task_in_finder` background closures), never
+// a UI surface -- and the menu items that would trigger them aren't even
+// built on non-macOS. Developer-facing stderr text stays plain English per
+// this repo's i18n scope (wave 6f: "ログ/stderr の開発者向け警告は英語で可").
 #[cfg(not(target_os = "macos"))]
 pub fn open_in_editor(_bundle_id: &str, _directory: &Path) -> Result<(), String> {
-    Err("IDE で開く は macOS のみ対応です".to_string())
+    Err("opening in an IDE is only supported on macOS".to_string())
 }
 
 #[cfg(not(target_os = "macos"))]
 pub fn reveal_in_finder(_directory: &Path) -> Result<(), String> {
-    Err("Finder で表示 は macOS のみ対応です".to_string())
+    Err("revealing in Finder is only supported on macOS".to_string())
 }
 
 #[cfg(test)]

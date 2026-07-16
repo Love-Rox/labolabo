@@ -28,6 +28,9 @@
 //!    "Rust 版に意味があるもの". Takes effect at the next pane spawn, not
 //!    retroactively (a live VT core's history buffer isn't resizable) --
 //!    the settings panel's footer says so explicitly.
+//! 4. **言語 / Language** (`AppSettings::locale`, wave 6f) -- 自動 (OS
+//!    locale) / 日本語 / English, applied live (see `crate::i18n`'s module
+//!    doc comment) and persisted like everything else here.
 //!
 //! **Deliberately not here**: font/color settings -- the project's own
 //! policy (`CLAUDE.md` for this wave) is that Ghostty config remains the
@@ -37,7 +40,7 @@
 //!
 //! ## Persistence
 //!
-//! All three settings round-trip through `TaskDatabase`'s `appState` table
+//! All these settings round-trip through `TaskDatabase`'s `appState` table
 //! (`TaskDatabase::auto_resume_enabled`/`set_auto_resume_enabled`, etc. --
 //! see that module's doc comment) -- the same key/value store the selected-
 //! Task pointer already uses, per the wave brief's "保存は既存の appState
@@ -50,10 +53,12 @@ use gpui::{
     div, prelude::*, px, rgb, rgba, Animation, AnimationExt, AnyElement, Context, IntoElement,
     MouseButton, MouseDownEvent,
 };
+use rust_i18n::t;
 
 use labolabo_core::TaskDatabase;
 
 use crate::app::LaboLaboApp;
+use crate::i18n::LocaleSetting;
 use crate::motion;
 use crate::theme;
 
@@ -82,6 +87,9 @@ pub struct AppSettings {
     pub auto_resume_enabled: bool,
     pub git_pane_default_visible: bool,
     pub scrollback_lines: usize,
+    /// UI language (wave 6f, `crate::i18n`). Defaults to `Auto` (OS-
+    /// detected) -- see [`crate::i18n::LocaleSetting`]'s doc comment.
+    pub locale: LocaleSetting,
 }
 
 impl Default for AppSettings {
@@ -89,12 +97,15 @@ impl Default for AppSettings {
     /// resume was always on, the Git pane always defaulted to visible
     /// (`GitPaneState::default()`), and scrollback was always
     /// `DEFAULT_SCROLLBACK_LINES`. A brand-new database (every key absent)
-    /// therefore behaves identically to before this wave.
+    /// therefore behaves identically to before this wave. `locale` defaults
+    /// to `Auto`, matching this port's pre-i18n-wave behavior for a `ja*`
+    /// system (everything was hardcoded Japanese).
     fn default() -> Self {
         Self {
             auto_resume_enabled: true,
             git_pane_default_visible: true,
             scrollback_lines: DEFAULT_SCROLLBACK_LINES,
+            locale: LocaleSetting::Auto,
         }
     }
 }
@@ -124,6 +135,7 @@ impl AppSettings {
                 .ok()
                 .flatten()
                 .unwrap_or(defaults.scrollback_lines),
+            locale: crate::i18n::load_locale_setting(db),
         }
     }
 }
@@ -227,15 +239,15 @@ pub fn render_settings_overlay(
                     div()
                         .text_size(px(15.0))
                         .text_color(rgb(TEXT_PRIMARY))
-                        .child("設定"),
+                        .child(t!("settings.title").to_string()),
                 )
                 .child(close_button(cx)),
         )
         .child(
             toggle_row(
                 "auto-resume",
-                "Claude セッションの自動 resume",
-                "復元したタスクを開いたとき、前回のセッションを自動的に再開します。",
+                t!("settings.auto_resume.label").to_string(),
+                t!("settings.auto_resume.footer").to_string(),
                 settings.auto_resume_enabled,
             )
             .on_mouse_down(
@@ -248,18 +260,22 @@ pub fn render_settings_overlay(
         .child(
             toggle_row(
                 "git-pane-default-visible",
-                "Git ペインを既定で表示",
-                "新しく開くタスクの Git ペイン表示/非表示の既定値です（開いているタスクには影響しません）。",
+                t!("settings.git_pane_default_visible.label").to_string(),
+                t!("settings.git_pane_default_visible.footer").to_string(),
                 settings.git_pane_default_visible,
             )
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _: &MouseDownEvent, _window, cx| {
-                    this.set_git_pane_default_visible(!this.settings().git_pane_default_visible, cx);
+                    this.set_git_pane_default_visible(
+                        !this.settings().git_pane_default_visible,
+                        cx,
+                    );
                 }),
             ),
         )
-        .child(scrollback_row(settings.scrollback_lines, cx));
+        .child(scrollback_row(settings.scrollback_lines, cx))
+        .child(language_row(settings.locale, cx));
 
     // The "gather in" width nudge lives on the panel alone (no `.opacity()`
     // here) -- `opacity` composes multiplicatively with an ancestor's
@@ -329,11 +345,14 @@ fn close_button(cx: &mut Context<LaboLaboApp>) -> impl IntoElement {
 /// the glyph -- larger, easier-to-hit affordance for a "minimal" settings
 /// UI with no real checkbox widget available). `key` only needs to be
 /// unique among this panel's rows (used as the element id so gpui can track
-/// this row's identity across re-renders).
+/// this row's identity across re-renders). `label`/`footer` take owned
+/// `String`s (not `&'static str`) since wave 6f's callers build them from
+/// `t!()`, which is locale-dependent at call time, not a compile-time
+/// constant.
 fn toggle_row(
     key: &'static str,
-    label: &'static str,
-    footer: &'static str,
+    label: String,
+    footer: String,
     enabled: bool,
 ) -> gpui::Stateful<gpui::Div> {
     div()
@@ -380,7 +399,7 @@ fn scrollback_row(current: usize, cx: &mut Context<LaboLaboApp>) -> impl IntoEle
                 .items_center()
                 .justify_between()
                 .text_color(rgb(TEXT_PRIMARY))
-                .child(div().child("スクロールバック行数"))
+                .child(div().child(t!("settings.scrollback.label").to_string()))
                 .child(
                     div()
                         .flex()
@@ -396,8 +415,93 @@ fn scrollback_row(current: usize, cx: &mut Context<LaboLaboApp>) -> impl IntoEle
             div()
                 .text_size(px(theme::font_size::CAPTION))
                 .text_color(rgb(TEXT_SECONDARY))
-                .child("変更は次に開くタブから反映されます（既存のタブには影響しません）。"),
+                .child(t!("settings.scrollback.footer").to_string()),
         )
+}
+
+/// The language row: a three-way "自動 / 日本語 / English" picker (wave
+/// 6f). `current`'s own label doesn't need `t!()` at all (see
+/// [`LocaleSetting::resolve`]'s doc comment) -- but the *other two* pill
+/// labels do, since "自動"/"Automatic" is itself translated. Picking a
+/// pill calls [`LaboLaboApp::set_locale`] directly, which applies live (see
+/// `crate::i18n`'s module doc comment on why this doesn't need a "restart
+/// to apply" footer note).
+fn language_row(current: LocaleSetting, cx: &mut Context<LaboLaboApp>) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .p_2()
+        .rounded_sm()
+        .bg(rgb(BUTTON_BG))
+        .child(
+            div()
+                .text_color(rgb(TEXT_PRIMARY))
+                .child(t!("settings.language.label").to_string()),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .child(language_pill(
+                    "language-auto",
+                    t!("settings.language.auto").to_string(),
+                    current == LocaleSetting::Auto,
+                    cx.listener(|this, _: &MouseDownEvent, _window, cx| {
+                        this.set_locale(LocaleSetting::Auto, cx);
+                    }),
+                ))
+                .child(language_pill(
+                    "language-ja",
+                    t!("settings.language.name_ja").to_string(),
+                    current == LocaleSetting::Ja,
+                    cx.listener(|this, _: &MouseDownEvent, _window, cx| {
+                        this.set_locale(LocaleSetting::Ja, cx);
+                    }),
+                ))
+                .child(language_pill(
+                    "language-en",
+                    t!("settings.language.name_en").to_string(),
+                    current == LocaleSetting::En,
+                    cx.listener(|this, _: &MouseDownEvent, _window, cx| {
+                        this.set_locale(LocaleSetting::En, cx);
+                    }),
+                )),
+        )
+        .child(
+            div()
+                .text_size(px(theme::font_size::CAPTION))
+                .text_color(rgb(TEXT_SECONDARY))
+                .child(t!("settings.language.footer").to_string()),
+        )
+}
+
+fn language_pill(
+    id: &'static str,
+    label: String,
+    active: bool,
+    on_click: impl Fn(&MouseDownEvent, &mut gpui::Window, &mut gpui::App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .px_2()
+        .py_1()
+        .rounded_sm()
+        .text_size(px(theme::font_size::LABEL))
+        .when(active, |el| {
+            el.bg(rgb(theme::ACCENT))
+                .text_color(rgb(theme::text::ON_ACCENT))
+        })
+        .when(!active, |el| {
+            el.bg(rgb(theme::surface::ACTIVE))
+                .text_color(rgb(TEXT_PRIMARY))
+        })
+        .hover(|el| el.opacity(0.85))
+        .active(|el| el.opacity(0.7))
+        .on_mouse_down(MouseButton::Left, on_click)
+        .child(label)
 }
 
 fn stepper_button(
@@ -435,6 +539,7 @@ mod tests {
         assert!(defaults.auto_resume_enabled);
         assert!(defaults.git_pane_default_visible);
         assert_eq!(defaults.scrollback_lines, DEFAULT_SCROLLBACK_LINES);
+        assert_eq!(defaults.locale, LocaleSetting::Auto);
     }
 
     #[test]
@@ -449,6 +554,7 @@ mod tests {
         db.set_auto_resume_enabled(false).unwrap();
         db.set_git_pane_default_visible(false).unwrap();
         db.set_scrollback_lines(5000).unwrap();
+        db.set_locale("ja").unwrap();
 
         let loaded = AppSettings::load(&db);
         assert_eq!(
@@ -457,6 +563,7 @@ mod tests {
                 auto_resume_enabled: false,
                 git_pane_default_visible: false,
                 scrollback_lines: 5000,
+                locale: LocaleSetting::Ja,
             }
         );
     }

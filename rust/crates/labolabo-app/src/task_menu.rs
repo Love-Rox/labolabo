@@ -34,6 +34,7 @@ use gpui::{
     div, prelude::*, px, rgb, rgba, Animation, AnimationExt, AnyElement, App, Context, IntoElement,
     MouseButton, MouseDownEvent, Pixels, Point, SharedString, Size, Window,
 };
+use rust_i18n::t;
 
 use labolabo_core::{Task, TaskKind};
 
@@ -273,7 +274,7 @@ fn render_menu_popover(
                 .py_1()
                 .text_size(px(theme::font_size::CAPTION))
                 .text_color(rgb(theme::text::MUTED))
-                .child("IDE で開く"),
+                .child(t!("task.menu.ide_section_title").to_string()),
         );
         row_count += 1;
         for editor in app.installed_editors() {
@@ -292,7 +293,7 @@ fn render_menu_popover(
         let finder_task_id = task_id.clone();
         panel = panel.child(menu_row(
             "task-menu-finder".to_string(),
-            "Finder で表示".into(),
+            t!("task.menu.reveal_in_finder").to_string().into(),
             false,
             cx.listener(move |this, _: &MouseDownEvent, _window, cx| {
                 this.reveal_task_in_finder(&finder_task_id, cx);
@@ -309,7 +310,7 @@ fn render_menu_popover(
     let archive_task_id = task_id.clone();
     panel = panel.child(menu_row(
         "task-menu-archive".to_string(),
-        "アーカイブ".into(),
+        t!("task.menu.archive").to_string().into(),
         false,
         cx.listener(move |this, _: &MouseDownEvent, window, cx| {
             this.archive_task(&archive_task_id, window, cx);
@@ -318,7 +319,7 @@ fn render_menu_popover(
     row_count += 1;
     panel = panel.child(menu_row(
         "task-menu-delete".to_string(),
-        "削除…".into(),
+        t!("task.menu.delete").to_string().into(),
         true,
         cx.listener(move |this, _: &MouseDownEvent, _window, cx| {
             this.request_delete_task(cx);
@@ -366,9 +367,11 @@ fn render_confirm_modal(
     cx: &mut Context<LaboLaboApp>,
 ) -> AnyElement {
     let title: SharedString = if state.worktree.is_some() {
-        "worktree を削除しますか？".into()
+        t!("task.menu.confirm.title_worktree").to_string().into()
     } else {
-        format!("「{}」の登録を解除しますか？", state.title).into()
+        t!("task.menu.confirm.title_attached", title = state.title)
+            .to_string()
+            .into()
     };
 
     let mut panel = div()
@@ -395,7 +398,12 @@ fn render_confirm_modal(
         Some(info) => {
             panel = panel
                 .child(body_text(
-                    format!("「{}」の worktree を削除します:", state.title).into(),
+                    t!(
+                        "task.menu.confirm.worktree_delete_intro",
+                        title = state.title
+                    )
+                    .to_string()
+                    .into(),
                 ))
                 .child(
                     div()
@@ -404,11 +412,17 @@ fn render_confirm_modal(
                         .child(SharedString::from(info.path.clone())),
                 )
                 .child(body_text(
-                    "未コミットの変更がある場合は削除されません（force しません）。".into(),
+                    t!("task.menu.confirm.worktree_delete_warning")
+                        .to_string()
+                        .into(),
                 ));
             // 「ブランチも削除」チェックボックス（既定 off、実行中は不変）。
-            let checkbox_label: SharedString =
-                format!("ブランチ {} も削除（マージ済みのみ）", info.branch).into();
+            let checkbox_label: SharedString = t!(
+                "task.menu.confirm.delete_branch_checkbox",
+                branch = info.branch
+            )
+            .to_string()
+            .into();
             let mut checkbox = div()
                 .id("task-delete-branch-toggle")
                 .flex()
@@ -440,7 +454,9 @@ fn render_confirm_modal(
         }
         None => {
             panel = panel.child(body_text(
-                "登録を解除します。ディレクトリのファイルには触れません。".into(),
+                t!("task.menu.confirm.attached_delete_body")
+                    .to_string()
+                    .into(),
             ));
         }
     }
@@ -459,13 +475,17 @@ fn render_confirm_modal(
             div()
                 .text_size(px(theme::font_size::LABEL))
                 .text_color(rgb(theme::text::SECONDARY))
-                .child("削除しています…"),
+                .child(t!("task.menu.confirm.deleting").to_string()),
         );
     } else {
         let confirm_label: SharedString = if state.worktree.is_some() {
-            "削除する".into()
+            t!("task.menu.confirm.delete_button_worktree")
+                .to_string()
+                .into()
         } else {
-            "登録を解除".into()
+            t!("task.menu.confirm.delete_button_attached")
+                .to_string()
+                .into()
         };
         panel = panel.child(
             div()
@@ -475,7 +495,7 @@ fn render_confirm_modal(
                 .gap_2()
                 .child(dialog_button(
                     "task-delete-cancel",
-                    "キャンセル".into(),
+                    t!("task.menu.confirm.cancel").to_string().into(),
                     false,
                     cx.listener(|this, _: &MouseDownEvent, _window, cx| {
                         this.close_task_menu(cx);
@@ -512,7 +532,7 @@ fn render_notice_modal(message: &str, cx: &mut Context<LaboLaboApp>) -> AnyEleme
         .child(body_text(SharedString::from(message.to_string())))
         .child(div().flex().flex_row().justify_end().child(dialog_button(
             "task-notice-close",
-            "閉じる".into(),
+            t!("common.close").to_string().into(),
             false,
             cx.listener(|this, _: &MouseDownEvent, _window, cx| {
                 this.close_task_menu(cx);

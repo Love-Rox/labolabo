@@ -237,8 +237,9 @@ note above); gpui itself ships Zed on both daily.
 
 | Module | Responsibility |
 |---|---|
-| `main.rs` | Entry point: reads the Ghostty font config, registers the tile/tab keybindings (`cx.bind_keys`), installs the menu bar (`cx.set_menus`), and opens the one window at the persisted (or centered-default) bounds. |
-| `menus.rs` | The menu bar definition (wave 6c, `gpui::Menu`/`MenuItem` over the same actions the keybindings dispatch) and the About overlay (version + `build.rs`-injected build number). |
+| `main.rs` | Entry point: reads the Ghostty font config, resolves the UI language (`rust_i18n::i18n!` + `crate::i18n`), registers the tile/tab keybindings (`cx.bind_keys`), installs the menu bar (`cx.set_menus`), and opens the one window at the persisted (or centered-default) bounds. |
+| `i18n.rs` | UI-chrome i18n (wave 6f): `LocaleSetting` (自動/ja/en, persisted in `appState`), OS-locale detection (`sys-locale`), and the localized pane-title helper. The locale tables themselves live in `locales/{ja,en}.yml`, compiled in by `rust_i18n::i18n!` and looked up via `t!()`. See "UI language" below. |
+| `menus.rs` | The menu bar definition (wave 6c, `gpui::Menu`/`MenuItem` over the same actions the keybindings dispatch) and the About overlay (version + `build.rs`-injected build number). Takes the locale explicitly (see its module doc comment's "i18n (wave 6f)" section). |
 | `task_menu.rs` | The sidebar row "…" menu and delete-confirmation overlay (wave 6c): a pure, unit-tested phase state machine (`TaskMenuState`) + rendering. See "Task archive / delete" below. |
 | `task_lifecycle.rs` | Archive/delete logic (gpui-free): next-selection math (pure, unit-tested) and worktree removal — `git worktree remove` (never forced) + optional `git branch -d` — integration-tested against real temp repos. |
 | `ide_open.rs` | "IDE で開く" (macOS): the Swift app's editor-candidate list, Spotlight (`mdfind`) installed-detection, and `open -b`/`open -R` launching. Pure detection/filter helpers unit-tested. |
@@ -540,6 +541,28 @@ display (e.g. an unplugged external monitor), the window falls back to the
 centered default. **Fullscreen/maximized state is not restored in this
 first version** — the restore size is saved and the window always reopens
 as a normal window.
+
+### UI language (wave 6f)
+
+All UI-chrome text (menu bar, sidebar, settings overlay, Git pane/tiles,
+Task menu/dialogs, importer banner, About) is looked up through
+[rust-i18n](https://crates.io/crates/rust-i18n)'s `t!()` macro against
+compile-time-embedded ja/en tables (`locales/{ja,en}.yml` — ~100 keys,
+semantic dotted names like `menu.file.new_tab`). The language resolves at
+startup from the `locale` `appState` key (`crate::i18n::LocaleSetting`):
+`auto` (the default; picks `ja` when the OS locale starts with `ja`, via
+`sys-locale`, else `en`), or an explicit `ja`/`en` from the settings
+overlay's 言語/Language row. **Switching applies live** — every render
+function re-reads `t!()` each frame, and the one non-per-frame surface (the
+native menu bar) is rebuilt by `LaboLaboApp::set_locale` — no restart
+needed. Deliberately *not* localized: terminal content, Ghostty config, the
+`labolabo` control CLI's output (fixed to English by
+`docs/control-protocol.md`), stderr developer warnings, and *persisted*
+pane titles (a new pane's default title is stamped in the UI language at
+creation and then behaves as data, like a rename). Three source-level tests
+(`tests/i18n_parity.rs`) gate regressions: ja/en key-set parity, every
+`t!()` key existing in both tables, and no hardcoded Japanese string
+literal in production code.
 
 ### Ghostty configuration (font-family / font-size / colors)
 

@@ -22,6 +22,7 @@
 //! into an absolutely-positioned `div`.
 
 use gpui::{div, prelude::*, px, rgb, AnyElement, Context, SharedString};
+use rust_i18n::t;
 
 use labolabo_core::{CommitGraphRow, EdgeShape};
 
@@ -171,7 +172,7 @@ pub fn render_commits_pane(
 ) -> AnyElement {
     let _ = task_id; // no click-through affordance yet (rows aren't selectable this wave)
     if rows.is_empty() {
-        return git_pane::placeholder("No commits");
+        return git_pane::placeholder(t!("git.commits.empty").to_string());
     }
 
     let max_lane = rows

@@ -67,6 +67,7 @@ use labolabo_core::{
     TaskStatus, TileNode, TileOrientation,
 };
 use labolabo_term::{ColorScheme, Terminal};
+use rust_i18n::t;
 
 use crate::control::{self, ControlRuntime};
 use crate::focus;
@@ -74,6 +75,7 @@ use crate::ghostty_config::FontConfig;
 use crate::git_pane::{self, FileViewMode, GitSnapshot};
 use crate::grid;
 use crate::hooks::{self, HookRuntime};
+use crate::i18n::LocaleSetting;
 use crate::ide_open;
 use crate::ime;
 use crate::keys::keystroke_to_bytes;
@@ -592,7 +594,7 @@ impl LaboLaboApp {
             match swift_import::run(&self.db, &mut self.tasks, &existing_directories) {
                 Some(Ok(summary)) => swift_import::format_banner(&summary),
                 Some(Err(message)) => message,
-                None => "Swift 版のデータベースが見つかりませんでした。".to_string(),
+                None => t!("app.swift_import_db_not_found").to_string(),
             },
         );
         cx.notify();
@@ -848,7 +850,9 @@ impl LaboLaboApp {
                 self.shutdown_workspace(&task_id);
                 if let Err(err) = self.db.delete_task(&task_id) {
                     if let Some(menu) = &mut self.task_menu {
-                        menu.fail(format!("登録を解除できませんでした: {err}"));
+                        menu.fail(
+                            t!("task.delete.attached_unregister_failed", err = err).to_string(),
+                        );
                     }
                     cx.notify();
                     return;
@@ -862,6 +866,12 @@ impl LaboLaboApp {
                 let repo_root = PathBuf::from(info.repo_root);
                 let worktree_path = PathBuf::from(info.path);
                 let branch = info.branch;
+                // Snapshot the UI locale at click time -- the git work runs
+                // on a background thread, so the error strings it builds
+                // must not depend on the global locale changing
+                // mid-operation (see `remove_worktree_and_maybe_branch`'s
+                // doc comment).
+                let locale = rust_i18n::locale().to_string();
                 cx.spawn_in(window, async move |this, cx| {
                     let outcome = cx
                         .background_spawn(async move {
@@ -870,6 +880,7 @@ impl LaboLaboApp {
                                 &worktree_path,
                                 &branch,
                                 delete_branch,
+                                &locale,
                             )
                         })
                         .await;
@@ -908,7 +919,13 @@ impl LaboLaboApp {
                     // だけを後日談として表示する。
                     Some(warning) => {
                         if let Some(menu) = &mut self.task_menu {
-                            menu.show_notice(format!("worktree は削除しました。{warning}"));
+                            menu.show_notice(
+                                t!(
+                                    "task.delete.worktree_removed_branch_warning",
+                                    warning = warning
+                                )
+                                .to_string(),
+                            );
                         }
                     }
                     None => {
@@ -969,7 +986,10 @@ impl LaboLaboApp {
             .ensure_injected(Path::new(task.working_directory()));
 
         let model = PaneTilingModel::model_from(&task.layout).unwrap_or_else(|| {
-            let pane = PaneItem::new(PaneKind::Terminal, PaneKind::Terminal.default_title());
+            let pane = PaneItem::new(
+                PaneKind::Terminal,
+                crate::i18n::default_pane_title(PaneKind::Terminal),
+            );
             PaneTilingModel::new(TileNode::leaf(pane))
         });
         let pane_ids: Vec<PaneId> = model
@@ -1462,7 +1482,10 @@ impl LaboLaboApp {
     ) -> Option<String> {
         let pane = match &title {
             Some(title) => PaneItem::new(PaneKind::Terminal, title.clone()),
-            None => PaneItem::new(PaneKind::Terminal, PaneKind::Terminal.default_title()),
+            None => PaneItem::new(
+                PaneKind::Terminal,
+                crate::i18n::default_pane_title(PaneKind::Terminal),
+            ),
         };
         let new_id = pane.id;
         let added = self
@@ -1504,7 +1527,10 @@ impl LaboLaboApp {
         if workspace.model.root.find_leaf(focused).is_none() {
             return;
         }
-        let pane = PaneItem::new(PaneKind::Terminal, PaneKind::Terminal.default_title());
+        let pane = PaneItem::new(
+            PaneKind::Terminal,
+            crate::i18n::default_pane_title(PaneKind::Terminal),
+        );
         let new_id = pane.id;
         if let Some(workspace) = self.workspaces.get_mut(task_id) {
             workspace.model.split(focused, orientation, pane);
@@ -1657,7 +1683,7 @@ impl LaboLaboApp {
             files: false,
             directories: true,
             multiple: false,
-            prompt: Some("Attach as a new task".into()),
+            prompt: Some(t!("task.new.prompt.attach_folder").to_string().into()),
         };
         let rx = cx.prompt_for_paths(options);
         cx.spawn(async move |this, cx| {
@@ -1716,9 +1742,12 @@ impl LaboLaboApp {
             files: false,
             directories: true,
             multiple: false,
-            prompt: Some("Choose a repository for the new worktree task".into()),
+            prompt: Some(t!("task.new.prompt.worktree_repo").to_string().into()),
         };
         let rx = cx.prompt_for_paths(options);
+        // Locale snapshot for the background git work's user-facing error
+        // strings -- same rationale as `execute_delete_task`.
+        let locale = rust_i18n::locale().to_string();
         cx.spawn(async move |this, cx| {
             let Ok(Ok(Some(mut paths))) = rx.await else {
                 return;
@@ -1727,7 +1756,9 @@ impl LaboLaboApp {
                 return;
             };
             let outcome = cx
-                .background_spawn(async move { new_task::create_worktree_task(&repo_path) })
+                .background_spawn(
+                    async move { new_task::create_worktree_task(&repo_path, &locale) },
+                )
                 .await;
             match outcome {
                 Ok(prepared) => {
@@ -3239,6 +3270,26 @@ impl LaboLaboApp {
         cx.notify();
     }
 
+    /// Sets the UI language (wave 6f, `crate::i18n`, `settings.rs`'s
+    /// language row) and applies it **live** -- see `crate::i18n`'s module
+    /// doc comment for why that's straightforward here (every render
+    /// function already reads `t!()` fresh each frame; the one piece of UI
+    /// that *isn't* rebuilt on every frame, the native menu bar, is rebuilt
+    /// explicitly below). Persists immediately, same "no separate Save
+    /// step" idiom as every other setting in this module.
+    pub(crate) fn set_locale(&mut self, locale: LocaleSetting, cx: &mut Context<Self>) {
+        if self.settings.locale == locale {
+            return;
+        }
+        self.settings.locale = locale;
+        if let Err(err) = self.db.set_locale(locale.as_db_str()) {
+            eprintln!("labolabo-app: failed to persist locale: {err}");
+        }
+        rust_i18n::set_locale(locale.resolve());
+        cx.set_menus(menus::app_menus(&rust_i18n::locale()));
+        cx.notify();
+    }
+
     /// Steps `self.settings.scrollback_lines` by `delta` (the settings
     /// panel's -/+ buttons pass `±settings::SCROLLBACK_STEP`), clamped by
     /// `settings::adjust_scrollback_lines`, and persists the result. Takes
@@ -3328,7 +3379,7 @@ impl LaboLaboApp {
             workspace.model.select_tab(existing_id);
             workspace.focused_pane = existing_id;
         } else {
-            let pane = PaneItem::new(kind, kind.default_title());
+            let pane = PaneItem::new(kind, crate::i18n::default_pane_title(kind));
             let new_id = pane.id;
             workspace.model.add_pane(pane);
             workspace.focused_pane = new_id;
@@ -3555,7 +3606,10 @@ impl EntityInputHandler for LaboLaboApp {
 /// A single fresh terminal pane's `TileLayout` -- the initial layout for
 /// every newly created Task (both kinds).
 fn single_terminal_layout() -> labolabo_core::TileLayout {
-    let pane = PaneItem::new(PaneKind::Terminal, PaneKind::Terminal.default_title());
+    let pane = PaneItem::new(
+        PaneKind::Terminal,
+        crate::i18n::default_pane_title(PaneKind::Terminal),
+    );
     PaneTilingModel::new(TileNode::leaf(pane)).snapshot()
 }
 
@@ -3607,12 +3661,10 @@ impl Render for LaboLaboApp {
                     cx,
                 )
             } else {
-                empty_state("タスクを読み込み中…")
+                empty_state(t!("app.loading_task").to_string())
             }
         } else {
-            empty_state(
-                "タスクが選択されていません。左上の + アイコンからフォルダまたは worktree で開始してください。",
-            )
+            empty_state(t!("app.no_task_selected").to_string())
         };
 
         // The selected Task's Git pane -- a fixed pane to the right of the
@@ -3700,14 +3752,16 @@ fn mouse_mods(modifiers: Modifiers) -> MouseMods {
     }
 }
 
-fn empty_state(message: &'static str) -> gpui::AnyElement {
+/// `message` takes `impl Into<String>` (not `&'static str`) since wave 6f's
+/// callers build it from `t!()`, which is locale-dependent at call time.
+fn empty_state(message: impl Into<String>) -> gpui::AnyElement {
     div()
         .flex_1()
         .flex()
         .items_center()
         .justify_center()
         .text_color(rgb(theme::text::SECONDARY))
-        .child(message)
+        .child(message.into())
         .into_any_element()
 }
 

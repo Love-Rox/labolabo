@@ -1,0 +1,144 @@
+_version: 1
+
+menu:
+  app:
+    about: "About %{app}"
+    settings: "Settings…"
+    quit: "Quit %{app}"
+  file:
+    title: "File"
+    new_attached_task: "New Task (Attach Folder)…"
+    new_worktree_task: "New Task (Create Worktree)…"
+    import_from_swift: "Import from Swift App…"
+    open_selected_in_ide: "Open Selected Task in IDE"
+    new_tab: "New Tab"
+    close_tab: "Close Tab"
+  edit:
+    title: "Edit"
+    copy: "Copy"
+    paste: "Paste"
+  view:
+    title: "View"
+    toggle_git_pane: "Toggle Git Pane"
+    open_git_files_pane: "Open Changed Files as Tile"
+    open_git_diff_pane: "Open Diff as Tile"
+    open_git_commits_pane: "Open Commit History as Tile"
+    split_right: "Split Right"
+    split_down: "Split Down"
+    focus_next_pane: "Next Pane"
+    focus_prev_pane: "Previous Pane"
+  window:
+    title: "Window"
+    minimize: "Minimize"
+    zoom: "Zoom"
+
+about:
+  version_line: "Version %{version} (Build %{build})"
+  tagline: "LaboLabo's Rust cross-platform edition"
+
+settings:
+  title: "Settings"
+  auto_resume:
+    label: "Auto-resume Claude sessions"
+    footer: "Automatically resumes the previous session when you reopen a restored task."
+  git_pane_default_visible:
+    label: "Show Git pane by default"
+    footer: "Default visibility of the Git pane for newly opened tasks (doesn't affect tasks already open)."
+  scrollback:
+    label: "Scrollback lines"
+    footer: "Changes apply to tabs opened after this point (existing tabs are unaffected)."
+  language:
+    label: "Language"
+    footer: "Changes take effect immediately."
+    auto: "Automatic"
+    name_ja: "日本語"
+    name_en: "English"
+
+sidebar:
+  new_attached_task_tooltip: "Open an existing folder…"
+  new_worktree_task_tooltip: "New session (create worktree)…"
+  task_menu_button_tooltip: "Archive / Delete…"
+  archived_section_title: "Archived (%{count})"
+  restore: "Restore"
+  conflict_tooltip: "%{count} conflicting file(s): %{paths}"
+
+task:
+  menu:
+    ide_section_title: "Open in IDE"
+    reveal_in_finder: "Reveal in Finder"
+    archive: "Archive"
+    delete: "Delete…"
+    confirm:
+      title_worktree: "Delete this worktree?"
+      title_attached: "Remove “%{title}” from the list?"
+      worktree_delete_intro: "This deletes the worktree for “%{title}”:"
+      worktree_delete_warning: "Won't delete if there are uncommitted changes (never forced)."
+      delete_branch_checkbox: "Also delete branch %{branch} (only if merged)"
+      attached_delete_body: "Removes it from the list. Files in the directory are left untouched."
+      deleting: "Deleting…"
+      delete_button_worktree: "Delete"
+      delete_button_attached: "Remove"
+      cancel: "Cancel"
+  delete:
+    branch_delete_failed: "Couldn't delete branch %{branch} (it may not be fully merged yet): %{err}"
+    worktree_dirty: "Can't delete: there are uncommitted changes. Commit them or check the worktree first."
+    worktree_failed: "Couldn't delete the worktree: %{err}"
+    attached_unregister_failed: "Couldn't remove it from the list: %{err}"
+    worktree_removed_branch_warning: "The worktree was deleted. %{warning}"
+  new:
+    error:
+      not_a_repo: "Not a git repository (%{err})"
+      worktree_add_failed: "git worktree add failed (%{err})"
+    prompt:
+      attach_folder: "Choose a folder to attach as a new task"
+      worktree_repo: "Choose a repository for the new worktree task"
+
+git:
+  status:
+    staged: "Staged"
+    unstaged: "Unstaged"
+    untracked: "Untracked"
+  branch:
+    loading: "Loading…"
+  pane:
+    promote_tooltip: "Open as tile"
+  file_list:
+    empty: "No changes"
+    select_file_prompt: "Select a file"
+  detail:
+    no_diff: "No diff"
+    binary_file: "Binary file"
+    unavailable: "Unavailable"
+    empty_file: "(empty file)"
+    mode_diff: "Diff"
+    mode_whole: "Whole"
+  tile_button:
+    files_tooltip: "Git: Open changed files"
+    diff_tooltip: "Git: Open diff"
+    commits_tooltip: "Git: Open commit history"
+  commits:
+    empty: "No commits"
+
+pane:
+  default_title:
+    terminal: "Terminal"
+    files: "Changed Files"
+    diff: "Diff"
+    commits: "History"
+
+swift_import:
+  error:
+    sort_order: "Import from the Swift app failed (couldn't read sort order: %{err})"
+    generic: "Import from the Swift app failed: %{err}"
+  banner:
+    imported: "Imported %{count} task(s) from the Swift app"
+    skipped: " (%{count} skipped as duplicates)"
+    warnings: " / %{count} warning(s) (see log for details)"
+
+app:
+  loading_task: "Loading task…"
+  no_task_selected: "No task selected. Use the + icons in the top-left to start with a folder or worktree."
+  swift_import_db_not_found: "Couldn't find the Swift app's database."
+
+common:
+  close: "Close"
