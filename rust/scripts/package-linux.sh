@@ -15,7 +15,17 @@
 #   version: optional -- see bundle-macos.sh's usage comment for the exact
 #            resolution order and how it also stamps the compiled binary's
 #            own About-panel version (LABOLABO_RS_VERSION).
-# Output: rust/target/package/LaboLabo-rs-linux-<version>-<arch>.tar.gz
+# Output: rust/target/package/LaboLabo-linux-<version>-<arch>.tar.gz
+#
+# 1.1.0 rename ("LaboLabo-rs" -> "LaboLabo", Swift 版引退に伴う正式名化):
+# the *user-visible* names change -- the tarball/staging name and the
+# .desktop launcher's `Name=` -- but the *on-disk installation* names
+# (labolabo-rs.desktop / labolabo-rs.png / ~/.local/share/labolabo-rs)
+# deliberately do NOT: keeping them means a user upgrading over a pre-rename
+# install overwrites the same .desktop/icon/install-dir in place (one
+# launcher entry, now titled "LaboLabo") instead of accumulating a stale
+# "LaboLabo-rs" duplicate next to a new "LaboLabo" one. Same reasoning as
+# keeping the three executable names (bundle-macos.sh's rename comment).
 set -euo pipefail
 
 if [ "$(uname -s)" != "Linux" ]; then
@@ -45,7 +55,7 @@ export LABOLABO_RS_VERSION="$VERSION"
 ARCH="$(uname -m)"
 
 PACKAGE_DIR="$RUST_DIR/target/package"
-STAGE_NAME="LaboLabo-rs-linux-$VERSION-$ARCH"
+STAGE_NAME="LaboLabo-linux-$VERSION-$ARCH"
 STAGE_DIR="$PACKAGE_DIR/$STAGE_NAME"
 
 echo "==> cargo build --release (labolabo-app, labolabo, labolabo-hook), version $VERSION"
@@ -105,7 +115,7 @@ cp "$ICON_SRC" "$STAGE_DIR/labolabo-rs.png"
 cat > "$STAGE_DIR/labolabo-rs.desktop.in" <<'DESKTOP'
 [Desktop Entry]
 Type=Application
-Name=LaboLabo-rs
+Name=LaboLabo
 Comment=Terminal + live Git status side by side, for running AI coding agents in parallel worktrees
 Exec=@EXEC@
 Icon=@ICON@
@@ -115,11 +125,14 @@ DESKTOP
 
 cat > "$STAGE_DIR/install.sh" <<'INSTALL'
 #!/usr/bin/env bash
-# Installs LaboLabo-rs for the current user only (no root needed): copies
+# Installs LaboLabo for the current user only (no root needed): copies
 # bin/ into ~/.local/share/labolabo-rs, symlinks labolabo-app/labolabo into
 # ~/.local/bin (drop that on your PATH if it isn't already), installs the
 # icon under the freedesktop.org hicolor icon theme, and writes a finished
-# .desktop launcher into ~/.local/share/applications.
+# .desktop launcher into ~/.local/share/applications. (The on-disk
+# labolabo-rs paths are kept from the pre-1.1.0 "LaboLabo-rs" releases on
+# purpose, so upgrading over an old install replaces it in place -- see the
+# packaging script's rename comment in the source repo.)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -143,7 +156,7 @@ command -v update-desktop-database >/dev/null 2>&1 &&
 
 echo "Installed to $INSTALL_DIR"
 echo "  - Run directly:        $BIN_DIR/labolabo-app"
-echo "  - Or from the app menu: LaboLabo-rs (log out/in first if it doesn't show up yet)"
+echo "  - Or from the app menu: LaboLabo (log out/in first if it doesn't show up yet)"
 echo "Make sure $BIN_DIR is on your PATH to use 'labolabo-app'/'labolabo' by name."
 INSTALL
 chmod +x "$STAGE_DIR/install.sh"
@@ -151,7 +164,7 @@ chmod +x "$STAGE_DIR/install.sh"
 # --- README (tarball-local; see crates/labolabo-app/README.md's "Linux"
 # section for the full picture -- build deps, known limitations) ----------
 cat > "$STAGE_DIR/README.md" <<README
-# LaboLabo-rs $VERSION ($ARCH) -- Linux package
+# LaboLabo $VERSION ($ARCH) -- Linux package
 
 ## Install (no root needed)
 

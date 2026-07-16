@@ -1,11 +1,22 @@
 #!/usr/bin/env bash
 # Builds the Rust port (labolabo-app / labolabo / labolabo-hook) and packages
-# them into a macOS "LaboLabo-rs.app" bundle, ad-hoc signed and zipped for
+# them into a macOS "LaboLabo.app" bundle, ad-hoc signed and zipped for
 # distribution -- the Rust-side counterpart of the Swift app's
 # `.github/workflows/release-build.yml` "Ad-hoc sign, zip" step (same
 # `codesign -s -` + `ditto -c -k --keepParent` recipe; no Developer ID /
 # notarization, by explicit decision -- see rust/README.md's bundling
 # section).
+#
+# 1.1.0 rename: the bundle is named "LaboLabo" (`LaboLabo.app`, bundle ID
+# `com.love-rox.labolabo`) -- the Swift app is retired, so the Rust port
+# takes over both the display name and the Swift app's own bundle
+# identifier (deliberate: no collision is possible once the Swift app is
+# gone, and inheriting the ID keeps macOS treating it as "the" LaboLabo).
+# The three *executable* names inside Contents/MacOS/ (labolabo-app /
+# labolabo / labolabo-hook) are intentionally NOT renamed -- hooks
+# resolution finds labolabo-hook as the sibling of the running executable
+# (see the layout comment below), and nothing user-facing shows those
+# names.
 #
 # Usage: rust/scripts/bundle-macos.sh [version]
 #   version: optional, e.g. "1.0.0-rc.2" -- overrides both this bundle's
@@ -15,7 +26,7 @@
 #            rust/VERSION's contents (this script's "current value" -- see
 #            rust-release.yml's module comment for why CI always passes
 #            this explicitly).
-# Output: rust/target/bundle/LaboLabo-rs.app and .../LaboLabo-rs-<version>.zip
+# Output: rust/target/bundle/LaboLabo.app and .../LaboLabo-<version>.zip
 set -euo pipefail
 
 # Resolve paths relative to this script, not the caller's cwd, so it works
@@ -28,9 +39,9 @@ RUST_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$RUST_DIR/.." && pwd)"
 
 BUNDLE_DIR="$RUST_DIR/target/bundle"
-APP_NAME="LaboLabo-rs"
+APP_NAME="LaboLabo"
 APP_BUNDLE="$BUNDLE_DIR/$APP_NAME.app"
-BUNDLE_ID="com.love-rox.labolabo-rs"
+BUNDLE_ID="com.love-rox.labolabo"
 
 # --- Version -----------------------------------------------------------
 #

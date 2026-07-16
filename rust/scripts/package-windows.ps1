@@ -15,7 +15,15 @@
 #   -Version: optional -- see bundle-macos.sh's usage comment for the exact
 #             resolution order and how it also stamps the compiled binary's
 #             own About-panel version (LABOLABO_RS_VERSION env var).
-# Output: rust/target/package/LaboLabo-rs-windows-<version>-<arch>.zip
+# Output: rust/target/package/LaboLabo-windows-<version>-<arch>.zip
+#
+# 1.1.0 rename ("LaboLabo-rs" -> "LaboLabo", Swift 版引退に伴う正式名化):
+# the zip/staging name and the user-visible icon filename inside the zip
+# (labolabo.ico -- users point a shortcut at it, so it should carry the
+# official name) change; the *committed* icon resource keeps its
+# labolabo-rs.ico path (renaming a committed binary asset buys nothing --
+# see the "Icon" section below), and the three executable names are
+# intentionally NOT renamed (bundle-macos.sh's rename comment).
 #
 # Requires Windows (produces/copies real .exe binaries) -- run on
 # `windows-latest` CI (`rust-app-bundle.yml`'s `package-windows` job, or
@@ -70,7 +78,7 @@ $env:LABOLABO_RS_VERSION = $Version
 $Arch = "x86_64"
 
 $PackageDir = Join-Path $RustDir "target\package"
-$StageName = "LaboLabo-rs-windows-$Version-$Arch"
+$StageName = "LaboLabo-windows-$Version-$Arch"
 $StageDir = Join-Path $PackageDir $StageName
 
 Write-Host "==> cargo build --release (labolabo-app, labolabo, labolabo-hook), version $Version"
@@ -144,12 +152,15 @@ if (-not (Test-Path $IconSrc -PathType Leaf)) {
     Write-Error "Windows icon source not found: $IconSrc"
     exit 1
 }
-Copy-Item $IconSrc (Join-Path $StageDir "labolabo-rs.ico") -Force
+# Staged as labolabo.ico (the official 1.1.0 name -- this filename is
+# user-visible, see the rename comment at the top); the committed source
+# asset keeps its pre-rename labolabo-rs.ico path.
+Copy-Item $IconSrc (Join-Path $StageDir "labolabo.ico") -Force
 
 # --- README (zip-local; see crates/labolabo-app/README.md's "Windows"
 # section for the full picture -- known limitations, shell resolution) -----
 $ReadmeContent = @"
-# LaboLabo-rs $Version ($Arch) -- Windows package
+# LaboLabo $Version ($Arch) -- Windows package
 
 ## Run
 
@@ -167,7 +178,7 @@ an installer:
 1. Right-click ``bin\labolabo-app.exe`` -> **Create shortcut**.
 2. Move the shortcut to your Desktop / Start Menu / taskbar as you like.
 3. Right-click the shortcut -> **Properties** -> **Change Icon...** -> pick
-   ``labolabo-rs.ico`` (next to this README) to use the real app icon
+   ``labolabo.ico`` (next to this README) to use the real app icon
    (the ``.exe`` itself carries no embedded icon in this package -- see
    ``crates/labolabo-app/README.md``'s "Windows" section in the source repo
    for why).
@@ -180,7 +191,7 @@ an installer:
 - ``bin\labolabo-hook.exe`` -- the Claude Code hooks forwarder; must stay
   next to ``labolabo-app.exe`` (hooks integration finds it as its sibling
   binary).
-- ``labolabo-rs.ico`` -- app icon, for a shortcut (see above).
+- ``labolabo.ico`` -- app icon, for a shortcut (see above).
 
 ## Known limitations
 

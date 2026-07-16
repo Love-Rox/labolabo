@@ -106,7 +106,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: LaboLabo-rs-macos
+          name: LaboLabo-macos
           path: rust/target/bundle/*.zip
           if-no-files-found: error
 
@@ -141,7 +141,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: LaboLabo-rs-linux
+          name: LaboLabo-linux
           path: rust/target/package/*.tar.gz
           if-no-files-found: error
 
@@ -168,7 +168,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: LaboLabo-rs-windows
+          name: LaboLabo-windows
           path: rust/target/package/*.zip
           if-no-files-found: error
 
@@ -219,11 +219,11 @@ jobs:
             *-*) prerelease_flag=(--prerelease) ;;
           esac
           gh release create "$TAG" \
-            artifacts/LaboLabo-rs-macos/*.zip \
-            artifacts/LaboLabo-rs-linux/*.tar.gz \
-            artifacts/LaboLabo-rs-windows/*.zip \
+            artifacts/LaboLabo-macos/*.zip \
+            artifacts/LaboLabo-linux/*.tar.gz \
+            artifacts/LaboLabo-windows/*.zip \
             "${prerelease_flag[@]}" \
             --draft \
-            --title "LaboLabo-rs $VERSION" \
+            --title "LaboLabo $VERSION" \
             --notes-file /tmp/release-notes.md
           echo "::notice title=Draft release created::tag=$TAG prerelease=${prerelease_flag[*]:-no} -- 内容を GitHub の Releases 画面で確認してから Publish してください（このワークフローはタグを打ちません）。"
