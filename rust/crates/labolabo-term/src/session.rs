@@ -137,10 +137,15 @@ pub struct TermSession<B: VtBackend> {
 impl<B: VtBackend> TermSession<B> {
     /// Spawn a PTY sized `cols` x `rows` and start the read/parse machinery.
     ///
-    /// - `command`: `Some(cmd)` execs `/bin/sh -c <cmd>` directly as the
-    ///   child (the equivalent of `ghostty -e` -- no login shell, no typed
-    ///   input); `None` launches the platform default shell
-    ///   (`CommandBuilder::new_default_prog`, i.e. `$SHELL`).
+    /// - `command`: `Some(cmd)` execs a one-shot shell invocation of `cmd`
+    ///   directly as the child (the equivalent of `ghostty -e` -- no login
+    ///   shell, no typed input) -- `/bin/sh -c <cmd>` on unix,
+    ///   `%ComSpec% /C <cmd>` (`cmd.exe`, no PowerShell preference) on
+    ///   Windows; `None` launches an interactive default shell -- unix keeps
+    ///   `CommandBuilder::new_default_prog` (i.e. `$SHELL`) unchanged, while
+    ///   Windows prefers `pwsh.exe` -> `powershell.exe` -> `%ComSpec%`
+    ///   (`cmd.exe`) in that order (this module's private `windows::
+    ///   default_prog` -- see its doc comment for the rationale).
     /// - `env`: extra environment variables injected into the child *on top
     ///   of* `TERM=xterm-256color`. First-class because LaboLabo's hooks
     ///   protocol identifies a pane/task by env (`LABOLABO_PANE`,
@@ -233,11 +238,23 @@ impl<B: VtBackend> TermSession<B> {
     ) -> anyhow::Result<Self> {
         let mut cmd = match command {
             Some(c) => {
+                #[cfg(windows)]
+                let mut cmd = CommandBuilder::new(windows::comspec());
+                #[cfg(not(windows))]
                 let mut cmd = CommandBuilder::new("/bin/sh");
+                #[cfg(windows)]
+                cmd.arg("/C");
+                #[cfg(not(windows))]
                 cmd.arg("-c");
                 cmd.arg(c);
                 cmd
             }
+            #[cfg(windows)]
+            None => match windows::default_prog() {
+                Some(shell) => CommandBuilder::new(shell),
+                None => CommandBuilder::new_default_prog(),
+            },
+            #[cfg(not(windows))]
             None => CommandBuilder::new_default_prog(),
         };
         cmd.env("TERM", "xterm-256color");
@@ -658,4 +675,134 @@ fn run_worker<B: VtBackend>(
 
     // Reap the child so it doesn't linger as a zombie.
     let _ = child.wait();
+}
+
+/// Windows-only shell resolution (Rust port's Windows app wave -- see
+/// `rust/crates/labolabo-app/README.md`'s "Windows" section for the product-
+/// level writeup of this decision). Kept self-contained (no dependency on
+/// `labolabo_core::ToolLocator`, even though its Windows `PATHEXT`-aware
+/// `PATH` scan solves a near-identical problem) so this crate stays usable
+/// on its own, per its README's stated design goal -- pulling in
+/// `labolabo-core` (GRDB-compatible SQLite persistence, the tiling model,
+/// hooks/control protocols, ...) just for a ~15-line `PATH` scan would be a
+/// much heavier coupling than the problem calls for.
+#[cfg(windows)]
+mod windows {
+    use std::env;
+    use std::ffi::{OsStr, OsString};
+    use std::path::Path;
+
+    /// `%ComSpec%`, falling back to the bare `cmd.exe` (resolved via `PATH`
+    /// by `portable-pty`'s own `CommandBuilder::search_path`, same fallback
+    /// `portable-pty` itself uses for `new_default_prog`'s Windows arm) when
+    /// unset -- every real Windows install sets `ComSpec`, so the fallback is
+    /// defense in depth, not an expected path.
+    pub(super) fn comspec() -> OsString {
+        env::var_os("ComSpec").unwrap_or_else(|| OsString::from("cmd.exe"))
+    }
+
+    /// The interactive default shell for a Windows terminal pane (the `None`
+    /// -- no explicit command -- case): prefers PowerShell over the bare
+    /// `%ComSpec%` (`cmd.exe`) `portable-pty`'s own `CommandBuilder::
+    /// new_default_prog` would otherwise always pick (it never looks at
+    /// PowerShell at all -- see `session.rs`'s call site), since PowerShell
+    /// is the nicer modern default most Windows developers actually expect
+    /// from a new terminal tab (mirroring what Windows Terminal itself
+    /// defaults to when no profile is configured). Search order, first
+    /// match on `PATH` wins:
+    ///
+    /// 1. `pwsh.exe` -- PowerShell 7+ (the actively developed, cross-platform
+    ///    line), not installed by default but common on developer machines
+    ///    and preinstalled on GitHub's `windows-latest` Actions runner.
+    /// 2. `powershell.exe` -- Windows PowerShell 5.1, present on every stock
+    ///    Windows install since Windows 7 -- the safe universal fallback.
+    /// 3. `None` -- caller falls back to `CommandBuilder::new_default_prog`
+    ///    (`%ComSpec%`, i.e. `cmd.exe`) -- reached only on a stripped-down
+    ///    environment with neither PowerShell binary on `PATH`.
+    ///
+    /// Deliberately no unix-style login-shell flag (`-l` has no PowerShell/
+    /// cmd.exe equivalent, and Windows has no analogous "login shell profile
+    /// wasn't sourced yet" problem `-l` solves on unix -- a plain
+    /// interactive launch already reads `$PROFILE`/registry `AutoRun`
+    /// itself).
+    pub(super) fn default_prog() -> Option<OsString> {
+        resolve_shell_in(env::var_os("PATH").as_deref(), path_has_file)
+    }
+
+    /// Pure resolution core, parameterized on the `PATH` value and an
+    /// existence predicate -- see the crate's other Windows-adjacent
+    /// modules (e.g. `labolabo_core::tool_locator`) for the same "pure
+    /// core + thin OS-reading wrapper" split, which is what keeps this
+    /// testable without mutating the real process-global `PATH` env var
+    /// (risky under `cargo test`'s multi-threaded default test runner).
+    fn resolve_shell_in(
+        path_env: Option<&OsStr>,
+        exists: impl Fn(&Path) -> bool,
+    ) -> Option<OsString> {
+        let path_env = path_env?;
+        for name in ["pwsh.exe", "powershell.exe"] {
+            for dir in env::split_paths(path_env) {
+                let candidate = dir.join(name);
+                if exists(&candidate) {
+                    return Some(candidate.into_os_string());
+                }
+            }
+        }
+        None
+    }
+
+    fn path_has_file(path: &Path) -> bool {
+        path.is_file()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::fs;
+
+        fn touch(dir: &std::path::Path, name: &str) {
+            fs::write(dir.join(name), b"").unwrap();
+        }
+
+        #[test]
+        fn no_path_resolves_to_none() {
+            assert_eq!(resolve_shell_in(None, path_has_file), None);
+        }
+
+        #[test]
+        fn prefers_pwsh_over_powershell_when_both_present() {
+            let dir = std::env::temp_dir()
+                .join(format!("labolabo-term-shell-test-{}-a", std::process::id()));
+            let _ = fs::create_dir_all(&dir);
+            touch(&dir, "pwsh.exe");
+            touch(&dir, "powershell.exe");
+            let path_env = OsString::from(dir.as_os_str());
+            let resolved = resolve_shell_in(Some(&path_env), path_has_file);
+            assert_eq!(resolved, Some(dir.join("pwsh.exe").into_os_string()));
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn falls_back_to_powershell_when_pwsh_absent() {
+            let dir = std::env::temp_dir()
+                .join(format!("labolabo-term-shell-test-{}-b", std::process::id()));
+            let _ = fs::create_dir_all(&dir);
+            touch(&dir, "powershell.exe");
+            let path_env = OsString::from(dir.as_os_str());
+            let resolved = resolve_shell_in(Some(&path_env), path_has_file);
+            assert_eq!(resolved, Some(dir.join("powershell.exe").into_os_string()));
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn none_when_neither_is_present() {
+            let dir = std::env::temp_dir()
+                .join(format!("labolabo-term-shell-test-{}-c", std::process::id()));
+            let _ = fs::create_dir_all(&dir);
+            let path_env = OsString::from(dir.as_os_str());
+            let resolved = resolve_shell_in(Some(&path_env), path_has_file);
+            assert_eq!(resolved, None);
+            let _ = fs::remove_dir_all(&dir);
+        }
+    }
 }

@@ -12,6 +12,13 @@ name: Rust app bundle
 #   tar.gz に固める（scripts/package-linux.sh）。署名なし（Linux の tarball 配布に
 #   相当する署名慣行がない）。**この成果物の実機 GUI 起動は未検証**（CI はビルドと
 #   ヘッドレステストのみ — crates/labolabo-app/README.md の "Linux" 節参照）。
+# - Windows: 第7波 c で追加。bin\ 3 バイナリ + アイコン（.ico、リポジトリにコミット
+#   済み — crates/labolabo-app/resources/windows/labolabo-rs.ico）+ README を zip に
+#   固める（scripts/package-windows.ps1）。署名なし（コード署名証明書は未取得）。
+#   exe へのアイコン埋め込みはせず zip 同梱 + ショートカット案内に縮退（判断は
+#   scripts/package-windows.ps1 と crates/labolabo-app/README.md の "Windows" 節に
+#   明記）。**この成果物の実機 GUI 起動は未検証**（CI はビルドとヘッドレステストの
+#   み — 同 README 参照）。
 on:
   workflow_dispatch:
 
@@ -72,4 +79,30 @@ jobs:
         with:
           name: LaboLabo-rs-linux
           path: rust/target/package/*.tar.gz
+          if-no-files-found: error
+
+  package-windows:
+    name: package (windows-latest)
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: Package (release build + zip)
+        shell: pwsh
+        run: ./scripts/package-windows.ps1
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LaboLabo-rs-windows
+          path: rust/target/package/*.zip
           if-no-files-found: error

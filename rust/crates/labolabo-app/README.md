@@ -231,6 +231,241 @@ note above); gpui itself ships Zed on both daily.
   `Window::minimize_window`/`zoom_window`; behavior under Wayland (where
   minimize-self is compositor-dependent) is unverified.
 
+## Windows (wave 7c)
+
+This crate builds, lints, and unit/integration-tests on Windows — the
+`rust-app-windows` CI job (`.github/workflows/ci.yml`, `windows-latest`)
+runs the same `cargo build`/`clippy`/`test -p labolabo-app` gauntlet as the
+macOS `rust-app`/Linux `rust-app-linux` jobs on every PR, and
+`scripts/package-windows.ps1` (run by `rust-app-bundle.yml`'s
+`package-windows` job, `workflow_dispatch`-only, same as the macOS/Linux
+packaging jobs) packages a release build into a portable
+`LaboLabo-rs-windows-<version>-<arch>.zip` (three binaries + an icon +
+README — no installer, see "Icon" below). This wave builds directly on the
+Windows *core* wave (`rust/README.md`'s "Windows core wave" section):
+`labolabo-core`'s Named Pipe hooks/control transports, `ToolLocator`, and
+`taskkill`-based process kill were already Windows-real before this wave —
+this one closes the remaining gaps in `labolabo-app`/`labolabo-term`
+themselves (shell resolution, the hooks/control socket-path minting bug
+below, font fallback, Ghostty config discovery) and adds the CI job +
+packaging.
+
+> **Verification honesty**: same caveat as the Linux section above — what CI
+> proves is "compiles, clippy-clean, and the headless unit/integration
+> tests (no window ever opened) pass on Windows". This includes more *real*
+> OS-level plumbing than the Linux job currently exercises, though: the
+> hooks/control Named Pipe round-trip tests (`labolabo-core`, already
+> real on `windows-latest` since the core wave), this crate's own
+> `HookRuntime`/`ControlRuntime` construction tests (fixed this wave to
+> mint valid `\\.\pipe\...` names instead of unix-shaped paths — see "Hooks
+> and control socket naming" below), and `labolabo-term`'s new
+> `tests/windows_spawn.rs` (real `cmd.exe`-spawned child processes) all run
+> for real. **Actually displaying a window on a real Windows desktop has
+> not been verified** — there is no Windows machine in this project's
+> development loop yet. Treat the first real-desktop launch as an open
+> verification task (rendering, DirectWrite text shaping, ConPTY-vs-real-
+> Ghostty differences, IME are all theoretically wired through gpui's
+> cross-platform APIs but unproven here).
+
+### Default shell resolution
+
+`labolabo-term`'s `TermSession::spawn_with_scrollback_options`
+(`crates/labolabo-term/src/session.rs`) previously hardcoded `/bin/sh -c
+<cmd>` for the one-shot-command spawn path and delegated entirely to
+`portable-pty`'s own `CommandBuilder::new_default_prog` for the interactive
+default-shell path — the latter already resolved to `%ComSpec%` (i.e.
+`cmd.exe`) on Windows via `portable-pty` itself, so this "just worked" in
+the sense of not crashing, but the former (`/bin/sh`) doesn't exist on
+Windows at all, and neither path ever considered PowerShell. Fixed
+per-platform:
+
+- **One-shot command** (used by `claude --resume`/the control CLI's
+  `tab_open -- <command>`, never by a user typing): `%ComSpec% /C <cmd>`
+  (`cmd.exe`) on Windows, unchanged `/bin/sh -c <cmd>` elsewhere. No
+  PowerShell preference here — deliberately the simplest universal
+  one-shot invocation, matching every stock Windows install.
+- **Interactive default shell** (a fresh terminal pane with no explicit
+  command): Windows now prefers `pwsh.exe` (PowerShell 7+, preinstalled on
+  GitHub's `windows-latest` runner and common on developer machines) →
+  `powershell.exe` (Windows PowerShell 5.1, present on every Windows
+  install since Windows 7) → `%ComSpec%` (`cmd.exe`, `portable-pty`'s own
+  fallback) — a `PATH` scan for the first two, self-contained in
+  `labolabo-term` (see `session.rs`'s private `windows` module and its
+  doc comment for why this doesn't reuse `labolabo_core::ToolLocator`
+  despite the near-identical problem: pulling in `labolabo-core`'s GRDB-
+  compatible persistence/tiling/hooks/control layers into this otherwise
+  standalone terminal-session crate for a ~15-line `PATH` scan would be a
+  much heavier coupling than the problem calls for). No unix-style login-
+  shell flag (`-l` has no Windows equivalent, and there is no analogous
+  "profile wasn't sourced" problem to solve for). Covered by
+  `labolabo-term/tests/windows_spawn.rs` (real `cmd.exe`-wrapped spawn +
+  env injection + resize survival) and pure unit tests of the `PATH`-scan
+  preference order (`session.rs`'s `windows::tests`).
+
+### Hooks and control socket naming
+
+**Found and fixed while porting this wave** (a behavioral bug, not a
+compile error — it wouldn't have surfaced until a real Windows launch):
+`hooks::HookRuntime::new`/`control::ControlRuntime::new` unconditionally
+built a `/tmp/labolabo/<hash>.sock`-shaped string via
+`labolabo_core::socket_path_from_uuid`/`control_socket_path_from_uuid` and
+handed it to `AgentStatusBus::new`/`ControlServer::new` — correct for the
+AF_UNIX transport those functions build a *path* for, but on Windows
+`AgentStatusBus`/`ControlServer` expect a `\\.\pipe\...` Named Pipe *name*
+in that same slot (`labolabo_core::hook_pipe_name_from_uuid`/
+`control_pipe_name_from_uuid`, already implemented since the Windows core
+wave but never called from this crate). Both `hooks.rs` and `control.rs`
+now mint the platform-appropriate identity (`mint_socket_path`, `#[cfg]`-
+branched) — without this fix, hooks injection (agent status dots, session
+memory, resume-at-restore) and the control CLI would have silently been
+dead on every Windows launch even after everything else compiled and ran.
+The crate's own real-socket construction tests (`hooks::tests::
+hook_runtime_receives_a_real_socket_event_and_resolves_its_route`,
+`control::tests::control_runtime_*`) were fixed the same way so they mint
+real Named Pipe names on Windows instead of unix-shaped path strings, and
+now run for real on the `rust-app-windows` CI job (previously these tests
+existed but had never run on Windows at all, since there was no Windows
+`labolabo-app` CI job before this wave).
+
+`hooks::resolve_hook_binary` also gained `std::env::consts::EXE_SUFFIX`
+(portable: empty on unix, `.exe` on Windows) — without it, the sibling-
+binary lookup for `labolabo-hook` always missed on Windows (`labolabo-hook`
+vs. the real `labolabo-hook.exe`), silently skipping hooks injection on
+every Windows run with no compile-time signal at all.
+
+### Ghostty configuration on Windows
+
+Real Ghostty does **not** ship an official Windows build as of this
+writing (macOS/Linux only) — so unlike the Linux XDG search above, there is
+no documented "where does Ghostty look for its config on Windows" upstream
+spec to port faithfully. Per the task brief's explicit fallback, this wave
+implements only the XDG-equivalent search: `%APPDATA%\ghostty\config` then
+`\config.ghostty` (`ghostty_config::windows_config_paths`, later file
+wins — same two-filename convention as the unix search), with `%APPDATA%`
+also standing in for `$HOME` (via `%USERPROFILE%`, falling back to
+`%APPDATA%` itself) for `config-file` include resolution. This is a
+best-effort, **unverified-against-any-real-upstream** guess (see that
+function's doc comment) — it exists so a user who manually places a config
+file there (e.g. anticipating a future official Windows Ghostty build, or
+running Ghostty under WSL with a Windows-side copy) gets it picked up, not
+because there is a confirmed Windows Ghostty to test against. No macOS-
+style bundled-themes-directory guess on Windows (no app-bundle concept to
+guess a path inside of) — a Windows user's `theme = ` only ever resolves
+against their own `ghostty/themes` subdirectory.
+
+### Font fallback on Windows
+
+`render::FALLBACK_FONT_FAMILIES` gets its own Windows list (rather than
+falling into the Linux DejaVu/Noto/Liberation/Ubuntu list, none of which
+ship on Windows by default): **Cascadia Mono** (the modern monospace face
+Microsoft ships with Windows Terminal/VS Code, and — since Windows 11 —
+sometimes with the OS itself; not guaranteed on an older/minimal install,
+hence not the only candidate) → **Consolas** (bundled with any install that
+has Visual Studio/Office's shared fonts — near-universal on a real
+developer machine) → **Courier New** (ships with every Windows install
+unconditionally — the final safety net).
+
+### "IDE で開く" is hidden on Windows, like Linux
+
+No new `#[cfg(windows)]` branch was needed here: `ide_open.rs`'s detection/
+open functions already have a `#[cfg(not(target_os = "macos"))]` stub arm
+(empty detection, `Err`-returning open — see that module's doc comment),
+and the menu items that would call them (`menus.rs`, `task_menu.rs`) are
+`#[cfg(target_os = "macos")]`-gated at the call site, so the stubs are
+simply never reached on Windows, exactly as on Linux today. Same decision
+as the Linux section above: *hide* rather than degrade to a single
+`explorer.exe`-based "reveal" item — that's a natural follow-up, not
+attempted this wave.
+
+### Icon
+
+`crates/labolabo-app/resources/windows/labolabo-rs.ico` (committed to the
+repo, generated from the Swift app's own `icon_512x512@2x.png` artwork via
+Pillow — `Image.open(png).save(ico, format="ICO", sizes=[(16,16),(24,24),
+(32,32),(48,48),(64,64),(128,128),(256,256)])` — regenerate the same way if
+the source artwork ever changes) is **not embedded into `labolabo-app.exe`
+itself** — deliberately the lighter of the two options the task brief
+allowed ("重ければ zip 内 .ico 同梱+ショートカット案内に縮退可"). Build-time
+icon embedding is real and low-risk in principle (`embed-resource`, the
+same crate gpui's own `build.rs` already pulls in as a
+`[target.'cfg(target_os = "windows")'.build-dependencies]` for its DPI-
+awareness manifest — see `gpui`'s `build.rs`/`resources/windows/gpui.rc`
+for the exact pattern this crate could follow), but this repo has no
+Windows machine in its development loop to visually confirm the result
+against, and the embedding only actually takes effect when `build.rs`
+itself compiles *on* a Windows host (gpui's own `mod windows` is
+`#[cfg(target_os = "windows")]`-gated at the Rust source level, i.e. host-
+conditional, not just target-conditional — a macOS→Windows cross-compile
+never exercises it either). Shipping the `.ico` alongside the binaries in
+`scripts/package-windows.ps1`'s zip for a user to point their own
+Start Menu/taskbar shortcut at is lower-risk and still gives every user a
+real, branded icon option (see that script's own "Icon" comment for the
+full write-up and the exact shortcut steps in the package's own README).
+Revisit build-time embedding if/when this port gets a proper installer and
+a Windows machine joins the dev loop to verify it against.
+
+### Known Windows differences / limitations
+
+- **Default shell prefers PowerShell over `cmd.exe`** — see "Default shell
+  resolution" above; this is a deliberate UX choice (mirroring Windows
+  Terminal's own default), not a compatibility requirement.
+- **No PowerShell/cmd shell-kind metadata per pane** — `labolabo_core::
+  quote_dropped_paths` (OS file drops onto a terminal pane, see "Drag &
+  drop" below) is POSIX-shell-quoting-only; a dropped path's quoting may
+  not parse correctly under `cmd.exe`/PowerShell on Windows. Same for
+  `hook_settings::claude_resume_command`'s POSIX single-quoting of a
+  resume session id, now wrapped in `%ComSpec% /C ...` on Windows (see
+  "Default shell resolution" above) — the wrapping makes the *spawn* work,
+  but `cmd.exe` doesn't strip single quotes the way a POSIX shell does, so
+  a resume id containing characters `shell_quote` would need to escape
+  could still reach `claude` malformed. Both are pre-existing, already-
+  documented POSIX-only-quoting gaps (see "Drag & drop"'s own note) that
+  this wave widens the visibility of rather than fixes — a Windows-aware
+  `quote_dropped_paths`/`shell_quote` variant is a natural follow-up.
+- **Ghostty config/theme discovery is unverified against any real
+  upstream** — see "Ghostty configuration on Windows" above; Ghostty
+  itself has no official Windows build to test against.
+- **IME on Windows is untested** — same caveat as Linux: the overlay logic
+  (`ime.rs`) is platform-independent gpui API, but no Windows IME has ever
+  been driven against it.
+- **ConPTY-vs-real-Ghostty rendering differences are unexplored.** This
+  app's PTY layer (`portable-pty`) uses Windows' ConPTY on Windows
+  (transparently, no code change needed in this crate — `portable-pty`
+  0.9's own dependency graph already includes `winapi`/`miow` for this);
+  whether ConPTY's own VT-sequence translation layer interacts with either
+  VT backend (`backend-alacritty` default, `backend-ghostty-vt` opt-in) any
+  differently than a real PTY does on unix has not been investigated.
+- **A `--release` build needs gpui's own HLSL shader compilation, which
+  needs `fxc.exe` on `PATH` — unverified on a real Windows host.** gpui's
+  `build.rs` only compiles its DirectX shaders in a non-debug build
+  (`#[cfg(not(debug_assertions))]`); this is what `scripts/
+  package-windows.ps1`'s `cargo build --release` exercises, but the
+  `rust-app-windows` CI job's own `cargo build`/`test`/`clippy` steps are
+  all debug-mode (matching `rust-app`/`rust-app-linux`'s own convention),
+  so they never hit this path — confirmed by cross-compiling this repo's
+  own debug build cleanly for `x86_64-pc-windows-gnu` from macOS, then
+  hitting exactly this `fxc.exe`-not-found error the moment a `--release`
+  cross-build was attempted (mingw has no `fxc.exe` to find — a real
+  Windows host with the Windows SDK does, which is presumably what GitHub's
+  `windows-latest` runner has, the same assumption gpui's own upstream
+  (Zed) relies on for its release Windows builds — but this repo has no
+  Windows machine to confirm it against directly). If `package-windows.ps1`
+  (run only by the `workflow_dispatch`-only `rust-app-bundle.yml`, not a
+  required PR check) ever fails on `windows-latest` with this error, that
+  is the mechanism to look at first.
+- **No code signing.** `scripts/package-windows.ps1`'s zip is unsigned (no
+  code-signing certificate obtained) — Windows SmartScreen will likely warn
+  on first run of an unsigned, freshly-downloaded `.exe`, same category of
+  friction the Linux tarball's lack of any signing convention already has,
+  worse in Windows' case since SmartScreen actively surfaces it.
+- **No installer, no Start Menu registration.** `package-windows.ps1`
+  produces a flat, portable zip (bin\ + icon + README) — no MSI/MSIX/
+  Inno Setup installer, no registry entries, no Start Menu shortcut created
+  automatically (see "Icon" above for the manual shortcut steps the
+  package's own README documents). A proper installer is future work, same
+  category as the Linux package's own root-less `install.sh` being the
+  "no real package manager integration yet" placeholder for that platform.
+
 ## Design
 
 ### Module layout

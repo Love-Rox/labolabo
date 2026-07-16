@@ -61,9 +61,22 @@ const SELECTION_HIGHLIGHT_ALPHA: f32 = 0.35;
 /// installed the first candidate is still handed to gpui, whose stack picks
 /// *some* renderable face at shape time (text stays readable, grid pitch
 /// still comes from our own "M" measurement below).
+///
+/// Windows gets its own list (rather than falling into the Linux one, which
+/// isn't installed by default on Windows): Cascadia Mono first -- the
+/// modern monospace Microsoft ships with Windows Terminal/VS Code and,
+/// since Windows 11, with the OS itself (not guaranteed present on an
+/// older/minimal install, hence not the *only* candidate) -- then Consolas,
+/// bundled with every Windows install that has Visual Studio/Office's
+/// shared fonts (near-universal on a real developer machine, if not a bare
+/// OS image), then Courier New, which ships with every Windows install
+/// unconditionally (Windows' own oldest, most universal monospace face) as
+/// the final safety net.
 #[cfg(target_os = "macos")]
 const FALLBACK_FONT_FAMILIES: &[&str] = &["Menlo"];
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+const FALLBACK_FONT_FAMILIES: &[&str] = &["Cascadia Mono", "Consolas", "Courier New"];
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 const FALLBACK_FONT_FAMILIES: &[&str] = &[
     "DejaVu Sans Mono",
     "Noto Sans Mono",
