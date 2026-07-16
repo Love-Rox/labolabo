@@ -1,12 +1,17 @@
-name: Rust app bundle (macOS)
+name: Rust app bundle
 
-# Rust 版 labolabo-app（gpui）を macOS の .app にバンドルし、workflow の artifact として
-# アップロードする。**手動実行のみ**（自動トリガなし）— Rust 版はまだ配布物として正式リリース
-# していないため、release-please / release-build.yml（Swift 版）とは独立に置く。将来 Rust 版を
-# 正式リリースする際の統合方針は別途判断する。
+# Rust 版 labolabo-app（gpui）をプラットフォーム別の配布物にパッケージし、workflow の
+# artifact としてアップロードする。**手動実行のみ**（自動トリガなし）— Rust 版はまだ
+# 配布物として正式リリースしていないため、release-please / release-build.yml（Swift 版）
+# とは独立に置く。将来 Rust 版を正式リリースする際の統合方針は別途判断する。
 #
-# 署名は Swift 版の release-build.yml と同じ **アドホック**（`codesign -s -`）。
-# Developer ID / notarization は導入しない。
+# - macOS: `.app` バンドル + zip（scripts/bundle-macos.sh）。署名は Swift 版の
+#   release-build.yml と同じ **アドホック**（`codesign -s -`）。Developer ID /
+#   notarization は導入しない。
+# - Linux: 第7波 a で追加。bin/ 3 バイナリ + .desktop ランチャ + install.sh + README を
+#   tar.gz に固める（scripts/package-linux.sh）。署名なし（Linux の tarball 配布に
+#   相当する署名慣行がない）。**この成果物の実機 GUI 起動は未検証**（CI はビルドと
+#   ヘッドレステストのみ — crates/labolabo-app/README.md の "Linux" 節参照）。
 on:
   workflow_dispatch:
 
@@ -34,4 +39,37 @@ jobs:
         with:
           name: LaboLabo-rs-macos
           path: rust/target/bundle/*.zip
+          if-no-files-found: error
+
+  package-linux:
+    name: package (ubuntu-latest)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+
+      # ci.yml の rust-app-linux ジョブと同じリンク時依存（コメントもそちらを参照）。
+      - name: Install system dependencies (gpui link-time deps)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libfreetype-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: Package (release build + tar.gz)
+        run: ./scripts/package-linux.sh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LaboLabo-rs-linux
+          path: rust/target/package/*.tar.gz
           if-no-files-found: error

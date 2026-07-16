@@ -1076,9 +1076,9 @@ fn render_git_kind_body(
         Some(PaneKind::Files) => {
             git_pane::render_file_list(task_id, git_state, spec, cx).into_any_element()
         }
-        Some(PaneKind::Diff) => git_pane::render_detail(task_id, git_state, cx),
+        Some(PaneKind::Diff) => git_pane::render_detail(task_id, git_state, spec, cx),
         Some(PaneKind::Commits) => {
-            commit_pane::render_commits_pane(task_id, &git_state.commits, cx)
+            commit_pane::render_commits_pane(task_id, &git_state.commits, spec, cx)
         }
         Some(PaneKind::Terminal) | None => div().size_full().into_any_element(),
     };

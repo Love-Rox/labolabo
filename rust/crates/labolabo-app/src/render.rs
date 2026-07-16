@@ -41,10 +41,35 @@ const SELECTION_HIGHLIGHT_RGB: Rgb = Rgb::new(
 );
 const SELECTION_HIGHLIGHT_ALPHA: f32 = 0.35;
 
-/// The fallback font family when the user's `font-family` (or an empty
-/// config) can't be resolved. Menlo ships with macOS; on Linux, gpui's own
-/// fallback font stack kicks in at shape time if Menlo is missing too.
-const FALLBACK_FONT_FAMILY: &str = "Menlo";
+/// The fallback font families (first installed one wins, same availability
+/// probe as the user's own `font-family` list -- see [`RenderSpec::resolve`])
+/// when the user's `font-family` (or an empty config) can't be resolved.
+///
+/// Per-OS because there is no cross-platform monospace family name: Menlo
+/// ships with macOS but not Linux, and the CSS-style generic `"monospace"`
+/// doesn't resolve on Linux either -- gpui's cosmic-text backend matches
+/// family names *literally* against the font database's face families
+/// (`load_family` in gpui's `platform/linux/text_system.rs`), and
+/// "monospace" is a fontconfig *alias*, not a face family. Nor can we lean
+/// on gpui's own shape-time fallback stack: its first monospace entry
+/// (`.ZedMono` = "Lilex") ships with Zed, not with this app, so on a stock
+/// Linux desktop that stack bottoms out in a *proportional* face
+/// (Ubuntu/Cantarell/Noto Sans/DejaVu Sans). The candidates below cover the
+/// default monospace of every mainstream distro family: DejaVu Sans Mono
+/// (Debian/Ubuntu baseline, near-universal), Noto Sans Mono (GNOME/Fedora),
+/// Liberation Mono (RHEL/Fedora), Ubuntu Mono (Ubuntu desktop). If none is
+/// installed the first candidate is still handed to gpui, whose stack picks
+/// *some* renderable face at shape time (text stays readable, grid pitch
+/// still comes from our own "M" measurement below).
+#[cfg(target_os = "macos")]
+const FALLBACK_FONT_FAMILIES: &[&str] = &["Menlo"];
+#[cfg(not(target_os = "macos"))]
+const FALLBACK_FONT_FAMILIES: &[&str] = &[
+    "DejaVu Sans Mono",
+    "Noto Sans Mono",
+    "Liberation Mono",
+    "Ubuntu Mono",
+];
 
 /// Everything the renderer (and the grid-size math) needs to know about the
 /// resolved terminal font: the font itself, its point size, and the
@@ -76,7 +101,7 @@ impl RenderSpec {
     /// only public "does this font exist" signal; `font_id` is private).
     /// This is stricter than Ghostty's own fuzzy font discovery, so a
     /// family Ghostty finds under a slightly different name can fall back
-    /// to Menlo here (with a stderr warning saying so).
+    /// to [`FALLBACK_FONT_FAMILIES`] here (with a stderr warning saying so).
     ///
     /// The measurement assumes a monospace font (as every terminal does); a
     /// proportional font will render misaligned, same as in any terminal
@@ -109,12 +134,14 @@ impl RenderSpec {
         };
 
         let installed = window.text_system().all_font_names();
+        let is_installed = |family: &str| {
+            installed
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case(family))
+        };
         let mut resolved: Option<Font> = None;
         for family in families {
-            let available = installed
-                .iter()
-                .any(|name| name.eq_ignore_ascii_case(family));
-            if available {
+            if is_installed(family) {
                 resolved = Some(font(family.clone()));
                 break;
             }
@@ -123,13 +150,22 @@ impl RenderSpec {
             );
         }
         let font_obj = resolved.unwrap_or_else(|| {
+            // Same installed-check as the user's own list, over the per-OS
+            // candidates (see FALLBACK_FONT_FAMILIES' doc comment); an
+            // uninstalled first candidate is still a workable last resort
+            // (gpui substitutes at shape time).
+            let fallback = FALLBACK_FONT_FAMILIES
+                .iter()
+                .copied()
+                .find(|family| is_installed(family))
+                .unwrap_or(FALLBACK_FONT_FAMILIES[0]);
             if !families.is_empty() {
                 eprintln!(
                     "labolabo-app: no configured font-family could be resolved; \
-                     falling back to {FALLBACK_FONT_FAMILY}"
+                     falling back to {fallback}"
                 );
             }
-            font(FALLBACK_FONT_FAMILY)
+            font(fallback)
         });
 
         // Measure one cell by shaping a reference glyph. "M" is the
