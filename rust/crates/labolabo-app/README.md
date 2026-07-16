@@ -1148,6 +1148,33 @@ A tab closes two ways, both funneled through `LaboLaboApp::remove_pane`
   (SIGHUP to the child, the same signal a real terminal delivers on window
   close), then removes the pane.
 
+**Tab chip titles prefer the terminal's own live title over the persisted
+name** (第11波, `task_workspace::tab_display_title`/`elide_tab_title`): every
+render, each chip reads `PaneRuntime::session.title()` -- the running
+program's most recent OSC `0`/`2` title (`labolabo_term::TermSession::
+title()`, see that crate's README for how each backend tracks it) -- and
+shows it in place of the pane's persisted `PaneItem::title` (the "端末 N"
+default) whenever one has been observed. This is what makes a tab reflect
+e.g. Claude Code's own conversation title, or a shell's `\e]0;...\a` prompt
+hook, the same way any mainstream terminal emulator's tabs already do; no
+attempt is made to render/strip whatever decoration Claude Code's own title
+convention prepends (e.g. "✳ ") -- it's shown exactly as received. A title
+longer than `MAX_TAB_TITLE_CHARS` (24) is tail-truncated with a trailing "…"
+(chips have no fixed width -- an unbounded title would otherwise stretch the
+whole tab bar), with the full title available via a tooltip only when
+elision actually happened -- the same "abbreviate for the list view, tooltip
+for the full value only when truncated" contract `path_abbrev.rs` uses for
+the sidebar's repo-group headings, just tail- rather than middle-elided
+(explained in `elide_tab_title`'s doc comment).
+
+**Deliberately not persisted**: a live title is read fresh from the
+still-running session on every render and never written back into
+`PaneItem::title` (or anywhere else). A tab reverts to its persisted default
+name on the next app launch -- exactly like a real terminal's window title
+resets when you reopen it -- and gets it back the moment the respawned
+shell/Claude sets its own title again (for a Claude session with `--resume`,
+that happens automatically once Claude re-establishes the conversation).
+
 A Task's **last** pane is handled specially (see "The Task model" above for
 the full rules): user close refused / natural exit leaves a recoverable
 empty pane / app's-only-Task quits (`cx.quit()`) — Ghostty's

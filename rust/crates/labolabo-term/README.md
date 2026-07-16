@@ -259,6 +259,56 @@ running the **same** integration tests as ghostty (`tests/backend_common.rs`).
     `mouse_mode_reflects_decset_1000_1002_1006` (Normal -> Button+SGR ->
     off, via real DECSET sequences from a spawned child) and
     `alternate_scroll_defaults_on_and_toggles_via_decset_1007`.
+- **Live title query via `TermSession::title()`** (第11波, added so
+  `labolabo-app`'s tab chips can show a program's own OSC `0`/`2` title --
+  e.g. Claude Code sets one to the conversation's own title -- instead of
+  always showing the generic default): `VtBackend` gained
+  `title(&self) -> Option<String>`, `None` meaning "nothing set (or
+  explicitly reset) since the session started", never an empty string.
+  - **Both backends resolve this from their own native OSC-title tracking --
+    no bespoke OSC 0/2 state machine was needed in this crate**, the
+    fallback the feature's brief flagged as a possibility if either backend
+    lacked support. Verified by reading each backend's real, vendored
+    source (not assumed):
+    - **ghostty-vt**: `Terminal::title() -> Result<&str>` is a direct,
+      on-demand getter (`libghostty-vt-0.2.0/src/terminal.rs`) -- queried
+      fresh each time, no callback registration needed. Its own doc comment
+      documents exactly this crate's `None`-for-unset convention ("An empty
+      string is returned when no title has been set"), so the ghostty
+      backend just maps `""` -> `None`.
+    - **alacritty**: `Term` has *no* public title getter -- confirmed by
+      reading `alacritty_terminal-0.26.0/src/term/mod.rs` (`title` is a
+      private field). So the alacritty backend instead observes
+      `Event::Title(String)`/`Event::ResetTitle` through the same
+      `EventListener` already wired up for `Event::PtyWrite` (see "PTY
+      unification" below) and caches the result in a small
+      `Arc<Mutex<Option<String>>>` shared with the `Term`'s event listener --
+      the "existing mechanism" (an event callback, not a new parser) the
+      feature's brief anticipated for whichever backend needed one.
+  - Both resolve OSC sequences split across multiple PTY writes and either
+    terminator (BEL `\x07` or ST `ESC \`) correctly *by construction* --
+    they're full VT parsers already handling arbitrary chunking for every
+    other escape sequence, not a hand-rolled state machine layered on top
+    that would need to reinvent that. Covered by shared headless tests
+    (`tests/backend_common.rs`): `title_reflects_osc_2_bel_terminated`,
+    `title_reflects_osc_0_st_terminated`,
+    `title_reflects_osc_sequence_split_across_writes` (a `sleep` between two
+    `printf`s to force two distinct PTY reads mid-sequence), and
+    `title_updates_on_second_osc_sequence`.
+  - Same "worker refreshes a cached value every processed PTY byte batch,
+    caller thread reads without blocking" shape as `bracketed_paste`/
+    `alt_screen_active`/`mouse_mode` above -- no separate polling or extra
+    wakeup wiring needed: any PTY bytes carrying a title change already flow
+    through the existing dirty-flag/`FRAME_INTERVAL`-throttled publish path
+    (`session.rs`'s `run_worker`), which already guarantees a
+    `TermEvent::Wakeup` follows within one frame of *any* processed byte
+    batch, title-bearing or not.
+  - **Purely a live, in-memory mirror of the running program's own state --
+    never persisted by this crate**, same as a real terminal's window/tab
+    title: it reverts to whatever the caller falls back to (`labolabo-app`'s
+    persisted `PaneItem::title`) if the session is torn down and respawned.
+    See `labolabo-app/README.md`'s "Tile tree, tab bars, and session
+    lifecycle" section for that display-layer policy.
 
 ### PTY unification (design decision)
 
