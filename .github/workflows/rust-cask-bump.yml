@@ -16,7 +16,7 @@ name: Rust cask bump
 # なる。tap 側の切り替えと labolabo-rs cask の廃止手続きはこのリポジトリ
 # の外（Love-Rox/homebrew-tap）の作業。
 #
-# HOMEBREW_TAP_TOKEN（Love-Rox/homebrew-tap へ Contents: Read and write を
+# TAP_TOKEN（Love-Rox/homebrew-tap へ Contents: Read and write を
 # 持つ fine-grained PAT。Swift 版 release-build.yml の "Bump Homebrew cask"
 # ステップと同じ既存 secret）が未設定ならスキップする（Swift 版と同じ方針）。
 
@@ -42,7 +42,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "$TAP_TOKEN" ]; then
-            echo "::notice::HOMEBREW_TAP_TOKEN 未設定のため cask bump をスキップします"
+            echo "::notice::TAP_TOKEN 未設定のため cask bump をスキップします"
             echo "skip=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
