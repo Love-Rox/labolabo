@@ -371,6 +371,28 @@ impl TaskDatabase {
         self.set_app_state(Some(&lines.to_string()), Self::KEY_SCROLLBACK_LINES)
     }
 
+    // MARK: - App state (window bounds, wave 6c)
+
+    /// `appState` key backing the main window's last position/size. The
+    /// stored value is a JSON object `{"x":..,"y":..,"w":..,"h":..}` in
+    /// gpui's global (multi-display) coordinate space -- encoding/decoding
+    /// and the "is this still on any connected display" validation live in
+    /// `labolabo-app`'s `window_bounds` module; this store, as usual, only
+    /// round-trips the raw string (same division of labor as
+    /// `KEY_SCROLLBACK_LINES` above).
+    const KEY_WINDOW_BOUNDS: &'static str = "windowBounds";
+
+    /// `None` if never set. The caller (`labolabo-app`'s startup path)
+    /// treats undecodable text the same as "never set" and falls back to a
+    /// centered window, so no validation happens here.
+    pub fn window_bounds(&self) -> StoreResult<Option<String>> {
+        self.app_state(Self::KEY_WINDOW_BOUNDS)
+    }
+
+    pub fn set_window_bounds(&self, json: &str) -> StoreResult<()> {
+        self.set_app_state(Some(json), Self::KEY_WINDOW_BOUNDS)
+    }
+
     fn set_app_state(&self, value: Option<&str>, key: &str) -> StoreResult<()> {
         self.conn.execute(
             "INSERT INTO appState(key, value) VALUES(?1, ?2) \
@@ -624,6 +646,25 @@ mod tests {
         db.set_app_state(Some("not-a-number"), TaskDatabase::KEY_SCROLLBACK_LINES)
             .unwrap();
         assert_eq!(db.scrollback_lines().unwrap(), None);
+    }
+
+    #[test]
+    fn window_bounds_round_trips_and_defaults_to_none() {
+        let db = TaskDatabase::open_in_memory().unwrap();
+        assert_eq!(db.window_bounds().unwrap(), None);
+        db.set_window_bounds(r#"{"x":10.0,"y":20.0,"w":800.0,"h":600.0}"#)
+            .unwrap();
+        assert_eq!(
+            db.window_bounds().unwrap().as_deref(),
+            Some(r#"{"x":10.0,"y":20.0,"w":800.0,"h":600.0}"#)
+        );
+        // Overwrite keeps a single value (upsert), not a history.
+        db.set_window_bounds(r#"{"x":1.0,"y":2.0,"w":3.0,"h":4.0}"#)
+            .unwrap();
+        assert_eq!(
+            db.window_bounds().unwrap().as_deref(),
+            Some(r#"{"x":1.0,"y":2.0,"w":3.0,"h":4.0}"#)
+        );
     }
 
     #[test]
