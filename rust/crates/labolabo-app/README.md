@@ -67,14 +67,18 @@ scrollback itself is not (a fresh PTY either way).
 
 ### Where the data lives
 
-`~/Library/Application Support/LaboLabo-rs/tasks.db` on macOS
-(`$XDG_DATA_HOME/LaboLabo-rs/` on Linux, `%APPDATA%\LaboLabo-rs\` on
-Windows) — `labolabo_core::store::TaskDatabase::default_path()`.
-**Deliberately a different directory tree and file from the Swift app's**
-`~/Library/Application Support/LaboLabo/labolabo.db`: the Rust port never
-opens the Swift `SessionDatabase` (two live apps must never write the same
-SQLite file, and this schema shares nothing with GRDB's) — see
-`labolabo-core`'s `store::task_database` module docs for the full contract.
+`~/Library/Application Support/LaboLabo/tasks.db` on macOS
+(`$XDG_DATA_HOME/LaboLabo/` on Linux, `%APPDATA%\LaboLabo\` on
+Windows) — `labolabo_core::store::TaskDatabase::default_path()`. As of the
+1.1.0 rename this is the **same directory** the Swift app used, but still
+**a different file** from the Swift app's `labolabo.db`: the Rust port
+never opens the Swift `SessionDatabase` (two live apps must never write
+the same SQLite file, and this schema shares nothing with GRDB's) — see
+`labolabo-core`'s `store::task_database` module docs for the full
+contract. A pre-1.1.0 install's `.../LaboLabo-rs/tasks.db` is moved to
+the new directory automatically, once, at startup
+(`store::migrate_legacy_rust_data_dir`; if the move fails the old path
+keeps being used, so nothing is lost).
 
 ### Importing from the Swift app
 
@@ -172,7 +176,7 @@ CI job (`.github/workflows/ci.yml`, ubuntu-latest) runs the same
 `rust-app` job on every PR, and `scripts/package-linux.sh` (run by
 `rust-app-bundle.yml`'s `package-linux` job, `workflow_dispatch`-only, same
 as the macOS bundle) packages a release build into a portable
-`LaboLabo-rs-linux-<version>-<arch>.tar.gz` (three binaries + a
+`LaboLabo-linux-<version>-<arch>.tar.gz` (three binaries + a
 freedesktop.org `.desktop` launcher + a root-less per-user `install.sh` +
 icon + README).
 
@@ -242,7 +246,7 @@ note above); gpui itself ships Zed on both daily.
   ghostty/config` (`~/.config/ghostty/config`) etc. — the macOS-only
   `~/Library/Application Support` and `/Applications/Ghostty.app` bundled-
   themes locations are skipped on Linux (`ghostty_config.rs`). Data lives
-  in `$XDG_DATA_HOME/LaboLabo-rs` (`~/.local/share/LaboLabo-rs`).
+  in `$XDG_DATA_HOME/LaboLabo` (`~/.local/share/LaboLabo`).
 - **Hooks + control CLI are unix-domain-socket based and shared with
   macOS** (`#[cfg(unix)]` in `labolabo-core`) — no Linux-specific work was
   needed; the same `labolabo-hook`-as-sibling-binary resolution applies
@@ -263,7 +267,7 @@ macOS `rust-app`/Linux `rust-app-linux` jobs on every PR, and
 `scripts/package-windows.ps1` (run by `rust-app-bundle.yml`'s
 `package-windows` job, `workflow_dispatch`-only, same as the macOS/Linux
 packaging jobs) packages a release build into a portable
-`LaboLabo-rs-windows-<version>-<arch>.zip` (three binaries + an icon +
+`LaboLabo-windows-<version>-<arch>.zip` (three binaries + an icon +
 README — no installer, see "Icon" below). This wave builds directly on the
 Windows *core* wave (`rust/README.md`'s "Windows core wave" section):
 `labolabo-core`'s Named Pipe hooks/control transports, `ToolLocator`, and
@@ -756,9 +760,9 @@ the sidebar).
 menu bar; every item references the same gpui actions the keybindings above
 dispatch, so there is a single handler per operation:
 
-- **LaboLabo-rs**: LaboLabo-rs について (About overlay: version + build
+- **LaboLabo**: LaboLabo について (About overlay: version + build
   number, the latter injected at compile time by `build.rs` from
-  `git rev-list --count HEAD`) / 設定… (Cmd+,) / LaboLabo-rs を終了 (Cmd+Q)
+  `git rev-list --count HEAD`) / 設定… (Cmd+,) / LaboLabo を終了 (Cmd+Q)
 - **ファイル**: 新しい作業（フォルダ直付け）… / 新しい作業（worktree を作成）…
   / 選択中の作業を IDE で開く (macOS のみ、検出済みエディタの先頭で開く。
   未検出なら Finder で表示) / 新しいタブ (Cmd+T) / タブを閉じる (Cmd+W)
