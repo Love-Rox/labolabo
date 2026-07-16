@@ -1,4 +1,4 @@
-name: Rust release (RC)
+name: Rust release
 
 # Rust 版 labolabo-app の RC（release candidate）を GitHub の **pre-release**
 # として draft で用意する配管。**手動実行のみ**（`workflow_dispatch`）--
