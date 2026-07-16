@@ -391,9 +391,11 @@ pub fn render(
             }),
         ));
 
+    // アップデート確認バナー (`render_update_banner`, RC release wave) と
     // Swift 版インポータのバナー (`render_import_banner`): "+" 行より上、
     // サイドバー最上部に出す。`app`/`cx` の再借用を避けるため `sidebar`
     // 本体の構築より先に評価する。
+    let update_banner = render_update_banner(app, cx);
     let import_banner = render_import_banner(app, cx);
 
     let mut sidebar = div()
@@ -415,6 +417,7 @@ pub fn render(
         .on_drop::<ExternalPaths>(cx.listener(|this, paths: &ExternalPaths, _window, cx| {
             this.handle_sidebar_folder_drop(paths, cx);
         }))
+        .children(update_banner)
         .children(import_banner)
         .child(new_task_row)
         .child(list);
@@ -438,6 +441,77 @@ pub fn render(
     }
 
     sidebar
+}
+
+/// アップデート確認 (`crate::update_check`, RC release wave) の結果一行
+/// バナー -- サイドバー最上部（Swift 版インポータのバナーより上）に出す。
+/// `render_import_banner` と同じ「閉じるまで残る」動線だが、"開く" ボタンが
+/// 追加で付く点が異なる（リリースページを既定ブラウザで開く、
+/// `LaboLaboApp::open_update_release_page`）。"×" は
+/// `LaboLaboApp::dismiss_update_banner` -- 閉じると同時に「このバージョン
+/// を通知しない」を appState へ永続化する（同メソッドの doc コメント参照）。
+/// `app.update_banner()` が `None` なら何も描画しない。
+fn render_update_banner(
+    app: &LaboLaboApp,
+    cx: &mut Context<LaboLaboApp>,
+) -> Option<impl IntoElement> {
+    let release = app.update_banner()?.clone();
+    let message = t!(
+        "update.available.message",
+        version = release.version.as_str()
+    )
+    .to_string();
+    Some(
+        div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .px_2()
+            .py_1()
+            .bg(rgb(theme::surface::RAISED))
+            .border_b_1()
+            .border_color(rgb(theme::surface::STROKE))
+            .child(
+                div()
+                    .flex_1()
+                    .text_color(rgb(theme::text::SECONDARY))
+                    .text_size(px(theme::font_size::CAPTION))
+                    .child(SharedString::from(message)),
+            )
+            .child(
+                div()
+                    .id("update-banner-open")
+                    .px_1()
+                    .rounded_sm()
+                    .text_color(rgb(theme::text::SECONDARY))
+                    .text_size(px(theme::font_size::CAPTION))
+                    .hover(|el| el.bg(rgb(theme::surface::ACTIVE)))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _: &MouseDownEvent, _window, cx| {
+                            this.open_update_release_page(cx);
+                        }),
+                    )
+                    .child(t!("update.available.open").to_string()),
+            )
+            .child(
+                div()
+                    .id("update-banner-dismiss")
+                    .px_1()
+                    .rounded_sm()
+                    .text_color(rgb(theme::text::MUTED))
+                    .text_size(px(theme::font_size::CAPTION))
+                    .hover(|el| el.bg(rgb(theme::surface::ACTIVE)))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _: &MouseDownEvent, _window, cx| {
+                            this.dismiss_update_banner(cx);
+                        }),
+                    )
+                    .child("×"),
+            ),
+    )
 }
 
 /// Swift 版インポータ (`crate::swift_import`, `plans` W6e) の結果一行バナー

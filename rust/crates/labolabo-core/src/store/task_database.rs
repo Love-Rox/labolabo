@@ -414,6 +414,47 @@ impl TaskDatabase {
         self.set_app_state(Some(value), Self::KEY_LOCALE)
     }
 
+    // MARK: - App state (update check, RC release wave)
+    //
+    // Two `appState` keys backing `labolabo-app::update_check`'s startup
+    // GitHub-releases check: whether it runs at all, and which version's
+    // banner the user has already dismissed (so a dismissed version doesn't
+    // reappear on the next launch, while a genuinely newer one still does --
+    // see `update_check`'s module doc comment for the full design).
+
+    /// `appState` key backing "アップデートを自動確認" (settings screen).
+    const KEY_UPDATE_CHECK_ENABLED: &'static str = "updateCheckEnabled";
+    /// `appState` key backing "このバージョンを通知しない" -- the normalized
+    /// version string (`release_version::normalize`) of the release whose
+    /// banner was last dismissed, or absent if none ever was / the user
+    /// hasn't dismissed the *current* newest release yet.
+    const KEY_IGNORED_UPDATE_VERSION: &'static str = "ignoredUpdateVersion";
+
+    /// `None` if never set (caller should apply `true` -- checking for
+    /// updates is on by default, same "opt-out, not opt-in" posture as the
+    /// Swift app's own `checkUpdatesOnLaunch` `@AppStorage` default).
+    pub fn update_check_enabled(&self) -> StoreResult<Option<bool>> {
+        Ok(self
+            .app_state(Self::KEY_UPDATE_CHECK_ENABLED)?
+            .map(|v| v != "0"))
+    }
+
+    pub fn set_update_check_enabled(&self, enabled: bool) -> StoreResult<()> {
+        self.set_app_state(Some(bool_flag(enabled)), Self::KEY_UPDATE_CHECK_ENABLED)
+    }
+
+    /// `None` if the user has never dismissed an update banner.
+    pub fn ignored_update_version(&self) -> StoreResult<Option<String>> {
+        self.app_state(Self::KEY_IGNORED_UPDATE_VERSION)
+    }
+
+    /// `None` clears it (not currently used by any caller, but kept
+    /// symmetrical with `set_window_bounds`/`set_locale`'s `Option`-taking
+    /// shape rather than only ever accepting `Some`).
+    pub fn set_ignored_update_version(&self, version: Option<&str>) -> StoreResult<()> {
+        self.set_app_state(version, Self::KEY_IGNORED_UPDATE_VERSION)
+    }
+
     fn set_app_state(&self, value: Option<&str>, key: &str) -> StoreResult<()> {
         self.conn.execute(
             "INSERT INTO appState(key, value) VALUES(?1, ?2) \
@@ -696,6 +737,39 @@ mod tests {
         assert_eq!(db.locale().unwrap().as_deref(), Some("ja"));
         db.set_locale("en").unwrap();
         assert_eq!(db.locale().unwrap().as_deref(), Some("en"));
+    }
+
+    // MARK: - App state (update check, RC release wave)
+
+    #[test]
+    fn update_check_enabled_defaults_to_none_until_set() {
+        let db = TaskDatabase::open_in_memory().unwrap();
+        assert_eq!(db.update_check_enabled().unwrap(), None);
+        db.set_update_check_enabled(false).unwrap();
+        assert_eq!(db.update_check_enabled().unwrap(), Some(false));
+        db.set_update_check_enabled(true).unwrap();
+        assert_eq!(db.update_check_enabled().unwrap(), Some(true));
+    }
+
+    #[test]
+    fn ignored_update_version_round_trips_and_defaults_to_none() {
+        let db = TaskDatabase::open_in_memory().unwrap();
+        assert_eq!(db.ignored_update_version().unwrap(), None);
+        db.set_ignored_update_version(Some("1.0.0-rc.2")).unwrap();
+        assert_eq!(
+            db.ignored_update_version().unwrap().as_deref(),
+            Some("1.0.0-rc.2")
+        );
+        // Overwrite keeps a single value (upsert), not a history -- a newer
+        // dismissal replaces the previous one, matching `set_window_bounds`'s
+        // own upsert test.
+        db.set_ignored_update_version(Some("1.0.0-rc.3")).unwrap();
+        assert_eq!(
+            db.ignored_update_version().unwrap().as_deref(),
+            Some("1.0.0-rc.3")
+        );
+        db.set_ignored_update_version(None).unwrap();
+        assert_eq!(db.ignored_update_version().unwrap(), None);
     }
 
     #[test]

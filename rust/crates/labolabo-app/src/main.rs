@@ -45,6 +45,7 @@ mod task_lifecycle;
 mod task_menu;
 mod task_workspace;
 mod theme;
+mod update_check;
 mod window_bounds;
 
 // i18n wave (6f, `crate::i18n`): loads `locales/{ja,en}.yml`, compiled in at
