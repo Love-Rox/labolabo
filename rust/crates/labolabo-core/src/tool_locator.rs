@@ -13,14 +13,20 @@
 //! `#[cfg(target_os = ...)]`-gated per the porting brief:
 //! - macOS: fixed candidates -> PATH -> login shell (full Swift behavior).
 //! - Linux: fixed candidates -> PATH only (no login-shell fallback).
-//! - Other targets (Windows, ...): unimplemented stub -- see `locate` below.
+//! - Windows: PATHEXT-aware `PATH` scan only (see
+//!   [`locate_via_path_pathext`]) -- no fixed candidates (the unix list is
+//!   Homebrew/Nix/... paths with no Windows analog) and no login-shell
+//!   fallback (a Windows GUI process inherits the full user `PATH` from the
+//!   registry-backed environment; there is no launchd-style stripped-PATH
+//!   problem to work around).
+//! - Other targets: unimplemented stub -- see `locate` below.
 
 // ログインシェル解決（locate_via_login_shell）が macOS 限定のため、これらの import は
 // Linux ビルドでは未使用になる。clippy -D warnings（CI の ubuntu ジョブ）を通すために
 // 同じ cfg でゲートする。`Path`（`PathBuf` と違いトレイトシグネチャでは使わない）も
 // 同様に、実際に使う関数（is_executable_file/locate_fixed_or_path/
-// locate_via_login_shell）がすべて unix 限定になったため `#[cfg(unix)]` でゲートする
-// （Windows ビルドで未使用 import になるのを防ぐ）。
+// locate_via_login_shell）がすべて unix 限定のため `#[cfg(unix)]` でゲートする
+// （Windows 実装 locate_via_path_pathext は `PathBuf` しか使わない）。
 #[cfg(target_os = "macos")]
 use crate::process;
 #[cfg(unix)]
@@ -154,6 +160,67 @@ fn locate_via_login_shell(name: &str) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+/// The `PATHEXT` extension list (`.COM;.EXE;.BAT;.CMD;...`), lowercased and
+/// including the leading dot, falling back to the OS default four when the
+/// variable is unset/empty -- the same fallback `cmd.exe` itself applies.
+#[cfg(windows)]
+fn pathext_extensions() -> Vec<String> {
+    let raw = std::env::var("PATHEXT").unwrap_or_default();
+    let exts: Vec<String> = raw
+        .split(';')
+        .filter(|e| !e.is_empty())
+        .map(|e| e.to_lowercase())
+        .collect();
+    if exts.is_empty() {
+        return [".com", ".exe", ".bat", ".cmd"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+    }
+    exts
+}
+
+/// Windows resolution: a linear scan of `PATH` (`std::env::split_paths`,
+/// i.e. `;`-separated), trying `<dir>\<name><ext>` for every `PATHEXT`
+/// extension -- plus `<dir>\<name>` as-is first when `name` already carries
+/// one of those extensions (`locate("cmd.exe")` must not require a
+/// `cmd.exe.exe`). This mirrors what `where <name>`/`CreateProcessW`'s
+/// search does, without shelling out to `where`: the search rule is simple
+/// enough that a subprocess (plus its own PATH/quoting concerns) buys
+/// nothing -- see the porting brief ("PATH 直接スキャン + PATHEXT が素直なら
+/// where 不要 -- 実装の単純さ優先").
+///
+/// "Executable" on Windows means "is a regular file with an executable
+/// extension" -- there is no mode-bit check to port `is_executable_file`'s
+/// `0o111` test to, and `PATHEXT` membership is exactly the executability
+/// rule the shell itself uses.
+#[cfg(windows)]
+fn locate_via_path_pathext(name: &str) -> Option<PathBuf> {
+    let exts = pathext_extensions();
+    let name_lower = name.to_lowercase();
+    let has_executable_extension = exts.iter().any(|ext| name_lower.ends_with(ext.as_str()));
+
+    let path_env = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_env) {
+        if dir.as_os_str().is_empty() {
+            continue;
+        }
+        if has_executable_extension {
+            let candidate = dir.join(name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+        for ext in &exts {
+            let candidate = dir.join(format!("{name}{ext}"));
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
 impl ToolLocating for ToolLocator {
     #[cfg(target_os = "macos")]
     fn locate(&self, name: &str) -> Option<PathBuf> {
@@ -167,23 +234,26 @@ impl ToolLocating for ToolLocator {
         locate_fixed_or_path(name)
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    fn locate(&self, name: &str) -> Option<PathBuf> {
+        // Windows: PATHEXT-aware PATH scan only -- see the module doc
+        // comment for why there are no fixed candidates and no login-shell
+        // fallback here.
+        locate_via_path_pathext(name)
+    }
+
+    #[cfg(not(any(unix, windows)))]
     fn locate(&self, _name: &str) -> Option<PathBuf> {
-        // Windows isn't implemented yet. A faithful port would shell out to
-        // `where <name>` (the closest analog to `command -v`) and be
-        // PATHEXT-aware (.exe/.cmd/.bat/...) when probing the fixed
-        // candidates, since Windows has no single "executable bit" the way
-        // `is_executable_file` checks here. Deferred until a Windows target
-        // actually needs this crate -- see rust/README.md's known-scope-limits
-        // section.
-        unimplemented!("ToolLocator::locate is not implemented for Windows yet")
+        // No other target currently builds this crate; kept as a loud stub
+        // rather than a silent None so a new platform port starts here
+        // deliberately.
+        unimplemented!("ToolLocator::locate is not implemented for this platform")
     }
 }
 
-// Every test below calls the real `ToolLocator`, whose `#[cfg(not(unix))]`
-// arm is an `unimplemented!()` stub (see the module doc comment above) --
-// gate the whole module rather than work around the stub, matching this
-// wave's "cfg ゲートの整理のみ, Windows 実装はしない" scope.
+// Unix-only because the tests probe unix base binaries (`sh`/`ls`) and the
+// unix-specific `is_executable_file` -- the Windows implementation has its
+// own test module below.
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -235,6 +305,55 @@ mod tests {
     #[test]
     fn locate_name_with_path_separators_does_not_crash() {
         assert!(ToolLocator.locate("../etc/passwd").is_none());
+        assert!(ToolLocator.locate("no.such.tool/here").is_none());
+    }
+}
+
+// Windows counterparts of the unix tests above, probing binaries that exist
+// on every Windows installation (`cmd`) -- these run for real on the `rust
+// (windows-latest)` CI job.
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    #[test]
+    fn locate_cmd_without_extension_resolves_via_pathext() {
+        let path = ToolLocator.locate("cmd");
+        let path = path.expect("base binary `cmd` should resolve");
+        assert!(path.is_absolute());
+        assert!(path.is_file());
+        let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase());
+        assert_eq!(ext.as_deref(), Some("exe"), "cmd should resolve to cmd.exe");
+    }
+
+    #[test]
+    fn locate_cmd_with_explicit_extension_resolves_as_is() {
+        let path = ToolLocator.locate("cmd.exe");
+        let path = path.expect("`cmd.exe` should resolve");
+        assert!(path.is_file());
+        assert!(path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .eq_ignore_ascii_case("cmd.exe"));
+    }
+
+    #[test]
+    fn locate_absent_tool_returns_none() {
+        let name = format!(
+            "labolabo-no-such-tool-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        assert!(ToolLocator.locate(&name).is_none());
+    }
+
+    #[test]
+    fn locate_name_with_path_separators_does_not_crash() {
+        assert!(ToolLocator.locate("..\\windows\\no-such-tool").is_none());
         assert!(ToolLocator.locate("no.such.tool/here").is_none());
     }
 }
