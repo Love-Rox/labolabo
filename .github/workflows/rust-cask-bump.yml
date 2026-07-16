@@ -33,7 +33,7 @@ jobs:
     if: startsWith(github.event.release.tag_name, 'rs-v')
     runs-on: ubuntu-latest
     env:
-      TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
       GH_TOKEN: ${{ github.token }}
       TAG: ${{ github.event.release.tag_name }}
     steps:
