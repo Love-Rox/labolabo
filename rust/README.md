@@ -172,15 +172,16 @@ concern with no analog in this OS/UI-independent core yet; the registered
 `on_message` fires on, and marshaling to a UI thread (if one exists) is left
 to the caller, documented explicitly on `AgentStatusBus::start`.
 
-The AF_UNIX transport (`UnixSocketEventTransport`) and the forwarder
-(`forward_hook`, `src/bin/labolabo-hook.rs`) are `#[cfg(unix)]` — a Windows
-transport (Named Pipe, per docs/hooks-protocol.md §4) is future work with no
-stub yet, just a comment. This introduces the crate's first genuinely
-platform-specific code and its first target-specific dependency: `libc`
-(unix-only, `[target.'cfg(unix)'.dependencies]`), needed for `shutdown(2)`
-on a raw fd to unblock a blocked `accept()` call from another thread when
-`stop()` is called — `std::os::unix::net::UnixListener` exposes no such
-method.
+The AF_UNIX transport (`UnixSocketEventTransport`) is `#[cfg(unix)]`;
+since the Windows core wave there is also a `#[cfg(windows)]` Named Pipe
+transport (`NamedPipeEventTransport`, docs/hooks-protocol.md §4.2) and the
+forwarder (`forward_hook`, `src/bin/labolabo-hook.rs`) is
+`#[cfg(any(unix, windows))]` — see the "Windows core wave" section below.
+Wave 4b introduced the crate's first genuinely platform-specific code and
+its first target-specific dependency: `libc` (unix-only,
+`[target.'cfg(unix)'.dependencies]`), needed for `shutdown(2)` on a raw fd
+to unblock a blocked `accept()` call from another thread when `stop()` is
+called — `std::os::unix::net::UnixListener` exposes no such method.
 
 Tests:
 
@@ -193,11 +194,14 @@ Tests:
   exactly once each — not ported from Swift (the Swift suite always uses
   the real `UnixSocketEventTransport`), added because the DI seam is a
   genuine design point of this port.
-- `src/hooks.rs`'s `#[cfg(all(test, unix))] mod unix_bus_tests`: the real
-  AF_UNIX round-trip, ported 1:1 from all 6 tests in
-  `Tests/LaboLaboEngineTests/AgentStatusBusTests.swift` (a real POSIX
+- `src/hooks.rs`'s `#[cfg(all(test, any(unix, windows)))] mod
+  bus_round_trip_tests`: the real transport round-trip, ported 1:1 from all
+  6 tests in `Tests/LaboLaboEngineTests/AgentStatusBusTests.swift` (a real
   client connects and sends one payload per connection; `on_event`
-  fires/doesn't fire with the right `AgentStatusEvent`).
+  fires/doesn't fire with the right `AgentStatusEvent`). The test bodies
+  are transport-agnostic; per-OS helpers make the same assertions run
+  against the AF_UNIX transport on macOS/Linux and the Named Pipe
+  transport on Windows CI.
 - `tests/labolabo_hook_bin.rs`: one end-to-end test that spawns the actual
   compiled `labolabo-hook` binary (via Cargo's `CARGO_BIN_EXE_labolabo-hook`)
   with `LABOLABO_PANE` set and JSON piped to stdin, and asserts a real
@@ -743,3 +747,59 @@ job runs it on `ubuntu-latest` under the same `workflow_dispatch`-only
 policy. See `crates/labolabo-app/README.md`'s "Linux (wave 7a)" section for
 system dependencies and the verification caveats (built + headless-tested
 in CI; real-desktop GUI launch unverified).
+
+## Windows core wave (Named Pipe transports / tool locator / process kill)
+
+Implements the three Windows gaps this crate had carried as reserved
+chapters and cfg'd stubs, making `labolabo-core` (and the `labolabo` CLI
+bin in `labolabo-app`) fully functional on Windows — the groundwork for the
+app (gpui) Windows wave, which is separate future work.
+
+- **hooks Named Pipe transport** (`hooks::NamedPipeEventTransport`,
+  `#[cfg(windows)]`): docs/hooks-protocol.md §4.2, promoted from the v1
+  "Windows 代替（未実装）" bullet to a real spec by this wave. Byte-mode,
+  inbound-only pipe named `\\.\pipe\labolabo-<10hex>`
+  (`hook_settings::hook_pipe_name_from_uuid` — pure, compiled everywhere);
+  same "1 connection = 1 event, read to EOF" contract as AF_UNIX (the
+  client's close is thunked to EOF). `forward_hook` and the
+  `labolabo-hook` bin now forward on Windows too (`any(unix, windows)`).
+- **control Named Pipe transport** (`control::ControlServer` /
+  `send_control_request`, `#[cfg(windows)]`, same signatures as unix):
+  docs/control-protocol.md §9. Duplex **message-mode** pipe named
+  `\\.\pipe\labolabo-control-<10hex>`
+  (`control_protocol::control_pipe_name_from_uuid`) — Named Pipes have no
+  half-close, so the OS-preserved message boundary replaces the unix
+  "write then `shutdown(SHUT_WR)`" framing (1 connection = 1 request
+  message = 1 response message; same JSON, same exit codes). This makes
+  the `labolabo` control CLI build and run on Windows unchanged.
+- **Same-user ACL** (`windows_pipe_security`, crate-internal): both pipe
+  servers create their pipe with a protected DACL granting access only to
+  the current user's SID and SYSTEM — the Windows counterpart of
+  `chmod 0600` — and fail closed (refuse to bind) if it can't be built.
+- **`ToolLocator` on Windows**: the former `unimplemented!()` arm is now a
+  PATHEXT-aware `PATH` scan (no `where` subprocess — the search rule is
+  simple enough that shelling out buys nothing; no fixed candidates or
+  login-shell fallback either, see the module doc comment).
+- **`process` kill escalation on Windows**: `run_with_timeout`'s
+  terminate/kill pair now maps to `taskkill /PID` → `taskkill /F /PID`
+  (previously no-ops, which made the timeout path hang until the child
+  exited on its own), with `cmd /C` counterparts of the unix process
+  tests.
+
+Windows dependencies (all `[target.'cfg(windows)'.dependencies]`, none on
+unix builds): `interprocess` (sync Named Pipe layer; default features — no
+tokio/async, this crate stays runtime-free), `recvmsg` (message-receive
+buffer types the control transport's framing needs), `widestring` (SDDL
+string conversion), `windows-sys` (current-user SID lookup for the DACL).
+See `crates/labolabo-core/Cargo.toml` for the full selection rationale,
+including why `interprocess` was chosen over hand-rolled `windows-sys`
+transport code.
+
+Tests run for real on the `rust (windows-latest)` CI job: the 6 bus
+round-trip tests and 5 control round-trip tests (shared bodies with the
+unix runs, per-OS transport underneath), a Named Pipe end-to-end test of
+the compiled `labolabo-hook` binary, `cmd`-based `ToolLocator` and
+process-runner tests, and the `windows_pipe_security` SDDL tests. Local
+verification from macOS: `cargo check/clippy/build --target
+x86_64-pc-windows-gnu` (mingw-w64), including a full link of the
+`labolabo` CLI bin.
