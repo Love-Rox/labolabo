@@ -11,9 +11,15 @@
 //!    callback + `start`/`stop`), OS-independent. The calling thread for
 //!    the callback is implementation-defined -- see its doc comment.
 //! 2. [`UnixSocketEventTransport`] (`#[cfg(unix)]`): the AF_UNIX
-//!    (`SOCK_STREAM`) implementation used on macOS/Linux. A Windows
-//!    transport (Named Pipe, per docs/hooks-protocol.md §4) is future work
-//!    and has no stub here yet -- only this comment.
+//!    (`SOCK_STREAM`) implementation used on macOS/Linux.
+//!    [`NamedPipeEventTransport`] (`#[cfg(windows)]`): the Windows Named
+//!    Pipe implementation (docs/hooks-protocol.md §4.2) -- same "1
+//!    connection = 1 event, read to EOF" semantics over
+//!    `\\.\pipe\labolabo-<10hex>` (`hook_settings::
+//!    hook_pipe_name_from_uuid`). No Swift counterpart (the Swift app is
+//!    macOS-only); specified by the protocol document and kept observably
+//!    identical to the AF_UNIX transport -- the shared round-trip tests at
+//!    the bottom of this file run against both.
 //! 3. [`AgentStatusBus`]: composes a transport with `agent_event_parser` to
 //!    turn raw bytes into [`crate::AgentStatusEvent`]s. Unlike the Swift
 //!    version, this does **not** hop to a main-thread queue itself
@@ -22,12 +28,13 @@
 //!    via [`AgentStatusBus::set_on_event`] is invoked directly on whatever
 //!    thread the transport's `on_message` fires on. Marshaling to a UI
 //!    thread, if one exists, is the caller's responsibility.
-//! 4. [`forward_hook`] (`#[cfg(unix)]`): the pure-ish forwarder logic used
-//!    by the thin `labolabo-hook` bin (`src/bin/labolabo-hook.rs`) --
-//!    reads are already done by the caller (stdin bytes and the process
-//!    environment are passed in explicitly, not read from ambient global
-//!    state), so this function is deterministic given its inputs even
-//!    though it performs real socket I/O (connect + write + close).
+//! 4. [`forward_hook`] (`#[cfg(any(unix, windows))]`): the pure-ish
+//!    forwarder logic used by the thin `labolabo-hook` bin
+//!    (`src/bin/labolabo-hook.rs`) -- reads are already done by the caller
+//!    (stdin bytes and the process environment are passed in explicitly,
+//!    not read from ambient global state), so this function is
+//!    deterministic given its inputs even though it performs real socket/
+//!    pipe I/O (connect + write + close).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -319,6 +326,187 @@ mod unix_transport {
 #[cfg(unix)]
 pub use unix_transport::UnixSocketEventTransport;
 
+#[cfg(windows)]
+mod windows_transport {
+    use super::{AgentEventTransport, OnMessage};
+    use crate::AgentStatusBus;
+    use interprocess::os::windows::named_pipe::{
+        pipe_mode, PipeListenerOptions, PipeMode, RecvPipeStream, SendPipeStream,
+    };
+    use interprocess::ConnectWaitMode;
+    use std::io::Read;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+    use std::time::Duration;
+
+    impl AgentStatusBus {
+        /// Creates a bus using the default Named Pipe transport -- the
+        /// Windows counterpart of the unix `AgentStatusBus::new` above.
+        /// `pipe_name` is a full `\\.\pipe\...` name
+        /// (`hook_settings::hook_pipe_name_from_uuid`), carried in the same
+        /// `socket_path` slot the AF_UNIX path uses (docs/hooks-protocol.md
+        /// §4.2: the pipe name *is* the socketPath value on Windows).
+        pub fn new(pipe_name: impl Into<String>) -> Self {
+            let pipe_name = pipe_name.into();
+            let transport = NamedPipeEventTransport::new(pipe_name.clone());
+            Self::with_transport(pipe_name, Box::new(transport))
+        }
+    }
+
+    /// Per-session Windows Named Pipe server (docs/hooks-protocol.md §4.2):
+    /// the same "1 connection = 1 event, read to EOF" contract as
+    /// `UnixSocketEventTransport`, over a byte-mode, inbound-only
+    /// (`PIPE_ACCESS_INBOUND`) pipe. The client's `CloseHandle` after
+    /// writing the whole payload is the EOF: `interprocess` translates the
+    /// resulting `ERROR_BROKEN_PIPE` into `Ok(0)`, so `read_to_end`
+    /// terminates exactly like the AF_UNIX read loop does.
+    ///
+    /// Differences from the unix transport, all forced by the platform and
+    /// spelled out in docs/hooks-protocol.md §4.2:
+    /// - Access control is a DACL (current user + SYSTEM, see
+    ///   `crate::windows_pipe_security`) instead of `0600`/`0700` file
+    ///   modes, applied at creation instead of post-bind `chmod`. If the
+    ///   descriptor can't be built the server fails closed (never binds).
+    /// - No stale-file cleanup: a pipe name disappears with its last handle,
+    ///   so there is nothing to unlink before bind or after stop.
+    /// - `stop()` can't `shutdown(2)` a listening fd to unblock `accept()`
+    ///   (`ConnectNamedPipe` has no such out-of-band interrupt); it instead
+    ///   clears `running` and wakes the accept loop with a throwaway
+    ///   self-connection, which the loop discards after re-checking
+    ///   `running`.
+    pub struct NamedPipeEventTransport {
+        pipe_name: String,
+        inner: Arc<Inner>,
+    }
+
+    struct Inner {
+        pipe_name: String,
+        on_message: Mutex<Option<OnMessage>>,
+        running: AtomicBool,
+        started_once: AtomicBool,
+    }
+
+    impl NamedPipeEventTransport {
+        pub fn new(pipe_name: impl Into<String>) -> Self {
+            let pipe_name = pipe_name.into();
+            Self {
+                pipe_name: pipe_name.clone(),
+                inner: Arc::new(Inner {
+                    pipe_name,
+                    on_message: Mutex::new(None),
+                    running: AtomicBool::new(false),
+                    started_once: AtomicBool::new(false),
+                }),
+            }
+        }
+
+        pub fn pipe_name(&self) -> &str {
+            &self.pipe_name
+        }
+    }
+
+    impl AgentEventTransport for NamedPipeEventTransport {
+        fn set_on_message(&mut self, callback: OnMessage) {
+            *self.inner.on_message.lock().unwrap() = Some(callback);
+        }
+
+        fn start(&mut self) {
+            // Once per instance, like the unix transport's `started_once`
+            // guard (no restart after `stop`).
+            if self.inner.started_once.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            let inner = Arc::clone(&self.inner);
+            // Dedicated thread for the blocking accept/read loop -- same
+            // reasoning as the unix transport (one parked thread per
+            // session for the process lifetime).
+            let _ = thread::Builder::new()
+                .name("labolabo.agent.statusbus".to_string())
+                .spawn(move || run_server(&inner));
+        }
+
+        fn stop(&mut self) {
+            self.inner.running.store(false, Ordering::SeqCst);
+            // Wake a blocked `accept()` (`ConnectNamedPipe`) with a
+            // throwaway client connection; the loop re-checks `running`
+            // right after accepting and exits without dispatching it. The
+            // bounded wait keeps `stop()` from hanging if the server thread
+            // never bound (bind failure / not yet scheduled) -- in that
+            // case the connect fails fast or times out and there is nothing
+            // to wake anyway.
+            let _ = SendPipeStream::<pipe_mode::Bytes>::connect_by_path_with_wait_mode(
+                self.pipe_name.as_str(),
+                ConnectWaitMode::Timeout(Duration::from_millis(500)),
+            );
+        }
+    }
+
+    fn run_server(inner: &Arc<Inner>) {
+        // Fail closed if the same-user DACL can't be built -- see
+        // `crate::windows_pipe_security`'s module doc comment.
+        let Ok(descriptor) = crate::windows_pipe_security::same_user_security_descriptor() else {
+            return;
+        };
+        // Inbound-only (server receives, clients send), byte mode: the wire
+        // is "all bytes until EOF", same as the AF_UNIX transport. Binding
+        // errors end the server silently, mirroring the unix `run_server`'s
+        // `Err(_) => return` on bind.
+        let listener = match PipeListenerOptions::new()
+            .path(inner.pipe_name.as_str())
+            .mode(PipeMode::Bytes)
+            .security_descriptor(Some(descriptor))
+            .create_recv_only::<pipe_mode::Bytes>()
+        {
+            Ok(listener) => listener,
+            Err(_) => return,
+        };
+
+        inner.running.store(true, Ordering::SeqCst);
+
+        while inner.running.load(Ordering::SeqCst) {
+            match listener.accept() {
+                Ok(stream) => {
+                    // `stop()`'s wake-up connection lands here: re-check
+                    // `running` before treating the connection as an event
+                    // source.
+                    if !inner.running.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    handle_client(inner, stream);
+                }
+                Err(_) => {
+                    if inner.running.load(Ordering::SeqCst) {
+                        continue;
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+        // The listener (and with it the last pipe instance) drops here; the
+        // pipe name vanishes with it -- no file to remove, unlike unix.
+    }
+
+    fn handle_client(inner: &Inner, mut stream: RecvPipeStream<pipe_mode::Bytes>) {
+        let mut data = Vec::new();
+        // Same "read to EOF, keep whatever arrived" contract as the unix
+        // transport: `interprocess` thunks the client's close
+        // (ERROR_BROKEN_PIPE / ERROR_PIPE_NOT_CONNECTED) to `Ok(0)`, so
+        // `read_to_end` terminates on it like a socket EOF.
+        let _ = stream.read_to_end(&mut data);
+        if data.is_empty() {
+            return;
+        }
+        if let Some(cb) = inner.on_message.lock().unwrap().as_ref() {
+            cb(data);
+        }
+    }
+}
+
+#[cfg(windows)]
+pub use windows_transport::NamedPipeEventTransport;
+
 /// Sends one hook event to the LaboLabo instance listening on
 /// `socket_path`: annotates `stdin_bytes` with `labolabo_pane_id`/
 /// `labolabo_task_id` (from `env["LABOLABO_PANE"]`/`env["LABOLABO_TASK"]`)
@@ -329,6 +517,13 @@ pub use unix_transport::UnixSocketEventTransport;
 /// this function's result, matching Swift's "hook の失敗で Claude を止めない"
 /// contract from docs/hooks-protocol.md §3).
 ///
+/// On unix `socket_path` is the AF_UNIX socket path; on Windows it is the
+/// full `\\.\pipe\...` pipe name (docs/hooks-protocol.md §4.2) -- same
+/// annotate/connect/write/close sequence either way, with the Windows arm
+/// adding an explicit flush so the payload is known-delivered before the
+/// handle closes (Named Pipes discard unflushed bytes on `CloseHandle`,
+/// unlike an AF_UNIX close, which delivers buffered bytes then EOF).
+///
 /// `env` is taken as an explicit map (not read from the real process
 /// environment) so this function is deterministic given its inputs and
 /// testable without mutating global process state.
@@ -337,19 +532,41 @@ pub use unix_transport::UnixSocketEventTransport;
 /// work/task model) has no Swift counterpart -- `LABOLABO_TASK` is
 /// Rust-only (`plans/012` §1's Task model), so this annotation step is new
 /// here rather than a port of `HookForwarder.swift`.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub fn forward_hook(
     socket_path: &str,
     stdin_bytes: &[u8],
     env: &HashMap<String, String>,
 ) -> std::io::Result<()> {
+    let payload = annotate_ids(stdin_bytes, env);
+    forward_payload(socket_path, &payload)
+}
+
+/// The transport half of [`forward_hook`]: connect, write, close.
+#[cfg(unix)]
+fn forward_payload(socket_path: &str, payload: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::net::UnixStream;
 
-    let payload = annotate_ids(stdin_bytes, env);
     let mut stream = UnixStream::connect(socket_path)?;
-    stream.write_all(&payload)?;
+    stream.write_all(payload)?;
     // `stream` closes on drop at the end of this function (write -> close).
+    Ok(())
+}
+
+/// The transport half of [`forward_hook`], Windows arm: send-only client
+/// end of the inbound byte-mode pipe. The explicit `flush`
+/// (`FlushFileBuffers`) before the drop-close guarantees the server has
+/// read every byte before the handle goes away -- see [`forward_hook`]'s
+/// doc comment.
+#[cfg(windows)]
+fn forward_payload(pipe_name: &str, payload: &[u8]) -> std::io::Result<()> {
+    use interprocess::os::windows::named_pipe::{pipe_mode, SendPipeStream};
+    use std::io::Write;
+
+    let mut stream = SendPipeStream::<pipe_mode::Bytes>::connect_by_path(pipe_name)?;
+    stream.write_all(payload)?;
+    stream.flush()?;
     Ok(())
 }
 
@@ -367,13 +584,13 @@ pub fn forward_hook(
 /// with the task id (which has no Swift counterpart -- see [`forward_hook`]'s
 /// doc comment).
 ///
-/// Its only production caller ([`forward_hook`]) is `#[cfg(unix)]`, but the
-/// pure-function tests in `mod tests` below exercise it directly on every
-/// platform (no socket I/O needed) -- so it stays compiled everywhere, and
-/// the `dead_code` lint that would otherwise fire in a non-test, non-unix
-/// build (no caller reachable there) is silenced explicitly rather than by
-/// accident.
-#[cfg_attr(not(unix), allow(dead_code))]
+/// Its only production caller ([`forward_hook`]) is `#[cfg(any(unix,
+/// windows))]`, but the pure-function tests in `mod tests` below exercise
+/// it directly on every platform (no socket I/O needed) -- so it stays
+/// compiled everywhere, and the `dead_code` lint that would otherwise fire
+/// in a non-test build for any *other* target (no caller reachable there)
+/// is silenced explicitly rather than by accident.
+#[cfg_attr(not(any(unix, windows)), allow(dead_code))]
 fn annotate_ids(stdin_bytes: &[u8], env: &HashMap<String, String>) -> Vec<u8> {
     let pane_id = env.get("LABOLABO_PANE").filter(|v| !v.is_empty());
     let task_id = env.get("LABOLABO_TASK").filter(|v| !v.is_empty());
@@ -582,29 +799,35 @@ mod tests {
     }
 }
 
-/// Real AF_UNIX socket round-trip tests, ported 1:1 from
+/// Real transport round-trip tests, ported 1:1 from
 /// `Tests/LaboLaboEngineTests/AgentStatusBusTests.swift` (6 tests): a real
-/// POSIX client connects to `AgentStatusBus`'s socket and sends one payload
+/// client connects to `AgentStatusBus`'s socket/pipe and sends one payload
 /// per connection (mirrors the forwarder's "1 connection = 1 event"
 /// contract), and `on_event` is asserted to fire (or not fire) with the
 /// right `AgentStatusEvent`.
-#[cfg(all(test, unix))]
-mod unix_bus_tests {
+///
+/// The test bodies are transport-agnostic; only the two helpers below
+/// (`temp_socket_path`/`send_payload`) are cfg'd per platform, so the same
+/// six assertions exercise `UnixSocketEventTransport` on macOS/Linux and
+/// `NamedPipeEventTransport` on Windows (where they run on the `rust
+/// (windows-latest)` CI job).
+#[cfg(all(test, any(unix, windows)))]
+mod bus_round_trip_tests {
     use super::*;
     use crate::AgentStatus;
-    use std::fs;
-    use std::io::Write;
-    use std::os::unix::net::UnixStream;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::mpsc;
     use std::thread;
     use std::time::Duration;
 
-    /// Short, likely-unique socket path under the OS temp dir -- mirrors the
-    /// Swift test's `UUID().uuidString.prefix(8)` reasoning: `sockaddr_un`'s
-    /// `sun_path` is only 104 (Darwin) / 108 (Linux) bytes, so the file name
-    /// must stay short.
+    /// Short, likely-unique transport address.
+    ///
+    /// unix: a socket path under the OS temp dir -- short because
+    /// `sockaddr_un`'s `sun_path` is only 104 (Darwin) / 108 (Linux) bytes
+    /// (mirrors the Swift test's `UUID().uuidString.prefix(8)` reasoning).
+    /// Windows: a `\\.\pipe\...` name (pipe names are not filesystem paths;
+    /// the temp dir is irrelevant there).
     fn temp_socket_path() -> PathBuf {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -613,14 +836,34 @@ mod unix_bus_tests {
             .unwrap()
             .as_nanos();
         let short = format!("{:x}{:x}", nanos as u32, n);
-        std::env::temp_dir().join(format!("lb-{short}.sock"))
+        #[cfg(unix)]
+        {
+            std::env::temp_dir().join(format!("lb-{short}.sock"))
+        }
+        #[cfg(windows)]
+        {
+            PathBuf::from(format!(r"\\.\pipe\lb-test-{short}"))
+        }
     }
 
-    /// Connects an AF_UNIX/SOCK_STREAM client and sends `payload`, then
-    /// half-closes the write side so the server's read loop sees EOF.
-    /// Retries the connect (the accept-loop thread needs a moment to bind)
-    /// like the Swift test's `sendPayload`.
+    /// Best-effort cleanup after a test -- meaningful only on unix (the
+    /// socket file); a Windows pipe name vanishes with its last handle.
+    fn cleanup(path: &std::path::Path) {
+        #[cfg(unix)]
+        let _ = std::fs::remove_file(path);
+        #[cfg(windows)]
+        let _ = path;
+    }
+
+    /// Connects a client and sends `payload`, ending the transmission the
+    /// way the real forwarder does (unix: half-close of the write side;
+    /// Windows: flush + close) so the server's read loop sees EOF. Retries
+    /// the connect (the accept-loop thread needs a moment to bind) like the
+    /// Swift test's `sendPayload`.
+    #[cfg(unix)]
     fn send_payload(path: &std::path::Path, payload: &[u8]) -> bool {
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
         for _ in 0..150 {
             match UnixStream::connect(path) {
                 Ok(mut stream) => {
@@ -634,8 +877,27 @@ mod unix_bus_tests {
         false
     }
 
-    /// Starts a bus on a fresh temp socket, sends `payload`, and waits (up
-    /// to 3s) for `on_event` to fire.
+    #[cfg(windows)]
+    fn send_payload(path: &std::path::Path, payload: &[u8]) -> bool {
+        use interprocess::os::windows::named_pipe::{pipe_mode, SendPipeStream};
+        use std::io::Write;
+        for _ in 0..150 {
+            match SendPipeStream::<pipe_mode::Bytes>::connect_by_path(
+                path.to_str().expect("utf8 pipe name"),
+            ) {
+                Ok(mut stream) => {
+                    let ok = payload.is_empty()
+                        || (stream.write_all(payload).is_ok() && stream.flush().is_ok());
+                    return ok;
+                }
+                Err(_) => thread::sleep(Duration::from_millis(20)),
+            }
+        }
+        false
+    }
+
+    /// Starts a bus on a fresh temp socket/pipe, sends `payload`, and waits
+    /// (up to 3s) for `on_event` to fire.
     fn expect_event(payload: &[u8]) -> Option<AgentStatusEvent> {
         let path = temp_socket_path();
         let mut bus = AgentStatusBus::new(path.to_str().expect("utf8 path"));
@@ -652,7 +914,7 @@ mod unix_bus_tests {
         let event = rx.recv_timeout(Duration::from_secs(3)).ok();
 
         bus.stop();
-        let _ = fs::remove_file(&path);
+        cleanup(&path);
         event
     }
 
@@ -674,7 +936,7 @@ mod unix_bus_tests {
         let result = rx.recv_timeout(Duration::from_secs(1));
 
         bus.stop();
-        let _ = fs::remove_file(&path);
+        cleanup(&path);
         assert!(
             result.is_err(),
             "onEvent should not have fired, but got {result:?}"

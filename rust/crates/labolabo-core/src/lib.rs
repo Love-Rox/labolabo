@@ -147,8 +147,12 @@ pub use tool_locator::{ToolLocating, ToolLocator};
 
 // Wave 4b (hooks bus + forwarder). Appended at the tail, same reasoning as
 // the wave 4a block above.
+#[cfg(any(unix, windows))]
+pub use hooks::forward_hook;
+#[cfg(windows)]
+pub use hooks::NamedPipeEventTransport;
 #[cfg(unix)]
-pub use hooks::{forward_hook, UnixSocketEventTransport};
+pub use hooks::UnixSocketEventTransport;
 pub use hooks::{AgentEventTransport, AgentStatusBus, OnEvent, OnMessage};
 
 // Wave 4c (session persistence). Appended at the end of this file rather
@@ -199,8 +203,8 @@ pub mod branch_naming;
 pub mod hook_settings;
 
 pub use hook_settings::{
-    claude_resume_command, hook_command, merge_hooks, quote_dropped_paths, shell_quote,
-    socket_path_from_uuid, MergedSettings, HOOK_EVENTS,
+    claude_resume_command, hook_command, hook_pipe_name_from_uuid, merge_hooks,
+    quote_dropped_paths, shell_quote, socket_path_from_uuid, MergedSettings, HOOK_EVENTS,
 };
 
 // `store::agent_bindings`: the Task-level (docs/hooks-protocol.md §6(a))
@@ -227,21 +231,23 @@ pub use store::{import_from_swift, ImportOutcome};
 // reasoning as every other wave block in this file.
 //
 // - `control_protocol`: pure request/response (de)serialization, the
-//   control socket's path convention, and the `--task current`/ambient-
-//   context resolution rules -- the `hook_settings` of this pair.
-// - `control`: the AF_UNIX request/response transport (`ControlServer` +
-//   `send_control_request`) -- the `hooks` of this pair. `#[cfg(unix)]`
-//   like `hooks::UnixSocketEventTransport`; a Windows Named Pipe transport
-//   is future work (docs/control-protocol.md §9).
+//   control socket/pipe naming conventions, and the `--task current`/
+//   ambient-context resolution rules -- the `hook_settings` of this pair.
+// - `control`: the request/response transport (`ControlServer` +
+//   `send_control_request`) -- the `hooks` of this pair. AF_UNIX on unix
+//   (docs/control-protocol.md §3), a message-mode Named Pipe on Windows
+//   (§9, added by the Windows core wave) -- identical surface on both, so
+//   the re-export below covers `any(unix, windows)`.
 pub mod control;
 pub mod control_protocol;
 
 pub use control::ControlHandler;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub use control::{send_control_request, ControlServer};
 pub use control_protocol::{
-    control_socket_path_from_uuid, parse_request, parse_response, resolve_socket_path,
-    resolve_target_task, resolve_task_flag, ControlCommand, ControlRequest, ControlResponse,
+    control_pipe_name_from_uuid, control_socket_path_from_uuid, parse_request, parse_response,
+    resolve_socket_path, resolve_target_task, resolve_task_flag, ControlCommand, ControlRequest,
+    ControlResponse,
 };
 
 // Drag & drop wave (`plans/012-task-model-and-control-cli.md` §3): pure
@@ -264,3 +270,13 @@ pub use task_order::reorder_task_ids;
 pub mod file_watcher;
 
 pub use file_watcher::FileWatcher;
+
+// Windows core wave (feature/rust-core-windows): the same-user DACL shared
+// by both Named Pipe servers (`hooks::NamedPipeEventTransport` and
+// `control::ControlServer`) -- the Windows counterpart of the unix
+// transports' `chmod 0600` (docs/hooks-protocol.md §4.2/§8,
+// docs/control-protocol.md §9). Crate-internal: consumers configure
+// nothing here, the transports apply it themselves. Appended at the tail,
+// same reasoning as every other wave block in this file.
+#[cfg(windows)]
+mod windows_pipe_security;

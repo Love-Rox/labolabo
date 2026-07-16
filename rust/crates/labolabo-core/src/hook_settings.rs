@@ -103,7 +103,7 @@ pub fn claude_resume_command(resume_id: Option<&str>) -> String {
     }
 }
 
-/// The per-session AF_UNIX socket path (docs/hooks-protocol.md §4):
+/// The per-session AF_UNIX socket path (docs/hooks-protocol.md §4.1):
 /// `<base_dir>/<first 10 lowercase hex chars of uuid, hyphens stripped>.sock`.
 /// `base_dir`'s trailing slash (if any) is stripped before joining, so
 /// `"/tmp/labolabo"` and `"/tmp/labolabo/"` produce the same path.
@@ -117,6 +117,25 @@ pub fn socket_path_from_uuid(uuid: &str, base_dir: &str) -> String {
         .take(10)
         .collect();
     format!("{}/{short}.sock", base_dir.trim_end_matches('/'))
+}
+
+/// The per-session Windows Named Pipe name (docs/hooks-protocol.md §4.2):
+/// `\\.\pipe\labolabo-<first 10 lowercase hex chars of uuid, hyphens
+/// stripped>` -- the Windows counterpart of [`socket_path_from_uuid`], same
+/// 10-hex session token, no base directory (pipe names live in the flat
+/// `\\.\pipe\` namespace, not the filesystem). Pure string logic, so it
+/// compiles and is unit-tested on every platform; only the Windows
+/// transports (`hooks::NamedPipeEventTransport`) consume it in production.
+pub fn hook_pipe_name_from_uuid(uuid: &str) -> String {
+    let short: String = uuid
+        .chars()
+        .filter(|c| *c != '-')
+        .collect::<String>()
+        .to_lowercase()
+        .chars()
+        .take(10)
+        .collect();
+    format!(r"\\.\pipe\labolabo-{short}")
 }
 
 /// Result of [`merge_hooks`]: the new file content, and whether `existing`
@@ -298,6 +317,35 @@ mod tests {
             socket_path_from_uuid("abcdef01-2345-6789-abcd-ef0123456789", "/tmp/labolabo/"),
             "/tmp/labolabo/abcdef0123.sock"
         );
+    }
+
+    // MARK: - hook_pipe_name_from_uuid
+
+    #[test]
+    fn hook_pipe_name_from_uuid_strips_hyphens_lowercases_and_truncates_to_10() {
+        assert_eq!(
+            hook_pipe_name_from_uuid("ABCDEF01-2345-6789-ABCD-EF0123456789"),
+            r"\\.\pipe\labolabo-abcdef0123"
+        );
+    }
+
+    #[test]
+    fn hook_pipe_name_uses_the_same_short_token_as_the_unix_socket_path() {
+        // The 10-hex session token must be derived identically on both
+        // platforms (docs/hooks-protocol.md §4: one derivation rule, two
+        // channel namespaces).
+        let uuid = "ABCDEF01-2345-6789-ABCD-EF0123456789";
+        let socket = socket_path_from_uuid(uuid, "/tmp/labolabo");
+        let pipe = hook_pipe_name_from_uuid(uuid);
+        let socket_token = socket
+            .rsplit('/')
+            .next()
+            .unwrap()
+            .strip_suffix(".sock")
+            .unwrap()
+            .to_string();
+        let pipe_token = pipe.rsplit('-').next().unwrap().to_string();
+        assert_eq!(socket_token, pipe_token);
     }
 
     // MARK: - merge_hooks
