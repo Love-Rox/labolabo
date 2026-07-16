@@ -69,6 +69,8 @@ sidebar:
   archived_section_title: "Archived (%{count})"
   restore: "Restore"
   conflict_tooltip: "%{count} conflicting file(s): %{paths}"
+  missing_task_tooltip: "Directory not found: %{path}"
+  missing_tasks_banner: "%{count} task(s) have a missing directory"
 
 task:
   menu:
@@ -80,6 +82,7 @@ task:
       title_worktree: "Delete this worktree?"
       title_attached: "Remove “%{title}” from the list?"
       worktree_delete_intro: "This deletes the worktree for “%{title}”:"
+      worktree_delete_missing_intro: "This directory no longer exists. Its registration will be removed:"
       worktree_delete_warning: "Won't delete if there are uncommitted changes (never forced)."
       delete_branch_checkbox: "Also delete branch %{branch} (only if merged)"
       attached_delete_body: "Removes it from the list. Files in the directory are left untouched."
@@ -147,6 +150,10 @@ app:
   loading_task: "Loading task…"
   no_task_selected: "No task selected. Use the + icons in the top-left to start with a folder or worktree."
   swift_import_db_not_found: "Couldn't find the Swift app's database."
+  missing_task:
+    title: "Working directory not found"
+    recheck: "Recheck"
+    delete: "Delete this task…"
 
 common:
   close: "Close"

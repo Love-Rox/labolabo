@@ -80,6 +80,7 @@ use crate::ide_open;
 use crate::ime;
 use crate::keys::keystroke_to_bytes;
 use crate::menus;
+use crate::missing_dir;
 use crate::motion::DotAnimState;
 use crate::mouse_report::{self, MouseAction, MouseButtonKind, MouseMods};
 use crate::new_task;
@@ -275,6 +276,19 @@ pub struct LaboLaboApp {
     /// 既に最新/確認無効。`dismiss_update_banner` が閉じる（と同時に
     /// "このバージョンを通知しない" を appState へ永続化する）。
     update_banner: Option<ReleaseInfo>,
+    /// 作業ディレクトリが見つからない（`crate::missing_dir::is_missing`）と
+    /// 判定済みの `Task::id` の集合（第8波c）。**DB には一切書かない** --
+    /// 外付け/ネットワークボリュームのアンマウント中など、いずれ元に戻る
+    /// 一時的な状態でしかありえないので、永続化して次回起動時まで引きずる
+    /// ことはしない。起動時（`Self::new`）とタスク選択時（`select_task`）
+    /// に検出し、「再確認」（`recheck_task_missing`）で更新される。
+    missing_task_ids: HashSet<String>,
+    /// サイドバー上部の「N 件の作業のディレクトリが見つかりません」バナー
+    /// (第8波c §5) を閉じたか -- `archived_expanded` と同じ、純粋な
+    /// セッション内 UI 状態（非永続）。閉じた後に新しく missing が増えても
+    /// 再表示はしない（明示的に閉じた操作を尊重する -- 個々の行の減光/
+    /// 警告アイコンはバナーと独立に常に出るので、情報が消えるわけではない）。
+    missing_banner_dismissed: bool,
 }
 
 /// The focused pane's in-progress IME composition, tracked by
@@ -478,13 +492,34 @@ impl LaboLaboApp {
             pending_window_bounds: None,
             update_banner: None,
             import_banner,
+            missing_task_ids: HashSet::new(),
+            missing_banner_dismissed: false,
         };
 
         if let Some(id) = selected_task_id {
-            let (cols, rows) = this.viewport_grid_size(window);
-            this.ensure_workspace_loaded(&id, cols, rows, cx);
-            this.sync_git_pane_activation(&id, cx);
+            // 第8波c: 復元直後にいきなり shell を spawn する前に、選択中
+            // タスクの作業ディレクトリだけは同期チェックする -- ここで
+            // missing と分かれば `ensure_workspace_loaded` 自体を呼ばない
+            // （存在しない cwd への spawn 失敗経路を踏まない、が設計方針）。
+            // 残りの（未選択の）タスク群のバルクチェックは下の
+            // `refresh_missing_task_ids` がバックグラウンドで行う --
+            // ここで全タスク分を同期チェックすると、外付け/ネットワーク
+            // ボリュームがアンマウント中のときウィンドウの初期表示自体が
+            // 止まりかねない（`missing_dir` のモジュール doc コメント参照）。
+            let missing = this
+                .tasks
+                .iter()
+                .find(|t| t.id == id)
+                .is_some_and(missing_dir::is_missing);
+            if missing {
+                this.missing_task_ids.insert(id.clone());
+            } else {
+                let (cols, rows) = this.viewport_grid_size(window);
+                this.ensure_workspace_loaded(&id, cols, rows, cx);
+                this.sync_git_pane_activation(&id, cx);
+            }
         }
+        this.refresh_missing_task_ids(cx);
 
         this.dev_force_running_if_requested(cx);
 
@@ -586,6 +621,31 @@ impl LaboLaboApp {
         );
     }
 
+    /// Background scan (第8波c) of every *active* Task's working directory,
+    /// replacing `missing_task_ids` wholesale once it completes -- the
+    /// sidebar's dimmed-row/warning-icon treatment and the startup banner's
+    /// source of truth. Runs off the UI thread (`cx.background_spawn`) so an
+    /// unresponsive network mount among many Tasks can't stall the window
+    /// from appearing -- see `crate::missing_dir`'s module doc comment for
+    /// why this is the one call site that can't just check synchronously.
+    /// Called once at startup (`Self::new`); nothing re-triggers a full
+    /// bulk rescan later (`select_task`/`recheck_task_missing` update
+    /// individual entries in place instead, which is enough for the cases
+    /// this wave scopes -- see the task brief's 「起動時」/「選択時」split).
+    fn refresh_missing_task_ids(&mut self, cx: &mut Context<Self>) {
+        let snapshot: Vec<Task> = self.tasks.clone();
+        cx.spawn(async move |this, cx| {
+            let missing = cx
+                .background_spawn(async move { missing_dir::missing_ids(&snapshot) })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                app.missing_task_ids = missing;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     // MARK: - read-only accessors (for `sidebar::render`)
 
     pub(crate) fn tasks(&self) -> &[Task] {
@@ -611,6 +671,104 @@ impl LaboLaboApp {
         if self.import_banner.take().is_some() {
             cx.notify();
         }
+    }
+
+    // MARK: - 見つからないワークツリー (第8波c)
+
+    /// `task_id`の作業ディレクトリが最後の確認時点で見つからなかったか
+    /// (`crate::missing_dir`)。サイドバー行の減光/警告アイコン
+    /// (`crate::sidebar::render`) とワークスペース領域のプレースホルダ
+    /// (`Render` 実装の `workspace_el`) の両方がこれを見る。
+    pub(crate) fn is_task_missing(&self, task_id: &str) -> bool {
+        self.missing_task_ids.contains(task_id)
+    }
+
+    /// 現在 missing と判定済みのタスク数 -- サイドバー上部バナーの文言に使う。
+    pub(crate) fn missing_task_count(&self) -> usize {
+        self.missing_task_ids.len()
+    }
+
+    pub(crate) fn missing_banner_dismissed(&self) -> bool {
+        self.missing_banner_dismissed
+    }
+
+    /// サイドバー上部の「N 件の作業のディレクトリが見つかりません」バナーの
+    /// "×"。このセッション中は再表示しない（`missing_banner_dismissed`
+    /// フィールドの doc コメント参照）。
+    pub(crate) fn dismiss_missing_tasks_banner(&mut self, cx: &mut Context<Self>) {
+        if !self.missing_banner_dismissed {
+            self.missing_banner_dismissed = true;
+            cx.notify();
+        }
+    }
+
+    /// バナーのクリック（"×" 以外の本文）: サイドバーの並び順で最初に見つかる
+    /// missing タスクを選択する。1件も無ければ何もしない（バナー自体が
+    /// `missing_task_count() == 0` のとき描画されないので、通常は起きない
+    /// が呼び出し順の変更に対する安全弁として無視するだけにしている）。
+    pub(crate) fn jump_to_first_missing_task(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(task_id) = self
+            .tasks
+            .iter()
+            .find(|t| self.missing_task_ids.contains(&t.id))
+            .map(|t| t.id.clone())
+        else {
+            return;
+        };
+        self.select_task(task_id, window, cx);
+    }
+
+    /// missing プレースホルダの「再確認」: `task_id` の作業ディレクトリを
+    /// 同期で再チェックする（マウント復帰待ちのケース想定 -- 単発のユーザー
+    /// 操作なので `refresh_missing_task_ids` のようにバックグラウンドへ
+    /// 逃がす必要はない、`crate::missing_dir` のモジュール doc コメント
+    /// 参照）。見つかるようになっていれば `missing_task_ids` から外して
+    /// workspace を張り（`select_task` を経由しない直接呼び出しなので
+    /// ここで明示的に行う）、依然として無ければ何もしない（プレースホルダの
+    /// 表示は `is_task_missing` を見て毎フレーム決まるので、ここでは状態
+    /// 更新だけで十分）。
+    pub(crate) fn recheck_task_missing(
+        &mut self,
+        task_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(task) = self.tasks.iter().find(|t| t.id == task_id) else {
+            return;
+        };
+        if missing_dir::is_missing(task) {
+            cx.notify();
+            return;
+        }
+        self.missing_task_ids.remove(task_id);
+        let (cols, rows) = self.viewport_grid_size(window);
+        self.ensure_workspace_loaded(task_id, cols, rows, cx);
+        self.sync_git_pane_activation(task_id, cx);
+        cx.notify();
+    }
+
+    /// missing プレースホルダの「この作業を削除…」: 行の「…」ボタン
+    /// (`open_task_menu`) を経由せず、確認モーダル（`TaskMenuPhase::
+    /// ConfirmDelete`）へ直接入る。ConfirmDelete フェーズの描画
+    /// (`task_menu::render_confirm_modal`) は中央固定の `centered_backdrop`
+    /// で `anchor` を使わない（`Menu` フェーズのポップオーバーだけが使う）
+    /// ので、ダミーの原点で構わない。
+    pub(crate) fn open_delete_confirm_for_missing_task(
+        &mut self,
+        task_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(task) = self.tasks.iter().find(|t| t.id == task_id) else {
+            return;
+        };
+        let mut state = TaskMenuState::new(task, point(px(0.0), px(0.0)), true);
+        state.request_delete();
+        self.task_menu = Some(state);
+        cx.notify();
     }
 
     /// The update-available banner (`crate::update_check`, RC release
@@ -741,7 +899,8 @@ impl LaboLaboApp {
         let Some(task) = self.tasks.iter().find(|t| t.id == task_id) else {
             return;
         };
-        self.task_menu = Some(TaskMenuState::new(task, anchor));
+        let missing = self.missing_task_ids.contains(task_id);
+        self.task_menu = Some(TaskMenuState::new(task, anchor, missing));
         cx.notify();
     }
 
@@ -826,6 +985,11 @@ impl LaboLaboApp {
         let ids: Vec<&str> = self.tasks.iter().map(|t| t.id.as_str()).collect();
         let next = task_lifecycle::next_selected_id(&ids, task_id);
         let task = self.tasks.remove(index);
+        // 一時状態なので、タスクが tasks から外れる（削除/アーカイブ）と
+        // 同時に確実に掃除する -- 残っていると、同じ id が二度と割り当た
+        // らない UUID とはいえ、`missing_task_count`（バナー文言）が実際に
+        // は無いタスクをカウントし続けてしまう。
+        self.missing_task_ids.remove(task_id);
         if was_selected {
             self.selected_task_id = None;
             match next {
@@ -912,7 +1076,7 @@ impl LaboLaboApp {
     /// （`crate::task_lifecycle`）。失敗（未コミット変更による拒否等）は
     /// 確認モーダル内に表示して中断し、DB からも消さない。
     pub(crate) fn execute_delete_task(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (task_id, worktree, delete_branch) = {
+        let (task_id, worktree, delete_branch, missing) = {
             let Some(menu) = &mut self.task_menu else {
                 return;
             };
@@ -923,6 +1087,7 @@ impl LaboLaboApp {
                 menu.task_id.clone(),
                 menu.worktree.clone(),
                 menu.delete_branch_requested(),
+                menu.missing,
             )
         };
         cx.notify();
@@ -958,13 +1123,29 @@ impl LaboLaboApp {
                 cx.spawn_in(window, async move |this, cx| {
                     let outcome = cx
                         .background_spawn(async move {
-                            task_lifecycle::remove_worktree_and_maybe_branch(
-                                &repo_root,
-                                &worktree_path,
-                                &branch,
-                                delete_branch,
-                                &locale,
-                            )
+                            // 第8波c: ディレクトリが見つからないと分かって
+                            // いる worktree は、通常の `git worktree
+                            // remove`（未コミット変更があれば拒否する安全
+                            // 弁つき -- だがディレクトリが無いので判定
+                            // しようがない）ではなく、prune ベースの経路を
+                            // 使う（`task_lifecycle`のモジュール doc
+                            // コメント参照）。
+                            if missing {
+                                task_lifecycle::prune_missing_worktree_and_maybe_branch(
+                                    &repo_root,
+                                    &branch,
+                                    delete_branch,
+                                    &locale,
+                                )
+                            } else {
+                                task_lifecycle::remove_worktree_and_maybe_branch(
+                                    &repo_root,
+                                    &worktree_path,
+                                    &branch,
+                                    delete_branch,
+                                    &locale,
+                                )
+                            }
                         })
                         .await;
                     let _ = this.update_in(cx, |app, window, cx| {
@@ -1446,8 +1627,24 @@ impl LaboLaboApp {
             return;
         }
         let previously_selected = self.selected_task_id.clone();
-        let (cols, rows) = self.viewport_grid_size(window);
-        self.ensure_workspace_loaded(&task_id, cols, rows, cx);
+
+        // 第8波c: 選択の直前に作業ディレクトリの存在を確認する -- missing
+        // なら shell を spawn しない（存在しない cwd への spawn 失敗経路を
+        // 踏まない、が設計方針）。同期チェックの妥当性は `crate::
+        // missing_dir` のモジュール doc コメント参照（このすぐ後に控える
+        // spawn 自体が同じパスの解決を必要とするので、追加の遅延は無い）。
+        let missing = self
+            .tasks
+            .iter()
+            .find(|t| t.id == task_id)
+            .is_some_and(missing_dir::is_missing);
+        if missing {
+            self.missing_task_ids.insert(task_id.clone());
+        } else {
+            self.missing_task_ids.remove(&task_id);
+            let (cols, rows) = self.viewport_grid_size(window);
+            self.ensure_workspace_loaded(&task_id, cols, rows, cx);
+        }
 
         // Only the *selected* Task's Git pane watches live -- see
         // `crate::git_pane`'s module doc comment ("非フォーカスタスクの監視
@@ -3738,7 +3935,17 @@ impl Render for LaboLaboApp {
         let sidebar_el = sidebar::render(self, breathing_enabled, cx);
 
         let workspace_el = if let Some(task_id) = self.selected_task_id.clone() {
-            if let Some(workspace) = self.workspaces.get(&task_id) {
+            if self.is_task_missing(&task_id) {
+                // 第8波c §3: missing タスクを選択したときは端末を spawn
+                // しない（`select_task`/起動時のガード側で既に
+                // `ensure_workspace_loaded` を呼んでいないので、
+                // `self.workspaces.get(&task_id)` は素通りして "loading"
+                // 側へ落ちてしまう -- ここで先にプレースホルダへ分岐する）。
+                match self.tasks.iter().find(|t| t.id == task_id) {
+                    Some(task) => render_missing_task_placeholder(task, cx),
+                    None => empty_state(t!("app.loading_task").to_string()),
+                }
+            } else if let Some(workspace) = self.workspaces.get(&task_id) {
                 let spec = self.spec.clone();
                 let focus_handle = self.focus_handle.clone();
                 let active_preedit = self.active_preedit.clone();
@@ -3862,6 +4069,60 @@ fn empty_state(message: impl Into<String>) -> gpui::AnyElement {
         .justify_center()
         .text_color(rgb(theme::text::SECONDARY))
         .child(message.into())
+        .into_any_element()
+}
+
+/// missing タスクを選択したときのワークスペース領域プレースホルダ
+/// (第8波c §3): `empty_state`同様テキストだけの表示ではなく、パスの提示と
+/// 2 個のボタン（「再確認」/「この作業を削除…」）を出す。ボタンの見た目は
+/// `task_menu::dialog_button`（確認モーダルのボタンと同じ chrome）を再利用
+/// している -- 独立した削除フローには見えず、あくまで同じ削除確認へ入る
+/// 入り口だと分かるように。
+fn render_missing_task_placeholder(task: &Task, cx: &mut Context<LaboLaboApp>) -> gpui::AnyElement {
+    let path = task.working_directory().to_string();
+    let recheck_task_id = task.id.clone();
+    let delete_task_id = task.id.clone();
+    div()
+        .flex_1()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap_2()
+        .child(
+            div()
+                .text_color(rgb(theme::text::PRIMARY))
+                .text_size(px(theme::font_size::LABEL))
+                .child(t!("app.missing_task.title").to_string()),
+        )
+        .child(
+            div()
+                .text_color(rgb(theme::text::MUTED))
+                .text_size(px(theme::font_size::CAPTION))
+                .child(path),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .gap_2()
+                .child(task_menu::dialog_button(
+                    "missing-task-recheck",
+                    t!("app.missing_task.recheck").to_string().into(),
+                    false,
+                    cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                        this.recheck_task_missing(&recheck_task_id, window, cx);
+                    }),
+                ))
+                .child(task_menu::dialog_button(
+                    "missing-task-delete",
+                    t!("app.missing_task.delete").to_string().into(),
+                    true,
+                    cx.listener(move |this, _: &MouseDownEvent, _window, cx| {
+                        this.open_delete_confirm_for_missing_task(&delete_task_id, cx);
+                    }),
+                )),
+        )
         .into_any_element()
 }
 

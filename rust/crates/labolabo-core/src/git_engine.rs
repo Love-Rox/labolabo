@@ -321,6 +321,23 @@ impl GitEngine {
         Ok(())
     }
 
+    /// `git worktree prune` -- garbage-collects `.git/worktrees/*`
+    /// administrative entries whose working directory no longer exists on
+    /// disk (deleted or moved outside git, e.g. by `rm -rf` or an
+    /// unmounted/ejected volume). Unlike [`Self::remove_worktree`], this
+    /// never touches a working directory itself (there may not be one left
+    /// to touch) -- it only reconciles `.git`'s own bookkeeping, which is
+    /// also what unblocks `git branch -d` for a branch still "checked out"
+    /// in a now-missing worktree (confirmed empirically: `branch -d` refuses
+    /// until `prune` runs, even though the directory is already gone).
+    /// `labolabo-app`'s `task_lifecycle::prune_missing_worktree_and_maybe_
+    /// branch` is this port's caller -- see that function's doc comment for
+    /// the "detected as missing" delete flow this exists for.
+    pub fn prune_worktrees(&self, repo: &Path) -> Result<(), GitRunError> {
+        git_runner::run(&["worktree".to_string(), "prune".to_string()], repo)?;
+        Ok(())
+    }
+
     /// `Sources/LaboLaboEngine/Git/CommitGraph.swift`'s
     /// `GitEngine.commitGraph(worktree:limit:)` extension: shells out to
     /// `git log` and hands the raw output to the already-ported pure
@@ -558,6 +575,74 @@ mod tests {
         engine.remove_worktree(&repo, &wt_path, true).unwrap();
         let after = engine.list_worktrees(&repo).unwrap();
         assert!(!after.iter().any(|w| w.short_branch() == Some("feature/x")));
+
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    /// Pins the empirical behavior `prune_worktrees`'s doc comment relies
+    /// on: with the worktree directory deleted out from under git (not via
+    /// `remove_worktree` -- a plain `rm -rf`, standing in for the user
+    /// deleting a worktree/external volume outside the app), `git branch
+    /// -d` refuses (the branch still looks "checked out" to git) until
+    /// `prune_worktrees` reconciles the stale `.git/worktrees` entry; only
+    /// then does the branch delete succeed and `list_worktrees` stop
+    /// listing the missing entry.
+    #[cfg(unix)]
+    #[test]
+    fn prune_worktrees_clears_a_stale_entry_and_unblocks_branch_delete() {
+        let repo = scratch_dir("labolabo-git-engine-prune");
+        init_repo_with_commit(&repo);
+
+        let engine = GitEngine::new();
+        let wt_path = repo.join(".worktrees/feature-gone");
+        engine
+            .add_worktree(&repo, &wt_path, "feature/gone", "main")
+            .unwrap();
+        std::fs::remove_dir_all(&wt_path).unwrap();
+
+        assert!(
+            engine
+                .list_worktrees(&repo)
+                .unwrap()
+                .iter()
+                .any(|w| w.short_branch() == Some("feature/gone")),
+            "the stale entry must still be registered before pruning"
+        );
+        assert!(
+            git_runner::run(
+                &[
+                    "branch".to_string(),
+                    "-d".to_string(),
+                    "feature/gone".to_string()
+                ],
+                &repo,
+            )
+            .is_err(),
+            "branch -d must be refused while the missing worktree is still registered"
+        );
+
+        engine.prune_worktrees(&repo).unwrap();
+
+        assert!(
+            !engine
+                .list_worktrees(&repo)
+                .unwrap()
+                .iter()
+                .any(|w| w.short_branch() == Some("feature/gone")),
+            "prune must remove the stale entry"
+        );
+        assert!(
+            git_runner::run(
+                &[
+                    "branch".to_string(),
+                    "-d".to_string(),
+                    "feature/gone".to_string()
+                ],
+                &repo,
+            )
+            .is_ok(),
+            "branch -d must succeed once the stale entry is pruned"
+        );
 
         let _ = std::fs::remove_dir_all(&repo);
     }

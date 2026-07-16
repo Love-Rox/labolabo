@@ -14,6 +14,19 @@
 //! attached 型タスクの「削除」は DB からの登録解除のみ（実ディレクトリには
 //! 一切触れない）なので、この module に対応する処理はない -- `app.rs` の
 //! `execute_delete_task` が直接 `TaskDatabase::delete_task` を呼ぶ。
+//!
+//! - [`prune_missing_worktree_and_maybe_branch`][]: worktree 型タスクの
+//!   ディレクトリがアプリの外側で既に消えている（`rm -rf`・外付け/
+//!   ネットワークボリュームの取り外し等）と検出された場合の削除本体
+//!   （第8波c「見つからないワークツリー」対応）。[`remove_worktree_and_
+//!   maybe_branch`] と違い `git worktree remove` は呼ばない -- 対象の
+//!   ディレクトリが無いので「未コミット変更があれば拒否」という安全弁が
+//!   そもそも働かない（拒否しようにも中身を見られない）。代わりに `git
+//!   worktree prune`（ベストエフォート -- 失敗しても続行）で `.git` 側の
+//!   宙ぶらりん登録を掃除してから、要求があればブランチ削除を試みる。常に
+//!   [`WorktreeRemoveOutcome::Removed`] を返す（`Refused` は「ディレクトリ
+//!   が実在するがコミットされていない変更がある」ときの安全弁であり、
+//!   ディレクトリが無いこの経路には該当しない）。
 
 use std::path::Path;
 
@@ -73,6 +86,30 @@ pub fn remove_worktree_and_maybe_branch(
         return WorktreeRemoveOutcome::Refused {
             message: remove_error_message(&err, locale),
         };
+    }
+    let branch_warning = if delete_branch {
+        delete_branch_gently(repo_root, branch, locale).err()
+    } else {
+        None
+    };
+    WorktreeRemoveOutcome::Removed { branch_warning }
+}
+
+/// [`remove_worktree_and_maybe_branch`]の「ディレクトリが既に無い」版 --
+/// このモジュールの doc コメント参照。ブロッキング -- 呼び出し側の契約は
+/// `remove_worktree_and_maybe_branch` と同じ（バックグラウンドスレッドから
+/// 呼ぶこと、`locale` は呼び出し時点の UI ロケールを明示的に渡すこと）。
+pub fn prune_missing_worktree_and_maybe_branch(
+    repo_root: &Path,
+    branch: &str,
+    delete_branch: bool,
+    locale: &str,
+) -> WorktreeRemoveOutcome {
+    let engine = GitEngine::new();
+    // ベストエフォート: 親リポジトリ自体が読めない等、prune 自体が失敗
+    // しても DB からの削除は続行する（module doc コメントの (a)(b) 順序）。
+    if let Err(err) = engine.prune_worktrees(repo_root) {
+        eprintln!("labolabo-app: git worktree prune failed for {repo_root:?}: {err}");
     }
     let branch_warning = if delete_branch {
         delete_branch_gently(repo_root, branch, locale).err()
@@ -328,6 +365,99 @@ mod tests {
         assert!(local_branches(&repo)
             .iter()
             .any(|b| b == "feature/unmerged"));
+
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    // MARK: - prune_missing_worktree_and_maybe_branch（一時リポジトリでの
+    // 統合テスト -- worktree 作成 → 実ディレクトリを rm → prune + 任意で
+    // ブランチ削除、の流れ。第8波c「見つからないワークツリー」対応）。
+
+    #[test]
+    fn missing_worktree_is_pruned_and_merged_branch_deleted_when_requested() {
+        let repo = scratch_dir("labolabo-task-lifecycle-missing-clean");
+        init_repo_with_commit(&repo);
+        let worktree = add_worktree(&repo, "feature/missing-clean");
+        std::fs::remove_dir_all(&worktree).unwrap();
+
+        let outcome =
+            prune_missing_worktree_and_maybe_branch(&repo, "feature/missing-clean", true, "ja");
+        assert_eq!(
+            outcome,
+            WorktreeRemoveOutcome::Removed {
+                branch_warning: None
+            }
+        );
+        assert!(!local_branches(&repo)
+            .iter()
+            .any(|b| b == "feature/missing-clean"));
+        assert!(!GitEngine::new()
+            .list_worktrees(&repo)
+            .unwrap()
+            .iter()
+            .any(|w| w.short_branch() == Some("feature/missing-clean")));
+
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn missing_worktree_removal_keeps_the_branch_when_not_requested() {
+        let repo = scratch_dir("labolabo-task-lifecycle-missing-keep-branch");
+        init_repo_with_commit(&repo);
+        let worktree = add_worktree(&repo, "feature/missing-keep");
+        std::fs::remove_dir_all(&worktree).unwrap();
+
+        let outcome =
+            prune_missing_worktree_and_maybe_branch(&repo, "feature/missing-keep", false, "ja");
+        assert_eq!(
+            outcome,
+            WorktreeRemoveOutcome::Removed {
+                branch_warning: None
+            }
+        );
+        assert!(local_branches(&repo)
+            .iter()
+            .any(|b| b == "feature/missing-keep"));
+
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    /// A missing worktree never produces `Refused` -- there is no directory
+    /// left to check for uncommitted changes, so (unlike `remove_worktree_
+    /// and_maybe_branch`'s dirty-worktree test) there is no failure mode to
+    /// exercise here beyond the branch-delete warning already covered by
+    /// `unmerged_branch_survives_with_a_warning_but_worktree_removal_
+    /// completes`'s present-directory counterpart above; this asserts the
+    /// missing-directory path produces the same kind of warning, not a hard
+    /// failure.
+    #[test]
+    fn missing_worktree_with_unmerged_branch_still_completes_with_a_warning() {
+        let repo = scratch_dir("labolabo-task-lifecycle-missing-unmerged");
+        init_repo_with_commit(&repo);
+        let worktree = add_worktree(&repo, "feature/missing-unmerged");
+        std::fs::write(worktree.join("b.txt"), "two\n").unwrap();
+        git(&["add", "."], &worktree);
+        git(
+            &["-c", "commit.gpgsign=false", "commit", "-m", "wip"],
+            &worktree,
+        );
+        std::fs::remove_dir_all(&worktree).unwrap();
+
+        let outcome =
+            prune_missing_worktree_and_maybe_branch(&repo, "feature/missing-unmerged", true, "ja");
+        match outcome {
+            WorktreeRemoveOutcome::Removed { branch_warning } => {
+                let warning = branch_warning.expect("unmerged branch must produce a warning");
+                assert!(
+                    warning.contains("feature/missing-unmerged"),
+                    "warning: {warning}"
+                );
+            }
+            other => panic!("expected Removed with warning, got {other:?}"),
+        }
+        assert!(local_branches(&repo)
+            .iter()
+            .any(|b| b == "feature/missing-unmerged"));
 
         let _ = std::fs::remove_dir_all(&repo);
     }
