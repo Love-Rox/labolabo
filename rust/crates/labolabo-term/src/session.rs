@@ -124,6 +124,13 @@ pub struct TermSession<B: VtBackend> {
     /// `from_bits`) rather than an `AtomicBool`, since it carries more than
     /// one bit of state. Read by [`Self::mouse_mode`].
     mouse_mode: Arc<AtomicU8>,
+    /// Mirrors `VtBackend::title` for the caller thread -- same refresh
+    /// cadence/shape as `bracketed_paste`/`alt_screen`/`mouse_mode` above (a
+    /// plain slot the worker thread refreshes after every processed PTY byte
+    /// batch), just an `Option<String>` behind a `Mutex` instead of an atomic
+    /// bit-packed flag, since a title isn't representable in one atomic word.
+    /// Read by [`Self::title`].
+    title: Arc<Mutex<Option<String>>>,
     /// A kill handle split off the child (`Child::clone_killer`) so
     /// [`Self::shutdown`] can signal it even though the `Child` itself is
     /// owned by (and reaped on) the worker thread.
@@ -299,6 +306,7 @@ impl<B: VtBackend> TermSession<B> {
         // would report once queried.
         let alternate_scroll = Arc::new(AtomicBool::new(true));
         let mouse_mode = Arc::new(AtomicU8::new(MouseMode::OFF.to_bits()));
+        let title = Arc::new(Mutex::new(None));
         let (event_tx, event_rx) = mpsc::channel::<TermEvent>();
         let (worker_tx, worker_rx) = mpsc::channel::<WorkerMsg>();
 
@@ -337,6 +345,7 @@ impl<B: VtBackend> TermSession<B> {
             let alt_screen = alt_screen.clone();
             let alternate_scroll = alternate_scroll.clone();
             let mouse_mode = mouse_mode.clone();
+            let title = title.clone();
             thread::spawn(move || {
                 run_worker::<B>(
                     cols,
@@ -347,6 +356,7 @@ impl<B: VtBackend> TermSession<B> {
                     alt_screen,
                     alternate_scroll,
                     mouse_mode,
+                    title,
                     worker_rx,
                     event_tx,
                     child,
@@ -364,6 +374,7 @@ impl<B: VtBackend> TermSession<B> {
             alt_screen,
             alternate_scroll,
             mouse_mode,
+            title,
             events: Mutex::new(event_rx),
             worker_tx: Mutex::new(worker_tx),
             killer: Mutex::new(killer),
@@ -505,6 +516,27 @@ impl<B: VtBackend> TermSession<B> {
         MouseMode::from_bits(self.mouse_mode.load(Ordering::Relaxed))
     }
 
+    /// The terminal title most recently set by the running program via OSC
+    /// `0`/`2` -- a cheap, non-blocking read of the value the worker thread
+    /// refreshes after every processed PTY byte batch (see `run_worker` and
+    /// [`crate::backend::VtBackend::title`]). `None` means no title has been
+    /// set (or it was explicitly reset) since this session was spawned --
+    /// never an empty string.
+    ///
+    /// Purely a live, in-memory mirror of the running program's own state:
+    /// not persisted, and lost (reverting to `None`) if the session is torn
+    /// down and respawned -- exactly like every mainstream terminal
+    /// emulator's own window/tab title. `labolabo-app`'s tab chips prefer
+    /// this over the pane's persisted display name whenever it's `Some`,
+    /// which is how Claude Code's own conversation title (or a shell's
+    /// `\e]0;...\a` prompt) ends up on the tab instead of a generic "端末 N".
+    pub fn title(&self) -> Option<String> {
+        match self.title.lock() {
+            Ok(t) => t.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+
     /// Wait up to `timeout` for the next [`TermEvent`], or `None` on timeout.
     pub fn recv_event(&self, timeout: Duration) -> Option<TermEvent> {
         let rx = self.events.lock().ok()?;
@@ -564,6 +596,7 @@ fn run_worker<B: VtBackend>(
     alt_screen: Arc<AtomicBool>,
     alternate_scroll: Arc<AtomicBool>,
     mouse_mode: Arc<AtomicU8>,
+    title: Arc<Mutex<Option<String>>>,
     rx: Receiver<WorkerMsg>,
     event_tx: Sender<TermEvent>,
     mut child: Box<dyn portable_pty::Child + Send + Sync>,
@@ -632,6 +665,9 @@ fn run_worker<B: VtBackend>(
                 alt_screen.store(backend.alt_screen_active(), Ordering::Relaxed);
                 alternate_scroll.store(backend.alternate_scroll_active(), Ordering::Relaxed);
                 mouse_mode.store(backend.mouse_mode().to_bits(), Ordering::Relaxed);
+                if let Ok(mut slot) = title.lock() {
+                    *slot = backend.title();
+                }
                 if last_snapshot.elapsed() >= FRAME_INTERVAL {
                     last_snapshot = Instant::now();
                     publish_snapshot(&mut backend, &latest, &event_tx);

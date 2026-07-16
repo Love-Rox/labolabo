@@ -9,6 +9,7 @@
 //! `Term`'s `EventListener`, which we forward to the shared PTY writer.
 
 use std::io::Write;
+use std::sync::{Arc, Mutex};
 
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::{Dimensions, Scroll};
@@ -24,22 +25,43 @@ use crate::mouse::{MouseMode, MouseTracking};
 use crate::session::SharedWriter;
 use crate::snapshot::{CellSnapshot, CursorSnapshot, GridSnapshot, Rgb};
 
-/// Forwards `Term`'s VT-response events to the PTY writer.
+/// Forwards `Term`'s VT-response events to the PTY writer, and mirrors its
+/// title-change events into a shared slot `AlacrittyBackend::title` reads
+/// back (see that method's doc comment for why: `Term` has no public title
+/// getter, unlike `libghostty-vt`'s `Terminal::title()`).
 ///
 /// `send_event` is called synchronously from `Term`'s VT handler while a byte
 /// batch is being parsed (on the worker thread). It must never block --
-/// writing to the mutex-guarded PTY writer is fine.
+/// writing to the mutex-guarded PTY writer / title slot is fine.
 #[derive(Clone)]
 struct PtyResponder {
     writer: SharedWriter,
+    title: Arc<Mutex<Option<String>>>,
 }
 
 impl EventListener for PtyResponder {
     fn send_event(&self, event: Event) {
-        if let Event::PtyWrite(text) = event {
-            if let Ok(mut w) = self.writer.lock() {
-                let _ = w.write_all(text.as_bytes());
+        match event {
+            Event::PtyWrite(text) => {
+                if let Ok(mut w) = self.writer.lock() {
+                    let _ = w.write_all(text.as_bytes());
+                }
             }
+            Event::Title(title) => {
+                if let Ok(mut slot) = self.title.lock() {
+                    *slot = Some(title);
+                }
+            }
+            // OSC sets an *empty* title (or a title pop restoring `None` off
+            // the stack, see `Term::pop_title`) -- `Term`'s own convention
+            // (`set_title`) is to fire `ResetTitle` rather than
+            // `Event::Title(String::new())` for either case.
+            Event::ResetTitle => {
+                if let Ok(mut slot) = self.title.lock() {
+                    *slot = None;
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -90,6 +112,10 @@ pub struct AlacrittyBackend {
     // cursor-color override, so unlike fg/bg this is always exactly the
     // configured default, never a per-session override.
     default_cursor: Option<Rgb>,
+    // Mirrors `PtyResponder::title`'s slot (same `Arc`, cloned at
+    // construction) -- see `VtBackend::title`'s doc comment for why this
+    // backend needs its own event-driven cache rather than a direct getter.
+    title: Arc<Mutex<Option<String>>>,
 }
 
 impl VtBackend for AlacrittyBackend {
@@ -113,7 +139,15 @@ impl VtBackend for AlacrittyBackend {
             columns: cols as usize,
             screen_lines: rows as usize,
         };
-        let term = Term::new(config, &size, PtyResponder { writer: pty_writer });
+        let title = Arc::new(Mutex::new(None));
+        let term = Term::new(
+            config,
+            &size,
+            PtyResponder {
+                writer: pty_writer,
+                title: title.clone(),
+            },
+        );
         let palette = colors.apply_palette(base_palette());
         Ok(Self {
             term,
@@ -124,6 +158,7 @@ impl VtBackend for AlacrittyBackend {
             default_fg: colors.foreground.unwrap_or(Rgb::DEFAULT_FG),
             default_bg: colors.background.unwrap_or(Rgb::BLACK),
             default_cursor: colors.cursor,
+            title,
         })
     }
 
@@ -277,6 +312,17 @@ impl VtBackend for AlacrittyBackend {
         };
         let sgr = mode.contains(TermMode::SGR_MOUSE);
         MouseMode { tracking, sgr }
+    }
+
+    fn title(&self) -> Option<String> {
+        // Populated by `PtyResponder::send_event` (`Event::Title`/
+        // `Event::ResetTitle`) as `Term` parses OSC 0/2 -- see
+        // `VtBackend::title`'s doc comment for why this backend needs an
+        // event-driven cache rather than a direct getter.
+        match self.title.lock() {
+            Ok(t) => t.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
     }
 }
 

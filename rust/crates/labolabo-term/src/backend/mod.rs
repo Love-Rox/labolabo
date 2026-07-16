@@ -187,4 +187,34 @@ pub trait VtBackend: 'static {
     /// TUI, ...) instead of driving this crate's own text-selection/
     /// scrollback UI.
     fn mouse_mode(&self) -> MouseMode;
+
+    /// The terminal title most recently set by the running program via OSC
+    /// `0`/`2` (`ESC ] 0 ; <title> BEL`/`ESC ] 2 ; <title> BEL`, or the same
+    /// with an ST terminator) -- the same escape sequence every mainstream
+    /// terminal emulator uses to drive its window/tab title, and the one
+    /// Claude Code sets to reflect the conversation's own title.
+    ///
+    /// `None` means "no title has been set since the session started" (or
+    /// the program explicitly reset it) -- never an empty string; a caller
+    /// wanting "is there a live title to show" can match on `Some` alone.
+    ///
+    /// Both backends resolve this from their own native OSC-title tracking
+    /// rather than this crate re-parsing the byte stream itself: ghostty-vt
+    /// exposes it directly as `Terminal::title() -> Result<&str>` (queried
+    /// fresh on demand, no callback needed); alacritty_terminal has no public
+    /// getter on `Term`, so the alacritty backend instead observes
+    /// `Event::Title`/`Event::ResetTitle` through the same `EventListener`
+    /// already used for `Event::PtyWrite` (see `backend/alacritty.rs`) and
+    /// caches the result. Both handle split/fragmented OSC writes and either
+    /// terminator correctly by construction (they're full VT parsers, not a
+    /// bespoke state machine layered on top) -- see `tests/backend_common.rs`
+    /// for the shared coverage.
+    ///
+    /// Queried after every processed PTY byte batch and cached for the
+    /// caller thread, the same "publish a cheap plain-data flag" shape as
+    /// [`Self::bracketed_paste`]/[`Self::mouse_mode`] above (see
+    /// [`crate::TermSession::title`]). `labolabo-app`'s tab chips use this to
+    /// show a live, terminal-set title in place of the pane's persisted
+    /// default name.
+    fn title(&self) -> Option<String>;
 }
