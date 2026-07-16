@@ -60,6 +60,47 @@ notify = "8"
 # raw fd (to unblock the accept-loop thread's blocking `accept()` call from
 # another thread) -- std's `UnixListener` exposes no such method. Unix-only
 # target dependency since the AF_UNIX transport itself is `#[cfg(unix)]`
-# (Windows gets its own transport in a future wave, see `hooks.rs`).
+# (Windows has its own Named Pipe transport -- see the cfg(windows) block
+# below).
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# Windows core wave (feature/rust-core-windows): the Named Pipe transports
+# for hooks (`hooks::NamedPipeEventTransport`, docs/hooks-protocol.md §4.2)
+# and control (`control::ControlServer`/`send_control_request`,
+# docs/control-protocol.md §9), plus the same-user pipe ACL
+# (`windows_pipe_security`).
+#
+# - `interprocess` (default features -- explicitly **no** `tokio`/`async`;
+#   this crate stays sync + async-runtime-free, see `process.rs`'s module
+#   doc comment): the sync Named Pipe listener/stream layer. Chosen over
+#   raw `windows-sys` calls for the transport itself because it already
+#   implements the non-obvious parts a hand-rolled ConnectNamedPipe loop
+#   gets wrong: dead-on-arrival connection cleanup in `accept()`
+#   (ERROR_NO_DATA -> DisconnectNamedPipe -> retry), EOF thunking
+#   (ERROR_BROKEN_PIPE/ERROR_PIPE_NOT_CONNECTED -> `Ok(0)`, so
+#   `read_to_end` terminates the way a Unix-socket EOF does),
+#   ERROR_MORE_DATA message reassembly, and flush-before-close on drop
+#   (its "limbo" mechanism) so a response written right before closing
+#   isn't discarded.
+# - `recvmsg`: the message-receive types (`MsgBuf`/`RecvMsg`/`RecvResult`)
+#   `interprocess`'s message-mode pipe streams implement but do not
+#   re-export; needed for the control transport's one-message-per-direction
+#   framing (docs/control-protocol.md §9). Tiny crate, already a transitive
+#   dependency of `interprocess` itself.
+# - `widestring`: `U16CString` for `SecurityDescriptor::deserialize`'s SDDL
+#   input (also already transitive via `interprocess`).
+# - `windows-sys`: current-user SID lookup (OpenProcessToken /
+#   GetTokenInformation / ConvertSidToStringSidW) for the same-user DACL --
+#   `interprocess` exposes no "current user" helper. Version matches
+#   `interprocess`'s own windows-sys dependency (one resolved copy).
+[target.'cfg(windows)'.dependencies]
+interprocess = "2.4"
+recvmsg = "1"
+widestring = "1"
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Threading",
+] }

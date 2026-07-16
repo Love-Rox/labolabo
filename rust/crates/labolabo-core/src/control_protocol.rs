@@ -145,6 +145,31 @@ pub fn control_socket_path_from_uuid(uuid: &str, base_dir: &str) -> String {
     format!("{}/control-{short}.sock", base_dir.trim_end_matches('/'))
 }
 
+/// The control channel's Windows Named Pipe name
+/// (docs/control-protocol.md §9):
+/// `\\.\pipe\labolabo-control-<first 10 lowercase hex chars of uuid,
+/// hyphens stripped>` -- the Windows counterpart of
+/// [`control_socket_path_from_uuid`], mirroring how
+/// `hook_settings::hook_pipe_name_from_uuid` mirrors
+/// `hook_settings::socket_path_from_uuid`: same 10-hex instance token, no
+/// base directory (pipe names live in the flat `\\.\pipe\` namespace, not
+/// the filesystem), and the `-control-` infix keeps the two pipe families
+/// lexically distinct in that namespace the way the `control-` file-name
+/// prefix does under `/tmp/labolabo` on unix. Pure string logic, compiled
+/// and unit-tested on every platform; only the Windows transport
+/// (`control::ControlServer`) consumes it in production.
+pub fn control_pipe_name_from_uuid(uuid: &str) -> String {
+    let short: String = uuid
+        .chars()
+        .filter(|c| *c != '-')
+        .collect::<String>()
+        .to_lowercase()
+        .chars()
+        .take(10)
+        .collect();
+    format!(r"\\.\pipe\labolabo-control-{short}")
+}
+
 // MARK: - CLI-side resolution (pure, docs/control-protocol.md §4)
 
 /// Resolves the control socket path the CLI should connect to
@@ -431,6 +456,26 @@ mod tests {
         let hooks_path = crate::hook_settings::socket_path_from_uuid(uuid, "/tmp/labolabo");
         let control_path = control_socket_path_from_uuid(uuid, "/tmp/labolabo");
         assert_ne!(hooks_path, control_path);
+    }
+
+    // MARK: - control_pipe_name_from_uuid
+
+    #[test]
+    fn control_pipe_name_from_uuid_strips_hyphens_lowercases_truncates_and_prefixes() {
+        assert_eq!(
+            control_pipe_name_from_uuid("ABCDEF01-2345-6789-ABCD-EF0123456789"),
+            r"\\.\pipe\labolabo-control-abcdef0123"
+        );
+    }
+
+    #[test]
+    fn control_pipe_name_differs_from_hooks_pipe_name_for_the_same_uuid() {
+        // Same non-collision requirement as the unix socket paths, in the
+        // `\\.\pipe\` namespace (docs/control-protocol.md §9).
+        let uuid = "abcdef01-2345-6789-abcd-ef0123456789";
+        let hooks_pipe = crate::hook_settings::hook_pipe_name_from_uuid(uuid);
+        let control_pipe = control_pipe_name_from_uuid(uuid);
+        assert_ne!(hooks_pipe, control_pipe);
     }
 
     // MARK: - resolve_socket_path

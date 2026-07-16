@@ -10,19 +10,27 @@
 //! are covered by `hooks.rs`'s in-process unit tests instead (see the wave
 //! 4b porting brief: "3 系統（純関数テスト）+ bin の end-to-end 1 件").
 //!
-//! Whole file is `#[cfg(unix)]`: both tests drive a real `std::os::unix::
-//! net::UnixListener` end to end, and `labolabo-hook`'s forwarding itself
-//! is `#[cfg(unix)]` (see `src/bin/labolabo-hook.rs`) -- there is nothing
-//! to exercise here on Windows yet.
-#![cfg(unix)]
+//! The first two tests are `#[cfg(unix)]`: they drive a real
+//! `std::os::unix::net::UnixListener` end to end (and the second one runs
+//! the exact `hook_command` string through `sh -c`, which only exists
+//! there). The Windows counterpart at the bottom
+//! (`labolabo_hook_bin_appends_pane_id_end_to_end_over_named_pipe`) drives
+//! the same binary against a real `\\.\pipe\...` listener
+//! (docs/hooks-protocol.md §4.2) -- no `sh -c` variant, because the
+//! settings.local.json command string for Windows is the app wave's
+//! concern (see docs/hooks-protocol.md §2's Windows note).
+#![cfg(any(unix, windows))]
 
 use std::io::{Read, Write};
-use std::os::unix::net::UnixListener;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
+#[cfg(unix)]
+use std::os::unix::net::UnixListener;
+
+#[cfg(unix)]
 #[test]
 fn labolabo_hook_bin_appends_pane_id_end_to_end() {
     let socket_path = std::env::temp_dir().join(format!("lb-hook-e2e-{}.sock", std::process::id()));
@@ -92,6 +100,7 @@ fn labolabo_hook_bin_appends_pane_id_end_to_end() {
 /// `hook_command` output through a real `sh -c`, the same way Claude Code
 /// executes hook commands, so any future drift between the written command
 /// string and the binary's argv contract fails loudly here.
+#[cfg(unix)]
 #[test]
 fn labolabo_hook_bin_accepts_the_exact_hook_command_string_via_sh() {
     let socket_path = std::env::temp_dir().join(format!("lb-hook-cmd-{}.sock", std::process::id()));
@@ -145,4 +154,73 @@ fn labolabo_hook_bin_accepts_the_exact_hook_command_string_via_sh() {
     assert_eq!(value["labolabo_pane_id"], "PANE-cmd");
 
     let _ = std::fs::remove_file(&socket_path);
+}
+
+/// Windows counterpart of `labolabo_hook_bin_appends_pane_id_end_to_end`:
+/// the same compiled binary, the same argv/stdin/env contract, but the
+/// listener is a real byte-mode Named Pipe (docs/hooks-protocol.md §4.2) --
+/// the `--hook` flag form is used here since that is what the injected
+/// settings command runs (§2). Runs for real on the `rust (windows-latest)`
+/// CI job.
+#[cfg(windows)]
+#[test]
+fn labolabo_hook_bin_appends_pane_id_end_to_end_over_named_pipe() {
+    use interprocess::os::windows::named_pipe::{pipe_mode, PipeListenerOptions, PipeMode};
+
+    let pipe_name = format!(r"\\.\pipe\lb-hook-e2e-{}", std::process::id());
+    let listener = PipeListenerOptions::new()
+        .path(pipe_name.as_str())
+        .mode(PipeMode::Bytes)
+        .create_recv_only::<pipe_mode::Bytes>()
+        .expect("bind test pipe listener");
+
+    // Accept the forwarder's single connection on a background thread so we
+    // can spawn+feed the child process concurrently (accept() blocks).
+    let (tx, rx) = mpsc::channel();
+    let accept_thread = thread::spawn(move || {
+        let mut stream = listener
+            .accept()
+            .expect("accept the forwarder's connection");
+        let mut data = Vec::new();
+        let _ = stream.read_to_end(&mut data);
+        let _ = tx.send(data);
+    });
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_labolabo-hook"))
+        .args(["--hook", &pipe_name])
+        .env("LABOLABO_PANE", "PANE-e2e-win")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn labolabo-hook");
+
+    child
+        .stdin
+        .take()
+        .expect("child stdin should be piped")
+        .write_all(br#"{"hook_event_name":"SessionStart","session_id":"e2e-win-1"}"#)
+        .expect("write hook event JSON to labolabo-hook's stdin");
+
+    let status = child.wait().expect("wait for labolabo-hook to exit");
+    assert!(
+        status.success(),
+        "labolabo-hook must always exit 0 (docs/hooks-protocol.md §3), got {status:?}"
+    );
+
+    let received = rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the test pipe listener should receive exactly one connection");
+    accept_thread
+        .join()
+        .expect("accept thread should not panic");
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&received).expect("received payload should be valid JSON");
+    assert_eq!(value["hook_event_name"], "SessionStart");
+    assert_eq!(value["session_id"], "e2e-win-1");
+    assert_eq!(
+        value["labolabo_pane_id"], "PANE-e2e-win",
+        "labolabo-hook should annotate labolabo_pane_id from LABOLABO_PANE"
+    );
 }
