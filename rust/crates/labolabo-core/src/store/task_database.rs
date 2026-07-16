@@ -32,13 +32,13 @@
 //! ordered `(id, sql)` list; `ensure_schema` applies whichever entries
 //! aren't yet recorded in the ledger, in order, each inside its own
 //! transaction-per-migration (`execute_batch` covers each migration's own
-//! multi-statement DDL). Today there is exactly one migration
-//! (`"0001_task_and_app_state"`, both tables at once) — the mechanism is
-//! still real (not a single hardcoded `CREATE TABLE IF NOT EXISTS`) so a
-//! later wave can append `("0002_...", ...)` without reworking this module,
-//! and so the fixture/round-trip tests below actually exercise the ledger
-//! (`opening_an_already_migrated_database_is_a_no_op` would fail loudly —
-//! "table task already exists" — if the guard were broken).
+//! multi-statement DDL). `"0001_task_and_app_state"` created both tables at
+//! once; `"0002_task_color"` (第10波) is the first *appended* migration,
+//! exercising the upgrade path for real: an existing database gets just the
+//! `ALTER TABLE` on its next open (see
+//! `ensure_schema_upgrades_a_pre_0002_database_in_place` below), and
+//! `opening_an_already_migrated_database_is_a_no_op` would fail loudly —
+//! "table task already exists" — if the ledger guard were broken.
 //!
 //! ## `Task.layout` (TileLayout JSON) and dates
 //!
@@ -64,9 +64,10 @@ use super::task_record::{Task, TaskKind, TaskStatus};
 
 /// Ordered `(id, sql)` migrations, applied idempotently by `ensure_schema` —
 /// see this module's doc comment.
-const MIGRATIONS: &[(&str, &str)] = &[(
-    "0001_task_and_app_state",
-    "
+const MIGRATIONS: &[(&str, &str)] = &[
+    (
+        "0001_task_and_app_state",
+        "
     CREATE TABLE task (
         id TEXT NOT NULL PRIMARY KEY,
         repoKey TEXT NOT NULL,
@@ -89,7 +90,16 @@ const MIGRATIONS: &[(&str, &str)] = &[(
         value TEXT
     );
     ",
-)];
+    ),
+    // 第10波 (サイドバーのパーソナライズ): `Task::color` -- the user-assigned
+    // sidebar row color, a lowercase `#rrggbb` string or NULL for the
+    // default. The first migration ever *appended* to this ledger: an
+    // existing database gets exactly this one `ALTER TABLE` on its next
+    // open (every pre-existing row reads back as `color = NULL`, i.e. "no
+    // custom color" -- no backfill needed), while a fresh database applies
+    // 0001 then 0002 in order.
+    ("0002_task_color", "ALTER TABLE task ADD COLUMN color TEXT;"),
+];
 
 /// SQLite-backed store for [`Task`]s and small app-level key/value state
 /// (e.g. the selected Task). See this module's doc comment for the schema
@@ -187,7 +197,7 @@ impl TaskDatabase {
     pub fn all_tasks(&self) -> StoreResult<Vec<Task>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, repoKey, repoRoot, repoName, kind, branch, base, path, title, \
-                    layout, status, createdAt, lastActiveAt, sortOrder, agentBindings \
+                    layout, status, createdAt, lastActiveAt, sortOrder, agentBindings, color \
              FROM task ORDER BY sortOrder",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -207,6 +217,7 @@ impl TaskDatabase {
                 row.get::<_, String>(12)?,
                 row.get::<_, i64>(13)?,
                 row.get::<_, Option<String>>(14)?,
+                row.get::<_, Option<String>>(15)?,
             ))
         })?;
 
@@ -228,6 +239,7 @@ impl TaskDatabase {
                 last_active_at_raw,
                 sort_order,
                 agent_bindings,
+                color,
             ) = row?;
 
             let kind = decode_kind(&kind_tag, branch, base, path)?;
@@ -254,6 +266,7 @@ impl TaskDatabase {
                 last_active_at,
                 sort_order,
                 agent_bindings,
+                color,
             });
         }
         Ok(tasks)
@@ -283,8 +296,8 @@ impl TaskDatabase {
         self.conn.execute(
             "INSERT INTO task \
                 (id, repoKey, repoRoot, repoName, kind, branch, base, path, title, layout, \
-                 status, createdAt, lastActiveAt, sortOrder, agentBindings) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15) \
+                 status, createdAt, lastActiveAt, sortOrder, agentBindings, color) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16) \
              ON CONFLICT(id) DO UPDATE SET \
                 repoKey = excluded.repoKey, \
                 repoRoot = excluded.repoRoot, \
@@ -299,7 +312,8 @@ impl TaskDatabase {
                 createdAt = excluded.createdAt, \
                 lastActiveAt = excluded.lastActiveAt, \
                 sortOrder = excluded.sortOrder, \
-                agentBindings = excluded.agentBindings",
+                agentBindings = excluded.agentBindings, \
+                color = excluded.color",
             params![
                 task.id,
                 task.repo_key,
@@ -316,6 +330,7 @@ impl TaskDatabase {
                 task.last_active_at.to_rfc3339(),
                 task.sort_order,
                 task.agent_bindings,
+                task.color,
             ],
         )?;
         Ok(())
@@ -678,6 +693,103 @@ mod tests {
         let all = db.all_tasks().unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0], task);
+    }
+
+    // MARK: - Task.color (第10波, migration 0002)
+
+    /// `Task::color` round-trips like every other column: `Some("#rrggbb")`
+    /// persists, and clearing back to `None` (the「なし」choice in the color
+    /// picker) persists too -- not just the set direction.
+    #[test]
+    fn task_color_round_trips_through_upsert_and_all_tasks() {
+        let db = TaskDatabase::open_in_memory().unwrap();
+        let mut task = sample_task(0);
+        assert_eq!(db.all_tasks().unwrap(), Vec::new());
+
+        task.color = Some("#d0ff00".to_string());
+        db.upsert_task(&task).unwrap();
+        let all = db.all_tasks().unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].color.as_deref(), Some("#d0ff00"));
+        assert_eq!(all[0], task);
+
+        // Clear back to the default ("なし") -- must persist as NULL, not
+        // keep the previous value.
+        task.color = None;
+        db.upsert_task(&task).unwrap();
+        let all = db.all_tasks().unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].color, None);
+        assert_eq!(all[0], task);
+    }
+
+    /// The real upgrade path for a database created before migration 0002:
+    /// apply *only* 0001 (recording it in the ledger, exactly as a
+    /// pre-第10波 binary would have left the file), insert a row through the
+    /// old 15-column schema, then run `ensure_schema` -- it must apply just
+    /// the `ALTER TABLE`, keep the existing row readable (`color = None`),
+    /// and accept a color via the normal upsert afterwards.
+    #[test]
+    fn ensure_schema_upgrades_a_pre_0002_database_in_place() {
+        let conn = Connection::open_in_memory().unwrap();
+        // Reproduce a pre-0002 database by hand: first migration only.
+        let (first_id, first_sql) = MIGRATIONS[0];
+        assert_eq!(first_id, "0001_task_and_app_state");
+        conn.execute_batch(
+            "CREATE TABLE schemaMigrations (id TEXT NOT NULL PRIMARY KEY, appliedAt TEXT NOT NULL)",
+        )
+        .unwrap();
+        conn.execute_batch(first_sql).unwrap();
+        conn.execute(
+            "INSERT INTO schemaMigrations(id, appliedAt) VALUES (?1, ?2)",
+            params![first_id, Utc::now().to_rfc3339()],
+        )
+        .unwrap();
+        // A row written by the old schema (no color column at all).
+        conn.execute(
+            "INSERT INTO task (id, repoKey, repoRoot, repoName, kind, branch, base, path, \
+                title, layout, status, createdAt, lastActiveAt, sortOrder) \
+             VALUES ('old', 'k', 'r', 'n', 'attached', NULL, NULL, '/p', 't', '{}', 'active', \
+                '2026-07-13T09:00:00Z', '2026-07-13T09:00:00Z', 0)",
+            [],
+        )
+        .unwrap();
+
+        TaskDatabase::ensure_schema(&conn).unwrap();
+        let db = TaskDatabase { conn };
+
+        // The pre-existing row survives the ALTER TABLE and reads back with
+        // no color.
+        let all = db.all_tasks().unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].id, "old");
+        assert_eq!(all[0].color, None);
+
+        // And the upgraded schema accepts a color like a fresh one.
+        let mut task = all.into_iter().next().unwrap();
+        task.color = Some("#5e9eff".to_string());
+        db.upsert_task(&task).unwrap();
+        assert_eq!(db.all_tasks().unwrap()[0].color.as_deref(), Some("#5e9eff"));
+
+        // The ledger now records both migrations -- re-running
+        // `ensure_schema` must be a no-op (no "duplicate column" error).
+        TaskDatabase::ensure_schema(&db.conn).unwrap();
+    }
+
+    /// Foreign/corrupt stored color text (hand-edited, or a future writer's
+    /// different format) is round-tripped verbatim, not rejected -- decoding
+    /// it into an actual color (and degrading gracefully when that fails) is
+    /// the app layer's job.
+    #[test]
+    fn task_color_stores_arbitrary_text_verbatim() {
+        let db = TaskDatabase::open_in_memory().unwrap();
+        let mut task = sample_task(0);
+        task.color = Some("not-a-color".to_string());
+        db.upsert_task(&task).unwrap();
+        assert_eq!(
+            db.all_tasks().unwrap()[0].color.as_deref(),
+            Some("not-a-color")
+        );
     }
 
     #[test]

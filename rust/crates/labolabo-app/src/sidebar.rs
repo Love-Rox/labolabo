@@ -19,8 +19,8 @@
 //! セクション（[`render_archived_section`]、復元ボタン付き）。
 
 use gpui::{
-    div, prelude::*, px, rgb, rgba, App, Context, ExternalPaths, IntoElement, MouseButton,
-    MouseDownEvent, Render, SharedString, Window,
+    div, prelude::*, px, rgb, rgba, App, Context, ExternalPaths, FontWeight, IntoElement,
+    MouseButton, MouseDownEvent, Render, SharedString, Window,
 };
 use rust_i18n::t;
 
@@ -200,6 +200,7 @@ pub fn render(
 ) -> impl IntoElement {
     let groups = group_tasks_by_repo(app.tasks());
     let selected = app.selected_task_id().map(str::to_string);
+    let home = crate::path_abbrev::os_home();
 
     let mut list = div().flex().flex_col().gap_2().flex_1();
     for group in groups {
@@ -209,13 +210,28 @@ pub fn render(
         // letter-spacing 相当のフィールドが無い(`style.rs`の`TextStyle`
         // 確認済み)ため、疑似的な空白差し込みのような hack はせずここでは
         // 見送っている -- 未実装の既知の逸脱として明記。
-        let mut group_el = div().flex().flex_col().gap_1().child(
-            div()
-                .text_color(rgb(theme::text::MUTED))
-                .text_size(px(theme::font_size::CAPTION))
-                .px_2()
-                .child(SharedString::from(group.repo_name.to_string())),
-        );
+        //
+        // 第10波 §3: git 管理外のディレクトリ直付けでは `repo_name` が
+        // フルパスになる(`new_task::resolve_attached_repo` のフォール
+        // バック)ので、見出しは省略表示 (`path_abbrev`) にし、省略した
+        // ときだけフルパスをツールチップで補う。
+        let full_name = group.repo_name.to_string();
+        let display_name = crate::path_abbrev::abbreviate_if_path(&full_name, home.as_deref());
+        let abbreviated = display_name != full_name;
+        let header_id: SharedString = format!("repo-group-{}", group.repo_key).into();
+        let full_name_tooltip: SharedString = full_name.into();
+        let mut header = div()
+            .id(header_id)
+            .text_color(rgb(theme::text::MUTED))
+            .text_size(px(theme::font_size::CAPTION))
+            .px_2()
+            .child(SharedString::from(display_name));
+        if abbreviated {
+            header = header.tooltip(move |_window, cx| {
+                cx.new(|_| IconTooltip(full_name_tooltip.clone())).into()
+            });
+        }
+        let mut group_el = div().flex().flex_col().gap_1().child(header);
         for task in group.tasks {
             let is_selected = selected.as_deref() == Some(task.id.as_str());
             let status = app.task_agent_status(&task.id);
@@ -303,10 +319,40 @@ pub fn render(
                 )
                 .child("\u{22EF}"); // ⋯
 
-            // `plans` 第8波a §3: タスク行は高さ 30px・角丸 6px・選択時は
-            // ACTIVE 背景 + 左 2px ACCENT バー。バーは非選択時も同じ 2px
-            // 幅を透明色で確保しておく(選択時だけ幅を足すと行の横幅が
-            // 1px 分ガタつくため)。
+            // 第10波: タスクのカスタム色 (`Task::color`)。行の左バー
+            // (非選択時も表示)とタイトル横の 6px 色ドットで表現する。
+            let custom_color = task
+                .color
+                .as_deref()
+                .and_then(crate::color_picker::parse_hex_rgb);
+            // タイトル: 選択中はセミボールド (第10波 §2)。attached 型は
+            // フルパスをツールチップで補う (§3 -- 行のタイトルはディレクトリ
+            // 名だけなので、どのディレクトリかの完全な答えはここに残す)。
+            let attached_dir: Option<SharedString> = match &task.kind {
+                TaskKind::Attached { directory } => Some(SharedString::from(directory.clone())),
+                TaskKind::Worktree { .. } => None,
+            };
+            let title_id: SharedString = format!("task-title-{}", task.id).into();
+            let mut title_el = div()
+                .id(title_id)
+                .flex_1()
+                .overflow_hidden()
+                .when(is_selected, |el| el.font_weight(FontWeight::SEMIBOLD))
+                .child(SharedString::from(task.title.clone()));
+            if let Some(dir) = attached_dir {
+                title_el = title_el
+                    .tooltip(move |_window, cx| cx.new(|_| IconTooltip(dir.clone())).into());
+            }
+
+            // `plans` 第8波a §3 + 第10波 §2: タスク行は高さ 30px・角丸 6px。
+            // 選択時は BRAND(ライム)の低アルファ背景 + 左 2px バー --
+            // フォーカスペインの ACCENT(青)とは意図的に別色
+            // (`theme::ACCENT` の doc コメントの使い分け参照)。バーは
+            // 非選択時も同じ 2px 幅を確保しておく(選択時だけ幅を足すと
+            // 行の横幅が 1px 分ガタつくため)。カスタム色があるときは
+            // 左バーをカスタム色が選択状態より優先する -- 「どのタスクか」
+            // の識別色は選択中でも変えず、選択は背景のライムで示す
+            // (識別と選択の両立)。
             let row = div()
                 .id(row_id)
                 .group(row_group)
@@ -318,12 +364,14 @@ pub fn render(
                 .px_2()
                 .rounded(px(theme::radius::ROW))
                 .border_l_2()
-                .border_color(rgb(if is_selected {
-                    theme::ACCENT
-                } else {
-                    theme::surface::SUNKEN
+                .border_color(rgb(match (custom_color, is_selected) {
+                    (Some(color), _) => color,
+                    (None, true) => theme::BRAND,
+                    (None, false) => theme::surface::SUNKEN,
                 }))
-                .when(is_selected, |el| el.bg(rgb(theme::surface::ACTIVE)))
+                .when(is_selected, |el| {
+                    el.bg(rgba(theme::with_alpha(theme::BRAND, 0x1a)))
+                })
                 // Hover feedback (`plans/014` M5, scoped down -- see that
                 // plan's doc comment for why this is an instant `.hover()`
                 // tint rather than an eased transition) only applies to
@@ -342,12 +390,19 @@ pub fn render(
                 }))
                 .text_size(px(theme::font_size::LABEL))
                 .child(kind_marker(&task.kind))
-                .child(
-                    div()
-                        .flex_1()
-                        .overflow_hidden()
-                        .child(SharedString::from(task.title.clone())),
-                )
+                // カスタム色の 6px ドット (第10波 §1 -- 状態ドット 8px 枠
+                // とは別物。左バーと同じ色の「ラベル」としてタイトルの左に)。
+                .when_some(custom_color, |el, color| {
+                    el.child(
+                        div()
+                            .w(px(6.0))
+                            .h(px(6.0))
+                            .rounded_full()
+                            .flex_shrink_0()
+                            .bg(rgb(color)),
+                    )
+                })
+                .child(title_el)
                 .when(missing, move |el| {
                     el.child(
                         div()

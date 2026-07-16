@@ -39,7 +39,10 @@ use rust_i18n::t;
 use labolabo_core::{Task, TaskKind};
 
 use crate::app::LaboLaboApp;
+use crate::color_picker;
 use crate::motion;
+use crate::path_abbrev;
+use crate::text_field::{render_text_field, TextFieldState};
 use crate::theme;
 
 /// ポップオーバーの幅。
@@ -64,6 +67,19 @@ pub struct WorktreeInfo {
 pub enum TaskMenuPhase {
     /// 項目一覧のポップオーバー。
     Menu,
+    /// 「名前を変更…」の小モーダル (第10波)。`field` は開いた時点の
+    /// タイトルをプリフィルした単一行入力（開いている間
+    /// `LaboLaboApp::active_text_field` がこれを指し、タイプ/IME が
+    /// ここへルーティングされる -- `text_field.rs` のモジュール doc
+    /// コメント参照）。
+    Rename { field: TextFieldState },
+    /// 「色を設定…」のスウォッチポップオーバー (第10波、
+    /// `color_picker::render_color_swatch_panel`)。`hex_field` はカスタム
+    /// hex 入力、`hex_error` は直前の「適用」が不正な hex で失敗したか。
+    ColorPick {
+        hex_field: TextFieldState,
+        hex_error: bool,
+    },
     /// 削除確認モーダル。`in_flight` の間はキャンセル/再実行/チェック変更
     /// 不可、`error` は直近の失敗（拒否）メッセージ。
     ConfirmDelete {
@@ -115,6 +131,40 @@ impl TaskMenuState {
             missing,
             anchor,
             phase: TaskMenuPhase::Menu,
+        }
+    }
+
+    /// Menu → Rename（現在タイトルをプリフィル）。他の相では no-op。
+    pub fn request_rename(&mut self) {
+        if self.phase == TaskMenuPhase::Menu {
+            self.phase = TaskMenuPhase::Rename {
+                field: TextFieldState::new(self.title.clone()),
+            };
+        }
+    }
+
+    /// Menu → ColorPick（hex 入力は現在のカスタム色をプリフィル --
+    /// 1 桁だけ変える微調整がしやすい）。他の相では no-op。
+    pub fn request_color_pick(&mut self, current_color: Option<String>) {
+        if self.phase == TaskMenuPhase::Menu {
+            self.phase = TaskMenuPhase::ColorPick {
+                hex_field: TextFieldState::new(current_color.unwrap_or_default()),
+                hex_error: false,
+            };
+        }
+    }
+
+    /// Rename 相の入力の確定値: 前後空白を落としたタイトル。空(=確定
+    /// 不可)なら `None`。Rename 相以外も `None`。
+    pub fn rename_result(&self) -> Option<String> {
+        let TaskMenuPhase::Rename { field } = &self.phase else {
+            return None;
+        };
+        let trimmed = field.text.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
         }
     }
 
@@ -240,6 +290,11 @@ pub fn render_task_menu_overlay(
     let state = app.task_menu()?.clone();
     let element = match &state.phase {
         TaskMenuPhase::Menu => render_menu_popover(app, &state, window, cx),
+        TaskMenuPhase::Rename { field } => render_rename_modal(app, &state, field, cx),
+        TaskMenuPhase::ColorPick {
+            hex_field,
+            hex_error,
+        } => render_color_pick_popover(app, &state, hex_field, *hex_error, window, cx),
         TaskMenuPhase::ConfirmDelete {
             delete_branch,
             in_flight,
@@ -318,6 +373,26 @@ fn render_menu_popover(
         let _ = app; // installed_editors は macOS 分岐でのみ参照する
     }
 
+    // 名前を変更… / 色を設定… (第10波 パーソナライズ)。
+    panel = panel.child(menu_row(
+        "task-menu-rename".to_string(),
+        t!("task.menu.rename").to_string().into(),
+        false,
+        cx.listener(|this, _: &MouseDownEvent, _window, cx| {
+            this.request_rename_task(cx);
+        }),
+    ));
+    row_count += 1;
+    panel = panel.child(menu_row(
+        "task-menu-color".to_string(),
+        t!("task.menu.set_color").to_string().into(),
+        false,
+        cx.listener(|this, _: &MouseDownEvent, _window, cx| {
+            this.request_task_color_pick(cx);
+        }),
+    ));
+    row_count += 1;
+
     let archive_task_id = task_id.clone();
     panel = panel.child(menu_row(
         "task-menu-archive".to_string(),
@@ -366,6 +441,146 @@ fn render_menu_popover(
         .child(panel)
         .with_animation(
             "task-menu-backdrop-enter",
+            Animation::new(motion::OVERLAY_ENTER).with_easing(motion::ease_out_strong()),
+            |el, t| el.opacity(t),
+        )
+        .into_any_element()
+}
+
+/// 「名前を変更…」モーダル (第10波): タイトル + 単一行入力 + キャンセル/
+/// 変更ボタン。Enter でも確定できる（`LaboLaboApp::key_down` の
+/// text-input ゲート -- `confirm_text_input` 経由で同じ
+/// `commit_rename_task` に落ちる）。入力が空(空白のみ)の間は「変更」を
+/// 出さない -- `TaskMenuState::rename_result` の `None` と同じ判定。
+fn render_rename_modal(
+    app: &LaboLaboApp,
+    state: &TaskMenuState,
+    field: &TextFieldState,
+    cx: &mut Context<LaboLaboApp>,
+) -> AnyElement {
+    let mut panel = div()
+        .flex()
+        .flex_col()
+        .gap_3()
+        .w(px(CONFIRM_WIDTH))
+        .p_4()
+        .rounded(px(theme::radius::OVERLAY))
+        .bg(rgb(theme::surface::ROOT))
+        .border_1()
+        .border_color(rgb(theme::surface::STROKE))
+        .shadow(theme::shadow::overlay())
+        .on_mouse_down(MouseButton::Left, |_event, _window, cx: &mut App| {
+            cx.stop_propagation();
+        })
+        .child(
+            div()
+                .text_size(px(15.0))
+                .text_color(rgb(theme::text::PRIMARY))
+                .child(t!("task.menu.rename_title", title = state.title).to_string()),
+        )
+        .child(render_text_field(
+            "task-rename-field",
+            field,
+            t!("task.menu.rename_placeholder").to_string().into(),
+            app.focus_handle(),
+            cx,
+        ));
+
+    let mut buttons = div()
+        .flex()
+        .flex_row()
+        .justify_end()
+        .gap_2()
+        .child(dialog_button(
+            "task-rename-cancel",
+            t!("task.menu.confirm.cancel").to_string().into(),
+            false,
+            cx.listener(|this, _: &MouseDownEvent, _window, cx| {
+                this.close_task_menu(cx);
+            }),
+        ));
+    if state.rename_result().is_some() {
+        buttons = buttons.child(dialog_button(
+            "task-rename-confirm",
+            t!("task.menu.rename_confirm").to_string().into(),
+            false,
+            cx.listener(|this, _: &MouseDownEvent, _window, cx| {
+                this.commit_rename_task(cx);
+            }),
+        ));
+    }
+    panel = panel.child(buttons);
+
+    centered_backdrop(panel.into_any_element(), "task-rename-enter", cx)
+}
+
+/// 「色を設定…」ポップオーバー (第10波): メニューと同じアンカー位置に、
+/// プリセットスウォッチ + なし + カスタム hex
+/// (`color_picker::render_color_swatch_panel`)。
+fn render_color_pick_popover(
+    app: &LaboLaboApp,
+    state: &TaskMenuState,
+    hex_field: &TextFieldState,
+    hex_error: bool,
+    window: &Window,
+    cx: &mut Context<LaboLaboApp>,
+) -> AnyElement {
+    let current = app
+        .tasks()
+        .iter()
+        .find(|t| t.id == state.task_id)
+        .and_then(|t| t.color.clone());
+
+    let panel = div()
+        .flex()
+        .flex_col()
+        .w(px(color_picker::PANEL_WIDTH))
+        .rounded(px(theme::radius::OVERLAY))
+        .bg(rgb(theme::surface::RAISED))
+        .border_1()
+        .border_color(rgb(theme::surface::STROKE))
+        .shadow(theme::shadow::overlay())
+        .on_mouse_down(MouseButton::Left, |_event, _window, cx: &mut App| {
+            cx.stop_propagation();
+        })
+        .child(
+            div()
+                .px_2()
+                .pt_2()
+                .text_size(px(theme::font_size::CAPTION))
+                .text_color(rgb(theme::text::MUTED))
+                .child(t!("task.menu.set_color_title", title = state.title).to_string()),
+        )
+        .child(color_picker::render_color_swatch_panel(
+            "task-color",
+            current.as_deref(),
+            hex_field,
+            hex_error,
+            app.focus_handle(),
+            cx,
+        ));
+
+    let estimated_height = 190.0 + if hex_error { 18.0 } else { 0.0 };
+    let origin = clamp_popover_origin(
+        state.anchor,
+        gpui::size(px(color_picker::PANEL_WIDTH), px(estimated_height)),
+        window.viewport_size(),
+    );
+    let positioned = div().absolute().left(origin.x).top(origin.y).child(panel);
+
+    div()
+        .absolute()
+        .inset_0()
+        .bg(rgba(OVERLAY_BG))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _: &MouseDownEvent, _window, cx| {
+                this.close_task_menu(cx);
+            }),
+        )
+        .child(positioned)
+        .with_animation(
+            "task-color-backdrop-enter",
             Animation::new(motion::OVERLAY_ENTER).with_easing(motion::ease_out_strong()),
             |el, t| el.opacity(t),
         )
@@ -426,11 +641,21 @@ fn render_confirm_modal(
                 )
                 .to_string()
             };
+            // パスは省略表示 (第10波 §3、`path_abbrev`)。フルパスは
+            // ツールチップに残す(同モジュールの契約)。
+            let full_path: SharedString = info.path.clone().into();
+            let shown_path: SharedString =
+                path_abbrev::abbreviate_path(&info.path, path_abbrev::os_home().as_deref()).into();
             panel = panel.child(body_text(intro.into())).child(
                 div()
+                    .id("task-delete-worktree-path")
                     .text_size(px(theme::font_size::CAPTION))
                     .text_color(rgb(theme::text::SECONDARY))
-                    .child(SharedString::from(info.path.clone())),
+                    .tooltip(move |_window, cx| {
+                        cx.new(|_| crate::sidebar::IconTooltip(full_path.clone()))
+                            .into()
+                    })
+                    .child(shown_path),
             );
             if !state.missing {
                 panel = panel.child(body_text(
@@ -723,6 +948,97 @@ mod tests {
         assert!(!not_missing.missing);
         let missing = TaskMenuState::new(&task, point(px(0.0), px(0.0)), true);
         assert!(missing.missing);
+    }
+
+    // MARK: - 名前変更 / 色設定の相 (第10波)
+
+    #[test]
+    fn request_rename_prefills_the_field_with_the_current_title() {
+        let task = worktree_task();
+        let mut s = state(&task);
+        s.request_rename();
+        assert_eq!(
+            s.phase,
+            TaskMenuPhase::Rename {
+                field: TextFieldState::new("feature/x"),
+            }
+        );
+        // 確定値は trim 済みタイトル。プリフィル時点では元のタイトル。
+        assert_eq!(s.rename_result().as_deref(), Some("feature/x"));
+    }
+
+    #[test]
+    fn rename_result_is_none_for_blank_input_and_other_phases() {
+        let task = worktree_task();
+        let mut s = state(&task);
+        assert_eq!(s.rename_result(), None, "Menu 相では None");
+        s.request_rename();
+        if let TaskMenuPhase::Rename { field } = &mut s.phase {
+            field.text = "   ".to_string();
+        }
+        assert_eq!(s.rename_result(), None, "空白のみは確定不可");
+        if let TaskMenuPhase::Rename { field } = &mut s.phase {
+            field.text = "  新しい名前  ".to_string();
+        }
+        assert_eq!(s.rename_result().as_deref(), Some("新しい名前"));
+    }
+
+    #[test]
+    fn request_color_pick_prefills_hex_with_the_current_color() {
+        let task = worktree_task();
+        let mut s = state(&task);
+        s.request_color_pick(Some("#d0ff00".to_string()));
+        assert_eq!(
+            s.phase,
+            TaskMenuPhase::ColorPick {
+                hex_field: TextFieldState::new("#d0ff00"),
+                hex_error: false,
+            }
+        );
+
+        let mut no_color = state(&task);
+        no_color.request_color_pick(None);
+        assert_eq!(
+            no_color.phase,
+            TaskMenuPhase::ColorPick {
+                hex_field: TextFieldState::new(""),
+                hex_error: false,
+            }
+        );
+    }
+
+    /// Menu 相以外からは Rename/ColorPick へ遷移しない(確認モーダルの
+    /// 最中にメニュー項目のハンドラが誤発火しても壊れない)。
+    #[test]
+    fn rename_and_color_pick_are_only_reachable_from_the_menu_phase() {
+        let task = worktree_task();
+        let mut s = state(&task);
+        s.request_delete();
+        let confirm = s.phase.clone();
+        s.request_rename();
+        assert_eq!(s.phase, confirm);
+        s.request_color_pick(None);
+        assert_eq!(s.phase, confirm);
+
+        // Rename と ColorPick は互いにも遷移しない。
+        let mut renaming = state(&task);
+        renaming.request_rename();
+        let rename_phase = renaming.phase.clone();
+        renaming.request_color_pick(None);
+        assert_eq!(renaming.phase, rename_phase);
+    }
+
+    /// Rename/ColorPick はいつでも閉じてよい(ConfirmDelete の in_flight
+    /// だけが dismiss を塞ぐ、という既存規則が新しい相にも適用される)。
+    #[test]
+    fn rename_and_color_pick_phases_are_always_dismissible() {
+        let task = worktree_task();
+        let mut s = state(&task);
+        s.request_rename();
+        assert!(s.can_dismiss());
+        let mut c = state(&task);
+        c.request_color_pick(None);
+        assert!(c.can_dismiss());
     }
 
     #[test]

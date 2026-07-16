@@ -233,6 +233,16 @@ pub struct PanePayload {
         skip_serializing_if = "Option::is_none"
     )]
     pub agent_transcript_path: Option<String>,
+    /// User-assigned tab color (第10波 パーソナライズ): a lowercase
+    /// `#rrggbb` string, or `None` for the default. **New-in-Rust key** with
+    /// no Swift counterpart -- omitted entirely when `None`
+    /// (`skip_serializing_if`), so every layout without a tab color still
+    /// serializes byte-identically to what the Swift app's `JSONEncoder`
+    /// produced (the golden-fixture contract in `tests/tiling_golden.rs` is
+    /// unaffected), and Swift's `JSONDecoder`/older readers simply ignore
+    /// the unknown key when it *is* present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
 }
 
 /// Persisted representation of a tile layout (`Codable` in Swift). A leaf
@@ -262,6 +272,12 @@ pub struct TileLayout {
         skip_serializing_if = "Option::is_none"
     )]
     pub pane_agent_transcript_path: Option<String>,
+    /// Single-tab leaf's user-assigned tab color (第10波; the legacy-shape
+    /// counterpart of [`PanePayload::color`] -- see that field's doc comment
+    /// for the compatibility contract: new-in-Rust key, omitted when `None`,
+    /// ignored by Swift/older readers).
+    #[serde(rename = "paneColor", skip_serializing_if = "Option::is_none")]
+    pub pane_color: Option<String>,
     /// Tab group (written only when there are 2+ tabs).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub panes: Option<Vec<PanePayload>>,
@@ -281,6 +297,9 @@ impl TileLayout {
     /// removed. Presets are "the shape of a layout" shared across every
     /// session, so this strips any one session's resume info before saving
     /// a layout as a preset. Mirrors `TileLayout.strippingAgentSessions()`.
+    /// Tab colors (`pane_color`/`PanePayload::color`, 第10波) are
+    /// deliberately **kept**: a color is part of the layout's visual shape
+    /// (like titles, which are kept too), not one session's identity.
     pub fn stripping_agent_sessions(&self) -> TileLayout {
         let mut copy = self.clone();
         copy.pane_agent_session_id = None;
@@ -413,6 +432,13 @@ pub struct PaneItem {
     /// Path to the corresponding transcript (JSONL); used to check the
     /// session still exists before resuming.
     pub agent_transcript_path: Option<String>,
+    /// User-assigned tab color (第10波): a lowercase `#rrggbb` string, or
+    /// `None` for the default. Persisted through the layout DTOs
+    /// ([`PanePayload::color`] / [`TileLayout::pane_color`]) -- see
+    /// `PanePayload::color`'s doc comment for the JSON-compatibility
+    /// contract. Like `title`, this is pure display state; nothing in this
+    /// crate interprets the string.
+    pub color: Option<String>,
 }
 
 impl PaneItem {
@@ -423,6 +449,7 @@ impl PaneItem {
             title: title.into(),
             agent_session_id: None,
             agent_transcript_path: None,
+            color: None,
         }
     }
 
@@ -438,6 +465,7 @@ impl PaneItem {
             title: title.into(),
             agent_session_id: Some(agent_session_id.into()),
             agent_transcript_path: Some(agent_transcript_path.into()),
+            color: None,
         }
     }
 
@@ -1249,6 +1277,7 @@ fn encode(node: &TileNode) -> TileLayout {
                 pane_title: Some(pane.title.clone()),
                 pane_agent_session_id: pane.agent_session_id.clone(),
                 pane_agent_transcript_path: pane.agent_transcript_path.clone(),
+                pane_color: pane.color.clone(),
                 ..Default::default()
             };
         }
@@ -1261,6 +1290,7 @@ fn encode(node: &TileNode) -> TileLayout {
                         title: Some(p.title.clone()),
                         agent_session_id: p.agent_session_id.clone(),
                         agent_transcript_path: p.agent_transcript_path.clone(),
+                        color: p.color.clone(),
                     })
                     .collect(),
             ),
@@ -1301,6 +1331,7 @@ fn decode(layout: &TileLayout) -> Option<TileNode> {
                         .unwrap_or_else(|| kind.default_title().to_string()),
                     agent_session_id: payload.agent_session_id.clone(),
                     agent_transcript_path: payload.agent_transcript_path.clone(),
+                    color: payload.color.clone(),
                 })
             })
             .collect();
@@ -1322,6 +1353,7 @@ fn decode(layout: &TileLayout) -> Option<TileNode> {
                 .unwrap_or_else(|| kind.default_title().to_string()),
             agent_session_id: layout.pane_agent_session_id.clone(),
             agent_transcript_path: layout.pane_agent_transcript_path.clone(),
+            color: layout.pane_color.clone(),
         }));
     }
     let children = layout.children.as_ref()?;
@@ -1847,6 +1879,106 @@ mod tests {
             restored.root.selected_pane().map(|p| p.title.as_str()),
             Some("変更")
         );
+    }
+
+    // MARK: - tab color (第10波 パーソナライズ)
+
+    /// A single-tab leaf's color rides the legacy shape's new `paneColor`
+    /// key: written only when set (`None` -> key omitted, so pre-第10波
+    /// JSON stays byte-identical -- see `PanePayload::color`'s doc
+    /// comment), and restored on decode.
+    #[test]
+    fn single_tab_color_round_trips_through_the_legacy_shape_and_json() {
+        let mut model = make_single_pane_model(PaneKind::Terminal);
+        let only_id = model.panes()[0].id;
+
+        // No color -> no key in the serialized JSON at all.
+        let plain = model.snapshot();
+        assert_eq!(plain.pane_color, None);
+        assert!(!plain.to_json().contains("paneColor"));
+
+        model.pane_mut(only_id).unwrap().color = Some("#d0ff00".to_string());
+        let layout = model.snapshot();
+        assert_eq!(layout.pane_color.as_deref(), Some("#d0ff00"));
+        let json = layout.to_json();
+        assert!(json.contains("\"paneColor\":\"#d0ff00\""));
+
+        let reparsed = TileLayout::from_json(&json).unwrap();
+        let restored = PaneTilingModel::model_from(&reparsed).unwrap();
+        assert_eq!(
+            restored
+                .root
+                .selected_pane()
+                .and_then(|p| p.color.as_deref()),
+            Some("#d0ff00")
+        );
+    }
+
+    /// A tab group's per-tab colors ride `PanePayload::color` (the new
+    /// `color` key), independently per tab, through snapshot -> JSON ->
+    /// decode.
+    #[test]
+    fn tab_group_colors_round_trip_per_tab() {
+        let mut model = make_single_pane_model(PaneKind::Terminal);
+        model.add_pane(PaneItem::new(PaneKind::Terminal, "t2"));
+        let first = model.panes()[0].id;
+        model.pane_mut(first).unwrap().color = Some("#ff9f0a".to_string());
+        // Second tab deliberately left color-less.
+
+        let json = model.snapshot().to_json();
+        let restored = PaneTilingModel::model_from(&TileLayout::from_json(&json).unwrap()).unwrap();
+        let colors: Vec<Option<&str>> = restored
+            .panes()
+            .iter()
+            .map(|p| p.color.as_deref())
+            .collect();
+        assert_eq!(colors, vec![Some("#ff9f0a"), None]);
+    }
+
+    /// Layout JSON written before this wave (no color keys anywhere)
+    /// decodes with every tab color `None` -- `serde`'s missing-optional
+    /// default, same contract as every other optional key.
+    #[test]
+    fn pre_color_json_decodes_with_no_tab_colors() {
+        let legacy =
+            TileLayout::from_json(r#"{"paneKind":"terminal","paneTitle":"端末"}"#).unwrap();
+        assert_eq!(legacy.pane_color, None);
+        let restored = PaneTilingModel::model_from(&legacy).unwrap();
+        assert_eq!(
+            restored.root.selected_pane().and_then(|p| p.color.clone()),
+            None
+        );
+    }
+
+    /// `stripping_agent_sessions` (preset save) keeps tab colors -- a color
+    /// is part of the layout's visual shape, like a title (see the method's
+    /// doc comment).
+    #[test]
+    fn stripping_agent_sessions_keeps_tab_colors() {
+        let mut model = make_single_pane_model(PaneKind::Terminal);
+        model.add_pane(PaneItem::with_agent_session(
+            PaneKind::Terminal,
+            "t2",
+            "sid-2",
+            "/tmp/x",
+        ));
+        let first = model.panes()[0].id;
+        model.pane_mut(first).unwrap().color = Some("#30d158".to_string());
+
+        let stripped = model.snapshot().stripping_agent_sessions();
+        let restored = PaneTilingModel::model_from(&stripped).unwrap();
+        assert_eq!(
+            restored
+                .panes()
+                .iter()
+                .map(|p| p.color.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("#30d158"), None]
+        );
+        assert!(restored
+            .panes()
+            .iter()
+            .all(|p| p.agent_session_id.is_none()));
     }
 
     /// Port of `testStrippingAgentSessionsRemovesIDs`.
