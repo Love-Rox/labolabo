@@ -27,6 +27,7 @@ mod ghostty_config;
 mod git_pane;
 mod grid;
 mod hooks;
+mod i18n;
 mod ide_open;
 mod ime;
 mod keys;
@@ -45,6 +46,15 @@ mod task_menu;
 mod task_workspace;
 mod theme;
 mod window_bounds;
+
+// i18n wave (6f, `crate::i18n`): loads `locales/{ja,en}.yml`, compiled in at
+// build time, and defines the `t!()` macro every other module imports
+// (`use rust_i18n::t;`) to look strings up. `fallback = "en"` means a key
+// present in only one locale file still renders (in English) rather than
+// showing the raw key -- the quality gate that actually blocks a missing
+// translation is the `locales_have_the_same_keys` test in `i18n.rs`'s
+// sibling test module (`tests/i18n_parity.rs`), not this fallback.
+rust_i18n::i18n!("locales", fallback = "en");
 
 use gpui::{
     prelude::*, px, size, App, Application, Bounds, KeyBinding, Pixels, WindowBounds, WindowOptions,
@@ -86,6 +96,20 @@ fn main() {
         .ok()
         .and_then(|db| db.window_bounds().ok().flatten())
         .and_then(|json| window_bounds::decode(&json));
+
+    // UI language (wave 6f, `crate::i18n`) -- same "read up front via a
+    // short-lived connection" shape as `saved_bounds` above. Absent/corrupt
+    // just means `LocaleSetting::Auto` (OS-detected), matching every other
+    // `AppSettings` field's "missing key degrades to the pre-settings-screen
+    // default" contract (`settings::AppSettings::load`'s doc comment) --
+    // here, "OS locale" *is* the pre-i18n-wave behavior (everything was
+    // hardcoded Japanese, so `ja` is the closer match for a `ja*` system,
+    // `en` otherwise).
+    let locale_setting = TaskDatabase::open(&TaskDatabase::default_path())
+        .ok()
+        .map(|db| i18n::load_locale_setting(&db))
+        .unwrap_or_default();
+    rust_i18n::set_locale(locale_setting.resolve());
 
     Application::new().run(move |cx: &mut App| {
         // Tile/tab keybindings (see `app.rs`'s `actions!` list for the
@@ -132,8 +156,11 @@ fn main() {
         // see `LaboLaboApp::new`).
         cx.on_action(|_: &Quit, cx| cx.quit());
 
-        // Menu bar (wave 6c §1) -- after `bind_keys` (see above).
-        cx.set_menus(menus::app_menus());
+        // Menu bar (wave 6c §1) -- after `bind_keys` (see above), and after
+        // `rust_i18n::set_locale` above so its labels are already in the
+        // right language on first paint (`menus::app_menus` takes the
+        // locale explicitly -- see that function's doc comment for why).
+        cx.set_menus(menus::app_menus(&rust_i18n::locale()));
 
         // Window bounds restore (wave 6c §3): saved bounds win if they
         // still intersect a connected display; otherwise (display

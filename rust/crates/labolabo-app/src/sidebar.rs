@@ -22,6 +22,7 @@ use gpui::{
     div, prelude::*, px, rgb, rgba, App, Context, ExternalPaths, IntoElement, MouseButton,
     MouseDownEvent, Render, SharedString, Window,
 };
+use rust_i18n::t;
 
 use labolabo_core::{AgentStatus, Task, TaskKind};
 
@@ -171,9 +172,10 @@ fn kind_marker(kind: &TaskKind) -> &'static str {
 fn icon_button(
     id: &'static str,
     glyph: &'static str,
-    tooltip_text: &'static str,
+    tooltip_text: String,
     on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
+    let tooltip_text: SharedString = tooltip_text.into();
     div()
         .id(id)
         .w(px(28.0))
@@ -186,7 +188,7 @@ fn icon_button(
         .text_color(rgb(theme::text::PRIMARY))
         .hover(|el| el.bg(rgb(theme::surface::ACTIVE)))
         .active(|el| el.opacity(0.8))
-        .tooltip(move |_window, cx| cx.new(|_| IconTooltip(tooltip_text.into())).into())
+        .tooltip(move |_window, cx| cx.new(|_| IconTooltip(tooltip_text.clone())).into())
         .on_mouse_down(MouseButton::Left, on_click)
         .child(glyph)
 }
@@ -229,15 +231,16 @@ pub fn render(
             // status-fetched Tasks participate" limitation.
             let conflicts = app.task_conflicts(&task.id);
             let has_conflict = !conflicts.is_empty();
-            let conflict_tooltip: SharedString = format!(
-                "{} 件のファイルが競合: {}",
-                conflicts.len(),
-                conflicts
+            let conflict_tooltip: SharedString = t!(
+                "sidebar.conflict_tooltip",
+                count = conflicts.len(),
+                paths = conflicts
                     .iter()
                     .map(|c| c.path.as_str())
                     .collect::<Vec<_>>()
                     .join(", ")
             )
+            .to_string()
             .into();
             let conflict_badge_id: SharedString = format!("conflict-badge-{}", task.id).into();
             let row_id: SharedString = format!("task-row-{}", task.id).into();
@@ -268,7 +271,10 @@ pub fn render(
                 .hover(|el| el.bg(rgb(theme::surface::ACTIVE)))
                 .active(|el| el.opacity(0.8))
                 .tooltip(move |_window, cx| {
-                    cx.new(|_| IconTooltip("アーカイブ / 削除…".into())).into()
+                    cx.new(|_| {
+                        IconTooltip(t!("sidebar.task_menu_button_tooltip").to_string().into())
+                    })
+                    .into()
                 })
                 .on_mouse_down(
                     MouseButton::Left,
@@ -371,7 +377,7 @@ pub fn render(
         .child(icon_button(
             "new-attached-task",
             "+",
-            "既存のフォルダを開く…",
+            t!("sidebar.new_attached_task_tooltip").to_string(),
             cx.listener(|this, _: &MouseDownEvent, window, cx| {
                 this.start_new_attached_task(window, cx);
             }),
@@ -379,7 +385,7 @@ pub fn render(
         .child(icon_button(
             "new-worktree-task",
             "+\u{2387}",
-            "新規セッション（worktree を作成）…",
+            t!("sidebar.new_worktree_task_tooltip").to_string(),
             cx.listener(|this, _: &MouseDownEvent, window, cx| {
                 this.start_new_worktree_task(window, cx);
             }),
@@ -512,10 +518,9 @@ fn render_archived_section(
             }),
         )
         .child(if expanded { "\u{25BE}" } else { "\u{25B8}" }) // ▾ / ▸
-        .child(SharedString::from(format!(
-            "アーカイブ済み ({})",
-            archived.len()
-        )));
+        .child(SharedString::from(
+            t!("sidebar.archived_section_title", count = archived.len()).to_string(),
+        ));
 
     let mut section = div()
         .flex()
@@ -562,7 +567,7 @@ fn render_archived_section(
                                     this.restore_task(&restore_id, window, cx);
                                 }),
                             )
-                            .child("復元"),
+                            .child(t!("sidebar.restore").to_string()),
                     ),
             );
         }

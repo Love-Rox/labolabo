@@ -38,6 +38,7 @@ use labolabo_core::{
     TileOrientation,
 };
 use labolabo_term::{TermEvent, Terminal};
+use rust_i18n::t;
 
 use crate::app::{LaboLaboApp, PreeditState};
 use crate::commit_pane;
@@ -1330,9 +1331,21 @@ fn render_open_git_tile_buttons(task_id: &str, cx: &mut Context<LaboLaboApp>) ->
     // `crate::sidebar::icon_button`'s doc comment): ▤ (list/file lines) for
     // Files, ± for Diff, ⧖ (hourglass -- history) for Commits.
     let buttons = [
-        (PaneKind::Files, "\u{25a4}", "Git: 変更ファイルを開く"),
-        (PaneKind::Diff, "\u{00b1}", "Git: Diff を開く"),
-        (PaneKind::Commits, "\u{29d6}", "Git: コミット履歴を開く"),
+        (
+            PaneKind::Files,
+            "\u{25a4}",
+            t!("git.tile_button.files_tooltip").to_string(),
+        ),
+        (
+            PaneKind::Diff,
+            "\u{00b1}",
+            t!("git.tile_button.diff_tooltip").to_string(),
+        ),
+        (
+            PaneKind::Commits,
+            "\u{29d6}",
+            t!("git.tile_button.commits_tooltip").to_string(),
+        ),
     ];
     let mut row = div().flex().flex_row().items_center().gap_1().pl_1();
     for (kind, glyph, tooltip) in buttons {

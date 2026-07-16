@@ -14,6 +14,7 @@
 use std::path::Path;
 
 use labolabo_core::{branch_naming, GitEngine};
+use rust_i18n::t;
 
 /// The git-side outcome of a successful "new worktree Task" flow, handed
 /// back to `LaboLaboApp::finish_new_worktree_task` to turn into a persisted
@@ -39,11 +40,18 @@ pub struct PreparedWorktree {
 /// the status call itself failing) -- the plan leaves base-branch
 /// selection UI to a future, fuller dialog ("本格ダイアログは将来"); this
 /// wave's "+"-menu flow has no field for it.
-pub fn create_worktree_task(repo_path: &Path) -> Result<PreparedWorktree, String> {
+///
+/// `locale` (`"ja"`/`"en"`) is passed explicitly rather than read from
+/// `rust_i18n::locale()` ambiently because this runs on a background thread
+/// (`cx.background_spawn`) -- same rationale, verbatim, as
+/// `task_lifecycle::remove_worktree_and_maybe_branch`'s doc comment. The
+/// error strings surface in the sidebar's error banner, so they are
+/// user-facing UI copy, not developer stderr.
+pub fn create_worktree_task(repo_path: &Path, locale: &str) -> Result<PreparedWorktree, String> {
     let engine = GitEngine::new();
     let repo = engine
         .repo_info(repo_path)
-        .map_err(|err| format!("not a git repository ({err})"))?;
+        .map_err(|err| t!("task.new.error.not_a_repo", locale = locale, err = err).to_string())?;
     let repo_root = Path::new(&repo.root);
 
     let existing = engine.local_branches(repo_root).unwrap_or_default();
@@ -60,7 +68,14 @@ pub fn create_worktree_task(repo_path: &Path) -> Result<PreparedWorktree, String
 
     engine
         .add_worktree(repo_root, &worktree_path, &branch, &base)
-        .map_err(|err| format!("git worktree add failed ({err})"))?;
+        .map_err(|err| {
+            t!(
+                "task.new.error.worktree_add_failed",
+                locale = locale,
+                err = err
+            )
+            .to_string()
+        })?;
 
     Ok(PreparedWorktree {
         repo_key: repo.key,
@@ -126,7 +141,7 @@ mod tests {
         let repo = scratch_dir("labolabo-new-task-worktree");
         init_repo_with_commit(&repo);
 
-        let prepared = create_worktree_task(&repo).expect("worktree creation should succeed");
+        let prepared = create_worktree_task(&repo, "ja").expect("worktree creation should succeed");
         assert_eq!(prepared.base, "main");
         assert!(prepared.branch.starts_with("labolabo/"));
         assert!(std::path::Path::new(&prepared.worktree_path).is_dir());
@@ -138,7 +153,7 @@ mod tests {
     #[test]
     fn create_worktree_task_on_a_non_repo_directory_fails() {
         let dir = scratch_dir("labolabo-new-task-not-a-repo");
-        assert!(create_worktree_task(&dir).is_err());
+        assert!(create_worktree_task(&dir, "ja").is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

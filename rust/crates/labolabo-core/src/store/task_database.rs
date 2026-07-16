@@ -393,6 +393,27 @@ impl TaskDatabase {
         self.set_app_state(Some(json), Self::KEY_WINDOW_BOUNDS)
     }
 
+    // MARK: - App state (UI language, wave 6f)
+
+    /// `appState` key backing the settings screen's language picker
+    /// (`labolabo-app`'s `crate::i18n::LocaleSetting`). Stored value is one
+    /// of `"auto"`/`"ja"`/`"en"` (`LocaleSetting::as_db_str`) -- this store,
+    /// as usual, only round-trips the raw string; resolving `"auto"` to an
+    /// actual locale (OS detection) is `labolabo-app`'s job.
+    const KEY_LOCALE: &'static str = "locale";
+
+    /// `None` if never set -- the caller (`labolabo-app::i18n::
+    /// load_locale_setting`) treats that the same as `"auto"`, so a fresh
+    /// database (or one from before this wave) behaves exactly as if the
+    /// user had explicitly picked "自動".
+    pub fn locale(&self) -> StoreResult<Option<String>> {
+        self.app_state(Self::KEY_LOCALE)
+    }
+
+    pub fn set_locale(&self, value: &str) -> StoreResult<()> {
+        self.set_app_state(Some(value), Self::KEY_LOCALE)
+    }
+
     fn set_app_state(&self, value: Option<&str>, key: &str) -> StoreResult<()> {
         self.conn.execute(
             "INSERT INTO appState(key, value) VALUES(?1, ?2) \
@@ -665,6 +686,16 @@ mod tests {
             db.window_bounds().unwrap().as_deref(),
             Some(r#"{"x":1.0,"y":2.0,"w":3.0,"h":4.0}"#)
         );
+    }
+
+    #[test]
+    fn locale_round_trips_and_defaults_to_none() {
+        let db = TaskDatabase::open_in_memory().unwrap();
+        assert_eq!(db.locale().unwrap(), None);
+        db.set_locale("ja").unwrap();
+        assert_eq!(db.locale().unwrap().as_deref(), Some("ja"));
+        db.set_locale("en").unwrap();
+        assert_eq!(db.locale().unwrap().as_deref(), Some("en"));
     }
 
     #[test]
