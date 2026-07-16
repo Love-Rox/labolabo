@@ -965,6 +965,24 @@ impl PaneTilingModel {
         self.panes().iter().any(|p| p.kind == kind)
     }
 
+    /// The `PaneKind` of each leaf's *currently selected* tab -- i.e. what's
+    /// actually front-facing on screen right now, tree order. Unlike
+    /// [`Self::panes`] (every tab of every leaf, including hidden
+    /// non-selected ones), a leaf with 2+ tabs contributes exactly one entry
+    /// here: its `selected_pane()`'s kind. Used by the UI layer (`labolabo-
+    /// app`'s `LaboLaboApp::git_pane_state_needed`) to decide whether *any*
+    /// Git-kind display (`Files`/`Diff`/`Commits`) is currently visible for
+    /// this Task, so its Git state's background refresh/watch can be gated
+    /// on "is anything actually showing it" rather than only the fixed
+    /// side-pane's own visibility flag.
+    pub fn visible_pane_kinds(&self) -> Vec<PaneKind> {
+        self.root
+            .leaves()
+            .into_iter()
+            .filter_map(|leaf| leaf.selected_pane().map(|p| p.kind))
+            .collect()
+    }
+
     // MARK: - layout serialization / restore / presets
 
     /// Builds a model from a persisted layout (`None` if invalid).
@@ -1421,6 +1439,42 @@ mod tests {
             model.root.children[0].selected_pane().map(|p| p.kind),
             Some(PaneKind::Terminal)
         );
+    }
+
+    // MARK: - visible_pane_kinds
+
+    #[test]
+    fn visible_pane_kinds_lists_every_leafs_selected_kind() {
+        let model = PaneTilingModel::default_layout();
+        let mut kinds = model.visible_pane_kinds();
+        kinds.sort_by_key(|k| k.raw_value());
+        let mut expected = vec![
+            PaneKind::Terminal,
+            PaneKind::Commits,
+            PaneKind::Files,
+            PaneKind::Diff,
+        ];
+        expected.sort_by_key(|k| k.raw_value());
+        assert_eq!(kinds, expected);
+    }
+
+    #[test]
+    fn visible_pane_kinds_excludes_a_tab_groups_non_selected_tab() {
+        let node = TileNode::tab_group(
+            vec![
+                PaneItem::new(PaneKind::Terminal, "t"),
+                PaneItem::new(PaneKind::Files, "f"),
+            ],
+            0, // Terminal tab selected -> Files tab is hidden
+        );
+        let model = PaneTilingModel::new(node);
+        assert_eq!(model.visible_pane_kinds(), vec![PaneKind::Terminal]);
+    }
+
+    #[test]
+    fn visible_pane_kinds_of_single_leaf_is_that_kind() {
+        let model = make_single_pane_model(PaneKind::Commits);
+        assert_eq!(model.visible_pane_kinds(), vec![PaneKind::Commits]);
     }
 
     // MARK: - split / add / close

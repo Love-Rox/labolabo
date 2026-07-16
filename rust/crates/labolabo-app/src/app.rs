@@ -141,6 +141,13 @@ actions!(
         MinimizeWindow,
         ZoomWindow,
         OpenSelectedInIde,
+        // Git-tile panes (`plans` W6d, `crate::task_workspace`/
+        // `crate::commit_pane`): open the corresponding Git-kind pane as an
+        // ordinary tile in the focused pane's tab group / メニューバー「表示」
+        // -- see `LaboLaboApp::open_git_tile_pane`.
+        OpenGitFilesPane,
+        OpenGitDiffPane,
+        OpenGitCommitsPane,
     ]
 );
 
@@ -403,7 +410,7 @@ impl LaboLaboApp {
         if let Some(id) = selected_task_id {
             let (cols, rows) = this.viewport_grid_size(window);
             this.ensure_workspace_loaded(&id, cols, rows, cx);
-            this.activate_git_pane(&id, cx);
+            this.sync_git_pane_activation(&id, cx);
         }
 
         this.dev_force_running_if_requested(cx);
@@ -1284,7 +1291,7 @@ impl LaboLaboApp {
             task.last_active_at = chrono::Utc::now();
             let _ = self.db.upsert_task(task);
         }
-        self.activate_git_pane(&task_id, cx);
+        self.sync_git_pane_activation(&task_id, cx);
 
         window.focus(&self.focus_handle);
         cx.notify();
@@ -1305,6 +1312,11 @@ impl LaboLaboApp {
         }
         window.focus(&self.focus_handle);
         self.persist_workspace(task_id);
+        // A tab switch can bring a Files/Diff/Commits-kind tab to front (or
+        // send one to the back) within its tab group -- re-check whether
+        // this Task's Git state is still needed by *something* visible
+        // (`plans` W6d's watch-visibility generalization).
+        self.sync_git_pane_activation(task_id, cx);
         cx.notify();
     }
 
@@ -1556,6 +1568,9 @@ impl LaboLaboApp {
             }
         }
         self.persist_workspace(task_id);
+        // Closing the last Files/Diff/Commits-kind tile might mean nothing
+        // on screen needs this Task's Git state anymore (`plans` W6d).
+        self.sync_git_pane_activation(task_id, cx);
         cx.notify();
     }
 
@@ -1696,7 +1711,7 @@ impl LaboLaboApp {
         }
         self.selected_task_id = Some(id.clone());
         let _ = self.db.set_selected_task_id(Some(&id));
-        self.activate_git_pane(&id, cx);
+        self.sync_git_pane_activation(&id, cx);
         cx.notify();
     }
 
@@ -1826,6 +1841,10 @@ impl LaboLaboApp {
         }
         window.focus(&self.focus_handle);
         self.persist_workspace(task_id);
+        // A tab move/merge can change which kind is front-facing in either
+        // the source or target tab group (`plans` W6d's watch-visibility
+        // generalization).
+        self.sync_git_pane_activation(task_id, cx);
         cx.notify();
     }
 
@@ -2800,9 +2819,12 @@ impl LaboLaboApp {
     }
 
     /// Shows/hides `task_id`'s Git pane, starting or stopping its
-    /// `FileWatcher` to match (see [`Self::activate_git_pane`]/
-    /// [`Self::deactivate_git_pane`]) -- called by both the `Cmd+Shift+G`
-    /// action and the pane's own header "×" close button.
+    /// `FileWatcher` to match (via [`Self::sync_git_pane_activation`]) --
+    /// called by both the `Cmd+Shift+G` action and the pane's own header
+    /// "×" close button. Hiding the fixed pane doesn't necessarily stop the
+    /// watch outright anymore (`plans` W6d) -- a Files/Diff/Commits tile
+    /// pane elsewhere in the same Task's tree can still need it; that
+    /// decision is [`Self::git_pane_state_needed`]'s job.
     pub(crate) fn set_git_pane_visible(
         &mut self,
         task_id: &str,
@@ -2817,25 +2839,64 @@ impl LaboLaboApp {
         }
         workspace.git.visible = visible;
         cx.notify();
-        if visible {
+        self.sync_git_pane_activation(task_id, cx);
+    }
+
+    /// Whether `task_id`'s Git state (status/changed-files/diff/commits) is
+    /// needed by *something* currently on screen: the fixed right pane
+    /// ([`crate::git_pane::GitPaneState::visible`]) and/or a Files/Diff/
+    /// Commits-kind tile that's the front-facing tab of its tab group (a
+    /// tile of that kind hidden behind another tab doesn't count -- it
+    /// isn't drawn, mirrors [`labolabo_core::PaneTilingModel::
+    /// visible_pane_kinds`]'s own "front-facing only" contract). Pure read,
+    /// no side effect -- the actual watch start/stop decision is
+    /// [`Self::sync_git_pane_activation`]'s job, which calls this.
+    ///
+    /// Thin wrapper around the pure, unit-tested [`git_pane_needed`] --
+    /// split out the same way [`Self::task_conflicts`]/
+    /// [`compute_task_conflicts`] are, so the actual decision rule doesn't
+    /// need a real `LaboLaboApp` to test.
+    fn git_pane_state_needed(&self, task_id: &str) -> bool {
+        let Some(workspace) = self.workspaces.get(task_id) else {
+            return false;
+        };
+        git_pane_needed(workspace.git.visible, &workspace.model.visible_pane_kinds())
+    }
+
+    /// Starts/stops `task_id`'s Git-pane `FileWatcher` to match
+    /// [`Self::git_pane_state_needed`] (`plans` W6d's "watch は Git 系表示
+    /// が1つでも可視のときだけ動かす" generalization, covering both the
+    /// fixed pane and any Git-kind tile pane) -- the single call every
+    /// mutation that can change "is a Git-kind pane visible for this Task"
+    /// should make afterward, replacing what used to be direct
+    /// [`Self::activate_git_pane`]/[`Self::deactivate_git_pane`] calls
+    /// gated only on `GitPaneState::visible`. A no-op unless `task_id` is
+    /// the currently *selected* Task -- only the selected Task's watch is
+    /// ever live (`crate::git_pane`'s module doc comment).
+    pub(crate) fn sync_git_pane_activation(&mut self, task_id: &str, cx: &mut Context<Self>) {
+        if self.selected_task_id.as_deref() != Some(task_id) {
+            return;
+        }
+        if self.git_pane_state_needed(task_id) {
             self.activate_git_pane(task_id, cx);
         } else {
             self.deactivate_git_pane(task_id);
         }
     }
 
-    /// Starts `task_id`'s Git pane watching (if it's visible and isn't
-    /// already) and kicks off an initial refresh -- a no-op if the Task has
-    /// no loaded workspace, is already watching, or is currently hidden.
-    /// Called whenever `task_id` becomes the *selected* Task (`select_task`/
-    /// `LaboLaboApp::new`/`add_task_and_select`) and when its pane is made
-    /// visible ([`Self::set_git_pane_visible`]) -- see `crate::git_pane`'s
-    /// module doc comment for why this is scoped to the selected Task only.
+    /// Starts `task_id`'s Git pane watching (if it isn't already) and kicks
+    /// off an initial refresh -- a no-op if the Task has no loaded
+    /// workspace or is already watching. Callers are expected to have
+    /// already decided this is wanted (today: exclusively
+    /// [`Self::sync_git_pane_activation`], via [`Self::git_pane_state_needed`])
+    /// -- this method itself no longer re-checks `GitPaneState::visible`,
+    /// since visibility alone stopped being the whole story once Git-kind
+    /// tile panes could also need the same watch (`plans` W6d).
     pub(crate) fn activate_git_pane(&mut self, task_id: &str, cx: &mut Context<Self>) {
         let Some(workspace) = self.workspaces.get(task_id) else {
             return;
         };
-        if !workspace.git.visible || workspace.git.is_watching() {
+        if workspace.git.is_watching() {
             return;
         }
         let Some(task) = self.tasks.iter().find(|t| t.id == task_id) else {
@@ -3112,6 +3173,121 @@ impl LaboLaboApp {
         }
         cx.notify();
     }
+
+    // MARK: - Git-tile panes (`plans` W6d, `crate::task_workspace`/
+    // `crate::commit_pane`)
+
+    fn action_open_git_files_pane(
+        &mut self,
+        _: &OpenGitFilesPane,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(task_id) = self.selected_task_id.clone() {
+            self.open_git_tile_pane(&task_id, PaneKind::Files, window, cx);
+        }
+    }
+
+    fn action_open_git_diff_pane(
+        &mut self,
+        _: &OpenGitDiffPane,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(task_id) = self.selected_task_id.clone() {
+            self.open_git_tile_pane(&task_id, PaneKind::Diff, window, cx);
+        }
+    }
+
+    fn action_open_git_commits_pane(
+        &mut self,
+        _: &OpenGitCommitsPane,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(task_id) = self.selected_task_id.clone() {
+            self.open_git_tile_pane(&task_id, PaneKind::Commits, window, cx);
+        }
+    }
+
+    /// Opens `kind` (`Files`/`Diff`/`Commits`) as an ordinary tile pane in
+    /// `task_id`'s tree (`plans` W6d §3): if a pane of that kind already
+    /// exists anywhere in the tree (even hidden behind another tab), just
+    /// brings it to front and focuses it; otherwise splits a new one off
+    /// the current layout the same way [`Self::split_focused`] does for a
+    /// new terminal pane ([`PaneTilingModel::add_pane`]). Called by the
+    /// focused pane's tab-bar icon buttons (`crate::task_workspace::
+    /// render_open_git_tile_buttons`), the メニューバー「表示」 items
+    /// (`crate::menus`), and the fixed Git pane's own "タイルとして開く"
+    /// button ([`Self::promote_git_pane_to_tiles`]). Once open, it's a
+    /// perfectly ordinary tile -- tab/split/DnD/persistence all just work,
+    /// since [`labolabo_core::tiling`] already treats every `PaneKind`
+    /// alike (no new tiling-model behavior needed this wave, only the UI
+    /// affordance to reach it and `crate::task_workspace::render_leaf`'s
+    /// kind-aware rendering).
+    pub(crate) fn open_git_tile_pane(
+        &mut self,
+        task_id: &str,
+        kind: PaneKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workspace) = self.workspaces.get_mut(task_id) else {
+            return;
+        };
+        if let Some(existing_id) = workspace
+            .model
+            .panes()
+            .iter()
+            .find(|p| p.kind == kind)
+            .map(|p| p.id)
+        {
+            workspace.model.select_tab(existing_id);
+            workspace.focused_pane = existing_id;
+        } else {
+            let pane = PaneItem::new(kind, kind.default_title());
+            let new_id = pane.id;
+            workspace.model.add_pane(pane);
+            workspace.focused_pane = new_id;
+        }
+        window.focus(&self.focus_handle);
+        self.persist_workspace(task_id);
+        self.sync_git_pane_activation(task_id, cx);
+        cx.notify();
+    }
+
+    /// The fixed Git pane's header "タイルとして開く" button (`plans` W6d
+    /// §3): opens `Files` and `Diff` tile panes for this Task (the same two
+    /// the fixed pane itself shows -- `Commits` isn't part of the fixed
+    /// pane, see `crate::git_pane`'s module doc comment, so it's not opened
+    /// here either) and hides the now-redundant fixed pane. From then on
+    /// this Task's Git display lives entirely in the ordinary tile tree --
+    /// tabbable/splittable/draggable/persisted like any other pane.
+    pub(crate) fn promote_git_pane_to_tiles(
+        &mut self,
+        task_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_git_tile_pane(task_id, PaneKind::Files, window, cx);
+        self.open_git_tile_pane(task_id, PaneKind::Diff, window, cx);
+        self.set_git_pane_visible(task_id, false, cx);
+    }
+}
+
+/// Pure decision behind [`LaboLaboApp::git_pane_state_needed`]: is `task_id`'s
+/// Git state needed by *something* currently on screen -- the fixed pane's
+/// own visibility flag, or any front-facing (`PaneTilingModel::
+/// visible_pane_kinds`) tile of a Git kind (`Files`/`Diff`/`Commits`).
+/// Split out purely so this rule (`plans` W6d's watch-visibility
+/// generalization) is unit-testable without a gpui `Context`, the same way
+/// [`compute_task_conflicts`] is kept separate from [`LaboLaboApp::
+/// task_conflicts`].
+fn git_pane_needed(git_visible: bool, visible_kinds: &[PaneKind]) -> bool {
+    git_visible
+        || visible_kinds
+            .iter()
+            .any(|kind| matches!(kind, PaneKind::Files | PaneKind::Diff | PaneKind::Commits))
 }
 
 /// Pure conflict computation behind [`LaboLaboApp::task_conflicts`]: builds
@@ -3337,6 +3513,7 @@ impl Render for LaboLaboApp {
                     &workspace.runtimes,
                     &workspace.pane_status,
                     &workspace.pane_usage,
+                    &workspace.git,
                     focused_pane,
                     &spec,
                     &focus_handle,
@@ -3402,6 +3579,9 @@ impl Render for LaboLaboApp {
             .on_action(cx.listener(Self::action_select_tab_8))
             .on_action(cx.listener(Self::action_select_tab_9))
             .on_action(cx.listener(Self::action_toggle_git_pane))
+            .on_action(cx.listener(Self::action_open_git_files_pane))
+            .on_action(cx.listener(Self::action_open_git_diff_pane))
+            .on_action(cx.listener(Self::action_open_git_commits_pane))
             .on_action(cx.listener(Self::action_toggle_settings))
             .on_action(cx.listener(Self::action_about))
             .on_action(cx.listener(Self::action_new_attached_task))
@@ -3525,5 +3705,32 @@ mod tests {
     #[test]
     fn empty_tasks_yields_no_conflicts() {
         assert!(compute_task_conflicts(&[], &HashMap::new(), "a").is_empty());
+    }
+
+    // MARK: - git_pane_needed (`plans` W6d watch-visibility generalization)
+
+    #[test]
+    fn fixed_pane_visible_alone_is_enough() {
+        assert!(git_pane_needed(true, &[]));
+        assert!(git_pane_needed(true, &[PaneKind::Terminal]));
+    }
+
+    #[test]
+    fn a_front_facing_git_kind_tile_is_enough_even_with_the_fixed_pane_hidden() {
+        assert!(git_pane_needed(
+            false,
+            &[PaneKind::Terminal, PaneKind::Files]
+        ));
+        assert!(git_pane_needed(false, &[PaneKind::Diff]));
+        assert!(git_pane_needed(false, &[PaneKind::Commits]));
+    }
+
+    #[test]
+    fn terminal_only_tiles_with_the_fixed_pane_hidden_need_nothing() {
+        assert!(!git_pane_needed(
+            false,
+            &[PaneKind::Terminal, PaneKind::Terminal]
+        ));
+        assert!(!git_pane_needed(false, &[]));
     }
 }

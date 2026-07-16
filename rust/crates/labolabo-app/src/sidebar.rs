@@ -81,7 +81,9 @@ impl Render for TaskDragPreview {
 /// Used by [`icon_button`] (the sidebar's two "new Task" icon buttons --
 /// see that function's doc comment for why icons + tooltip replaced the
 /// previous two-text-button row) and the changed-file conflict badge below.
-struct IconTooltip(SharedString);
+/// `pub(crate)` so `crate::task_workspace`'s Git-tile-open icon buttons
+/// (`plans` W6d) can reuse the same tooltip shape instead of redefining it.
+pub(crate) struct IconTooltip(pub SharedString);
 
 impl Render for IconTooltip {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {

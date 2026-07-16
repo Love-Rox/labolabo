@@ -670,4 +670,59 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&repo);
     }
+
+    /// `GitEngine::commit_graph` against a real repo -- `commit_graph::build`
+    /// itself already has thorough unit tests against hand-written raw `git
+    /// log` output (see that module's tests), so this is deliberately just
+    /// an integration smoke test of the process-spawning half: a real `git
+    /// log` invocation's output round-trips through `build` into the
+    /// expected row count/lane layout (`plans` W6d's "一時 git リポジトリで
+    /// の統合テスト（commits 取得→行数/レーン検証）").
+    #[cfg(unix)]
+    #[test]
+    fn commit_graph_against_a_real_repo_reports_rows_newest_first_in_one_lane() {
+        let repo = scratch_dir("labolabo-git-engine-commit-graph");
+        init_repo_with_commit(&repo); // 1 commit: "init"
+        write_file(&repo, "a.txt", "one\ntwo\nthree\nfour\n");
+        git(&["add", "."], &repo);
+        git(
+            &["-c", "commit.gpgsign=false", "commit", "-m", "second"],
+            &repo,
+        );
+        write_file(&repo, "b.txt", "new\n");
+        git(&["add", "."], &repo);
+        git(
+            &["-c", "commit.gpgsign=false", "commit", "-m", "third"],
+            &repo,
+        );
+
+        let engine = GitEngine::new();
+        let rows = engine
+            .commit_graph(&repo, DEFAULT_COMMIT_GRAPH_LIMIT)
+            .unwrap();
+
+        assert_eq!(rows.len(), 3);
+        // `--topo-order` on a linear history without `--reverse`: newest
+        // commit first, exactly the `git log` default a UI wants.
+        assert_eq!(
+            rows.iter()
+                .map(|r| r.commit.subject.as_str())
+                .collect::<Vec<_>>(),
+            vec!["third", "second", "init"]
+        );
+        // A linear (no branch/merge) history never needs a second lane --
+        // every row's node stays in lane 0, mirroring
+        // `commit_graph::tests::linear_history_stays_in_one_lane`.
+        assert!(
+            rows.iter().all(|r| r.node_lane == 0),
+            "linear history should stay in a single lane: {rows:?}"
+        );
+        assert!(
+            rows.iter().all(|r| r.commit.hash.len() >= 7),
+            "GitEngine::commit_graph should report an abbreviated (%h) hash: {rows:?}"
+        );
+        assert!(rows.iter().all(|r| r.commit.date.is_some()));
+
+        let _ = std::fs::remove_dir_all(&repo);
+    }
 }
