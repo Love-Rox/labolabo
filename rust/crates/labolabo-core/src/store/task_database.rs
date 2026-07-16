@@ -13,10 +13,12 @@
 //! `labolabo-app`) writing the same SQLite file concurrently, and because
 //! this schema has no `session`/`appState`-v3 relationship to Swift's at
 //! all. [`TaskDatabase::default_path`] resolves under
-//! [`super::data_dir::rust_app_data_dir`] instead (`.../LaboLabo-rs/` — see
-//! that function's doc comment) — a different leaf directory, so the two
-//! database files can never collide even if both apps ran on the same
-//! machine at once.
+//! [`super::data_dir::rust_app_data_dir`], which — as of the 1.1.0
+//! "LaboLabo-rs" → "LaboLabo" rename — is the **same** directory as
+//! [`super::data_dir::app_data_dir`] (see that module's doc comment for the
+//! full rename writeup). What still keeps the two database files from
+//! colliding is the **filename**, not the directory: `labolabo.db` for the
+//! Swift app's `SessionDatabase`, `tasks.db` here.
 //!
 //! ## Schema / migrations
 //!
@@ -56,7 +58,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::tiling::TileLayout;
 
-use super::data_dir::rust_app_data_dir;
+use super::data_dir::{legacy_rust_app_data_dir_from, rust_app_data_dir, TASK_DB_FILE_NAME};
 use super::error::{StoreError, StoreResult};
 use super::task_record::{Task, TaskKind, TaskStatus};
 
@@ -118,13 +120,34 @@ impl TaskDatabase {
         Ok(Self { conn })
     }
 
-    /// `~/Library/Application Support/LaboLabo-rs/tasks.db` on macOS (and
-    /// the platform-appropriate equivalent elsewhere — see
-    /// [`rust_app_data_dir`]). Deliberately a different directory tree
-    /// *and* filename from the Swift app's `labolabo.db` — see this
-    /// module's doc comment.
+    /// `~/Library/Application Support/LaboLabo/tasks.db` on macOS (and the
+    /// platform-appropriate equivalent elsewhere — see [`rust_app_data_dir`]),
+    /// the same directory the Swift app's own `labolabo.db` lives in as of
+    /// the 1.1.0 rename — a different *filename*, not a different
+    /// directory, is what keeps the two apps' database files from ever
+    /// colliding (see this module's doc comment).
+    ///
+    /// Falls back to the pre-1.1.0 legacy path
+    /// (`.../LaboLabo-rs/tasks.db`) whenever a database already exists
+    /// there and nothing exists at the new path yet — covers both "the
+    /// startup migration (`data_dir::migrate_legacy_rust_data_dir`, called
+    /// once from `main.rs` before this) hasn't run in this process" and
+    /// "it ran but failed" without this function needing to know which:
+    /// once a database exists at the new path (whether migrated there or
+    /// freshly created there), it always wins.
     pub fn default_path() -> PathBuf {
-        rust_app_data_dir().join("tasks.db")
+        let new_path = rust_app_data_dir().join(TASK_DB_FILE_NAME);
+        if new_path.exists() {
+            return new_path;
+        }
+        let override_dir = std::env::var_os("LABOLABO_RS_DATA_DIR");
+        if let Some(legacy_dir) = legacy_rust_app_data_dir_from(override_dir.as_deref()) {
+            let legacy_path = legacy_dir.join(TASK_DB_FILE_NAME);
+            if legacy_path.exists() {
+                return legacy_path;
+            }
+        }
+        new_path
     }
 
     fn ensure_schema(conn: &Connection) -> StoreResult<()> {

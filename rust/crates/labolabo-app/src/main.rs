@@ -83,6 +83,16 @@ const INITIAL_WIDTH: f32 = 1120.0;
 const INITIAL_HEIGHT: f32 = 600.0;
 
 fn main() {
+    // One-time data-directory migration (1.1.0 rename): move a pre-rename
+    // `LaboLabo-rs/tasks.db` into the new `LaboLabo/` directory when the
+    // new side has no database yet. Must run before the first
+    // `TaskDatabase::open(&TaskDatabase::default_path())` below -- opening
+    // first would create an empty database at the new path, which would
+    // then win over (and permanently orphan) the user's real legacy data.
+    // A no-op on fresh installs, on already-migrated machines, and when
+    // `LABOLABO_RS_DATA_DIR` is set -- see the function's doc comment.
+    labolabo_core::store::migrate_legacy_rust_data_dir();
+
     // Read the user's Ghostty config (font-family/font-size, plus
     // background/foreground/cursor-color/palette/theme) once, up front --
     // pure file I/O, no gpui needed. Missing config just means Ghostty-
