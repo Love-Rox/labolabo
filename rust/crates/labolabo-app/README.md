@@ -80,14 +80,21 @@ SQLite file, and this schema shares nothing with GRDB's) — see
 
 On a genuinely fresh install (no Task at all, active or archived) that also
 has a Swift `labolabo.db` (`~/Library/Application Support/LaboLabo/
-labolabo.db`), the app automatically imports every Swift session as a Task
-on first launch, and shows a one-line, closable result banner at the top of
-the sidebar ("Swift 版から n 件の作業を取り込みました…"). You can also
-trigger it manually at any time via **ファイル > Swift 版からインポート…**
-(`crate::swift_import`, `labolabo_core::import_from_swift`) — this always
-runs (not just on a fresh install) and always leaves a banner, using the
-same duplicate-directory skip rule (a Swift session whose directory already
-matches an existing Task, active or archived, is skipped).
+labolabo.db`), the app shows a **one-shot confirmation prompt** at launch —
+"Swift 版のデータが見つかりました。作業とレイアウトを取り込みますか？" —
+instead of importing silently. Picking 取り込む runs the import
+(`crate::swift_import`, `labolabo_core::import_from_swift`) and shows the
+same one-line, closable result banner at the top of the sidebar as before
+("Swift 版から n 件の作業を取り込みました…"); picking 取り込まない does
+nothing. **Either answer is remembered forever**
+(`labolabo_core::TaskDatabase::swift_import_prompt_answered`, an `appState`
+flag) — the prompt is asked **at most once per database**, never again on
+any later launch, even with the Swift database still present. There is no
+menu item for this any more (the old "ファイル > Swift 版からインポート…"
+was a one-time migration aid, not a feature worth a permanent menu entry —
+see `crate::import_prompt`'s module doc comment for the full "when to show"
+state machine and the rationale, and `crate::swift_import`'s for what the
+import itself does).
 
 The read from the Swift database is strictly read-only
 (`SQLITE_OPEN_READ_ONLY`, never `ensure_schema`'s `ALTER TABLE`) — safe to
@@ -103,14 +110,30 @@ the importer reads — a `LABOLABO_RS_DATA_DIR`-style developer escape hatch,
 used by the smoke-run recipe below so an exploratory launch never reads a
 real Swift `labolabo.db` either.
 
+#### If you dismissed the prompt and change your mind later
+
+Since the menu item is gone, there are exactly two ways back in:
+
+- **Delete `tasks.db`** (see "Where the data lives" above) and relaunch —
+  this resets the app to a genuinely fresh install, so the prompt (and,
+  if you accept it, the import) fires again. This also discards every Task
+  you've created in the Rust app since, so make sure that's really what you
+  want first.
+- **`LABOLABO_FORCE_IMPORT_PROMPT=1`** (`crate::swift_import::
+  force_import_prompt`): a developer escape hatch that makes the app ignore
+  the persisted "already answered" flag and show the prompt again on the
+  next launch, without touching `tasks.db` at all. It does *not* bypass the
+  prompt's other two conditions (no Task exists yet, a Swift database is
+  present) — it only un-sticks the one-shot answer.
+
 ### Smoke runs: always isolate the data directory
 
 Launching against the real database is not a harmless read: every restored
 Task spawns shells in — and, since wave 5c, **injects Claude Code hooks
 into** — that Task's real working directory. An exploratory "does it start"
-run must therefore never see the real `tasks.db`, and (since the Swift
-importer above runs automatically whenever `tasks.db` starts out empty)
-must not see a real Swift `labolabo.db` either. Set both
+run must therefore never see the real `tasks.db`, and (since a real Swift
+`labolabo.db` would make the confirmation prompt above show up) must not see
+a real Swift `labolabo.db` either. Set both
 `LABOLABO_RS_DATA_DIR` (developer escape hatch, honored by
 `labolabo_core::store::rust_app_data_dir`; empty value = unset) and
 `LABOLABO_SWIFT_DB_PATH` (see above) to scratch/nonexistent paths:
@@ -480,7 +503,8 @@ a Windows machine joins the dev loop to verify it against.
 | `ide_open.rs` | "IDE で開く" (macOS): the Swift app's editor-candidate list, Spotlight (`mdfind`) installed-detection, and `open -b`/`open -R` launching. Pure detection/filter helpers unit-tested. |
 | `window_bounds.rs` | Window bounds persistence (wave 6c): JSON encode/decode of `{x,y,w,h}` and the "does it still intersect any display" restore validation — pure, unit-tested. |
 | `update_check.rs` | RC release wave: once-per-launch background GitHub-releases check + the dismissible sidebar banner's data/state (`ReleaseInfo`, `is_update_available`, `should_notify`). See `rust/README.md`'s "RC リリース手順" section. |
-| `swift_import.rs` | Thin glue around `labolabo_core::import_from_swift`: locates the Swift database (`LABOLABO_SWIFT_DB_PATH` override), persists the resulting Tasks, and formats the sidebar result banner. See "Importing from the Swift app" above. |
+| `swift_import.rs` | Thin glue around `labolabo_core::import_from_swift`: locates the Swift database (`LABOLABO_SWIFT_DB_PATH` override, `swift_db_exists`), persists the resulting Tasks, and formats the sidebar result banner. See "Importing from the Swift app" above. |
+| `import_prompt.rs` | 第8波d: the first-launch Swift-import confirmation prompt — a pure, unit-tested three-gate state machine (`should_show_import_prompt`: no Task yet × a Swift db present × never answered) plus the yes/no overlay (`task_menu.rs`'s confirm-modal style). See "Importing from the Swift app" above. |
 | `app.rs` | The gpui root view (`LaboLaboApp`): owns the `TaskDatabase`, the Task list, one `TaskWorkspace` per loaded Task, Task selection/persistence, the new-Task flows' orchestration, key routing, the action handlers for every keybinding (including Cmd+V paste), and the `EntityInputHandler` impl that wires up IME composition. |
 | `task_workspace.rs` | One Task's live workspace: its `PaneTilingModel` + one `PaneRuntime` (real `Terminal` session + redraw bridge) per terminal pane, and the recursive split/tab-bar render tree (wave 5b-2's tree, made per-Task — every render/click path carries a `task_id`). The focused pane's leaf also registers the IME input handler and paints the preedit overlay each frame. |
 | `sidebar.rs` | The Task sidebar: pure, unit-tested repo-grouping (`group_tasks_by_repo`) + minimal rendering (title + a one-glyph worktree/attached marker, "+ Attached"/"+ Worktree" buttons, error banner). |

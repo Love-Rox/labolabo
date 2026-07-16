@@ -9,7 +9,6 @@ menu:
     title: "ファイル"
     new_attached_task: "新しい作業（フォルダ直付け）…"
     new_worktree_task: "新しい作業（worktree を作成）…"
-    import_from_swift: "Swift 版からインポート…"
     open_selected_in_ide: "選択中の作業を IDE で開く"
     new_tab: "新しいタブ"
     close_tab: "タブを閉じる"
@@ -157,3 +156,14 @@ app:
 
 common:
   close: "閉じる"
+
+# 第8波d: 起動時の Swift 版インポート確認プロンプト (`crate::import_prompt`)。
+# ファイル末尾への追記 -- 並行編集中の他エージェント（sidebar.rs/
+# task_workspace.rs 周りのロケール追記）とのコンフリクト面を小さくするため、
+# 既存ブロックの途中には挿入しない。
+import_prompt:
+  title: "Swift 版のデータが見つかりました"
+  body: "作業とレイアウトを取り込みますか？"
+  once_notice: "この確認は今回限りです。"
+  accept: "取り込む"
+  decline: "取り込まない"
