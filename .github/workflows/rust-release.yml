@@ -201,19 +201,29 @@ jobs:
       # `--draft` は絶対に外さないこと -- このワークフロー自体のトップの
       # コメント「`--draft` は必須」参照。draft のタグはユーザーが GitHub 上
       # で "Publish release" するまでリポジトリに実際には作られない。
-      - name: Create draft pre-release
+      #
+      # `--prerelease` はバージョンにプレリリースサフィックス（`-rc.1` 等の
+      # `-` 区切り）が含まれる場合のみ付く。正式版（例 1.0.0）は通常リリース
+      # として publish され、`releases/latest` に載る -- Swift 版の
+      # UpdateChecker（releases/latest 参照）と Rust 版安定ビルドの
+      # update_check の両方がこれを検知する、という設計。
+      - name: Create draft release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.inputs.tag }}
           VERSION: ${{ needs.resolve-version.outputs.version }}
         run: |
           set -euo pipefail
+          prerelease_flag=()
+          case "$VERSION" in
+            *-*) prerelease_flag=(--prerelease) ;;
+          esac
           gh release create "$TAG" \
             artifacts/LaboLabo-rs-macos/*.zip \
             artifacts/LaboLabo-rs-linux/*.tar.gz \
             artifacts/LaboLabo-rs-windows/*.zip \
-            --prerelease \
+            "${prerelease_flag[@]}" \
             --draft \
             --title "LaboLabo-rs $VERSION" \
             --notes-file /tmp/release-notes.md
-          echo "::notice title=Draft pre-release created::tag=$TAG -- 内容を GitHub の Releases 画面で確認してから Publish してください（このワークフローはタグを打ちません）。"
+          echo "::notice title=Draft release created::tag=$TAG prerelease=${prerelease_flag[*]:-no} -- 内容を GitHub の Releases 画面で確認してから Publish してください（このワークフローはタグを打ちません）。"
