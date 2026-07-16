@@ -7,13 +7,16 @@
 //!
 //! Deliberately minimal per this wave's brief ("title + kind の別が分かる
 //! 程度の最小表示" / "本格ダイアログは将来"): no icons beyond a one-glyph
-//! kind marker, no rename/done/archive affordances (plan §1 "今回スコープ
-//! 外"). Drag & drop (plan §3) *is* implemented here: dragging a Task row
-//! reorders it within its repo group (`LaboLaboApp::
+//! kind marker. Drag & drop (plan §3) *is* implemented here: dragging a
+//! Task row reorders it within its repo group (`LaboLaboApp::
 //! reorder_tasks_in_sidebar`, ordering math in `labolabo_core::
 //! reorder_task_ids`), and dropping an OS folder anywhere on the sidebar
 //! starts a new attached Task there (`LaboLaboApp::
 //! handle_sidebar_folder_drop`).
+//!
+//! Wave 6c adds: 行ホバーの「…」ボタン（`crate::task_menu` のアーカイブ/
+//! 削除/IDE で開くメニュー）と、下部の「アーカイブ済み (n)」折りたたみ
+//! セクション（[`render_archived_section`]、復元ボタン付き）。
 
 use gpui::{
     div, prelude::*, px, rgb, rgba, App, Context, ExternalPaths, IntoElement, MouseButton,
@@ -236,13 +239,47 @@ pub fn render(
             .into();
             let conflict_badge_id: SharedString = format!("conflict-badge-{}", task.id).into();
             let row_id: SharedString = format!("task-row-{}", task.id).into();
+            // 行ホバーで「…」メニューボタンを出すための group (wave 6c §2)。
+            // gpui 0.2 に visible/invisible ヘルパは無いので、opacity 0 で
+            // 置いておき `group_hover` で 1.0 へ -- ボタンにポインタが載る
+            // には行に載っている必要があるため、不可視のままクリックされる
+            // ことはない。
+            let row_group: SharedString = format!("task-row-group-{}", task.id).into();
             let drag_task_id = task.id.clone();
             let drag_repo_key = task.repo_key.clone();
             let drag_title: SharedString = task.title.clone().into();
             let drop_before_id = task.id.clone();
             let click_task_id = task.id.clone();
+            let menu_task_id = task.id.clone();
+            let menu_button_id: SharedString = format!("task-menu-btn-{}", task.id).into();
+            let menu_button = div()
+                .id(menu_button_id)
+                .w(px(20.0))
+                .h(px(20.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_sm()
+                .opacity(0.0)
+                .group_hover(row_group.clone(), |el| el.opacity(1.0))
+                .text_color(rgb(theme::text::SECONDARY))
+                .hover(|el| el.bg(rgb(theme::surface::ACTIVE)))
+                .active(|el| el.opacity(0.8))
+                .tooltip(move |_window, cx| {
+                    cx.new(|_| IconTooltip("アーカイブ / 削除…".into())).into()
+                })
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                        // 行本体の on_mouse_down（タスク選択）まで届かせない。
+                        cx.stop_propagation();
+                        this.open_task_menu(&menu_task_id, event.position, cx);
+                    }),
+                )
+                .child("\u{22EF}"); // ⋯
             let row = div()
                 .id(row_id)
+                .group(row_group)
                 .flex()
                 .flex_row()
                 .items_center()
@@ -276,6 +313,8 @@ pub fn render(
                             .child("\u{26A0}"),
                     )
                 })
+                .child(div().flex_1())
+                .child(menu_button)
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _: &MouseDownEvent, window, cx| {
@@ -366,6 +405,13 @@ pub fn render(
         .child(new_task_row)
         .child(list);
 
+    // アーカイブ済みセクション (wave 6c §2): サイドバー下部（`list` が
+    // flex_1 なので自然に底へ寄る）の折りたたみ見出し + 展開時の「復元」
+    // 付き行。既定は折りたたみ（非永続 -- `LaboLaboApp::archived_expanded`）。
+    if let Some(section) = render_archived_section(app, cx) {
+        sidebar = sidebar.child(section);
+    }
+
     if let Some(error) = app.new_task_error() {
         sidebar = sidebar.child(
             div()
@@ -378,6 +424,96 @@ pub fn render(
     }
 
     sidebar
+}
+
+/// 「アーカイブ済み (n)」セクション。アーカイブが 1 件も無ければ `None`
+/// （見出しごと出さない）。
+fn render_archived_section(
+    app: &LaboLaboApp,
+    cx: &mut Context<LaboLaboApp>,
+) -> Option<impl IntoElement> {
+    let archived = app.archived_tasks();
+    if archived.is_empty() {
+        return None;
+    }
+    let expanded = app.archived_expanded();
+
+    let header = div()
+        .id("archived-section-toggle")
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .px_2()
+        .py_1()
+        .rounded_sm()
+        .text_color(rgb(theme::text::SECONDARY))
+        .text_size(px(theme::font_size::CAPTION))
+        .hover(|el| el.bg(rgb(theme::surface::RAISED)))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _: &MouseDownEvent, _window, cx| {
+                this.toggle_archived_section(cx);
+            }),
+        )
+        .child(if expanded { "\u{25BE}" } else { "\u{25B8}" }) // ▾ / ▸
+        .child(SharedString::from(format!(
+            "アーカイブ済み ({})",
+            archived.len()
+        )));
+
+    let mut section = div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .py_1()
+        .border_t_1()
+        .border_color(rgb(theme::surface::STROKE))
+        .child(header);
+
+    if expanded {
+        for task in archived {
+            let restore_id = task.id.clone();
+            let row_id: SharedString = format!("archived-row-{}", task.id).into();
+            let button_id: SharedString = format!("archived-restore-{}", task.id).into();
+            section = section.child(
+                div()
+                    .id(row_id)
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .text_color(rgb(theme::text::MUTED))
+                    .text_size(px(theme::font_size::LABEL))
+                    .child(kind_marker(&task.kind))
+                    .child(SharedString::from(task.title.clone()))
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .id(button_id)
+                            .px_2()
+                            .rounded_sm()
+                            .bg(rgb(theme::surface::RAISED))
+                            .text_color(rgb(theme::text::SECONDARY))
+                            .text_size(px(theme::font_size::CAPTION))
+                            .hover(|el| el.bg(rgb(theme::surface::ACTIVE)))
+                            .active(|el| el.opacity(0.8))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                                    this.restore_task(&restore_id, window, cx);
+                                }),
+                            )
+                            .child("復元"),
+                    ),
+            );
+        }
+    }
+
+    Some(section)
 }
 
 #[cfg(test)]
