@@ -318,7 +318,11 @@ impl SessionDatabase {
     }
 }
 
-fn table_exists(conn: &Connection, name: &str) -> StoreResult<bool> {
+/// `pub(super)`: reused by `store::swift_import`'s strictly-read-only Swift
+/// `labolabo.db` reader, which must tolerate a pre-v3 (v1/v2) schema without
+/// ever running this module's `ensure_schema` (that would `ALTER TABLE`,
+/// violating the read-only contract).
+pub(super) fn table_exists(conn: &Connection, name: &str) -> StoreResult<bool> {
     let exists: Option<i64> = conn
         .query_row(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
@@ -353,14 +357,14 @@ fn add_column_if_missing(
 /// storage classes below and the `NOT NULL` violation each get one clear
 /// call site instead of being interleaved with `rusqlite`'s row-mapping
 /// closure signature).
-enum RawDate {
+pub(super) enum RawDate {
     Text(String),
     Numeric(f64),
     Null,
     Blob,
 }
 
-fn row_value_owned(row: &rusqlite::Row<'_>, idx: usize) -> rusqlite::Result<RawDate> {
+pub(super) fn row_value_owned(row: &rusqlite::Row<'_>, idx: usize) -> rusqlite::Result<RawDate> {
     use rusqlite::types::ValueRef;
     Ok(match row.get_ref(idx)? {
         ValueRef::Text(bytes) => RawDate::Text(String::from_utf8_lossy(bytes).into_owned()),
@@ -374,7 +378,7 @@ fn row_value_owned(row: &rusqlite::Row<'_>, idx: usize) -> rusqlite::Result<RawD
 /// Mirrors `Date.fromDatabaseValue`: try TEXT parsing first (branch 1 of
 /// `store::datetime`'s doc comment), then fall back to interpreting a
 /// numeric storage class as `timeIntervalSince1970` **seconds** (branch 2).
-fn decode_grdb_date(
+pub(super) fn decode_grdb_date(
     raw: &RawDate,
     column: &'static str,
 ) -> StoreResult<chrono::DateTime<chrono::Utc>> {

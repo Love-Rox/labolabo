@@ -73,3 +73,13 @@ serde_json = "1"
 # characters) so the inline composition overlay lines up with the terminal
 # grid it's painted over.
 unicode-width = "0.2"
+
+# Swift-app importer wave (`crate::swift_import`): tests hand-author a
+# scratch "GRDB-shaped" `labolabo.db` (same technique
+# `labolabo-core`'s own `swift_import` tests use) to exercise `swift_import::
+# run` end-to-end without a real Swift install. Test-only -- production code
+# only ever calls `labolabo_core::import_from_swift`, which owns the real
+# rusqlite read path. Version/features match `labolabo-core`'s own
+# dependency to keep one resolved version in the workspace lockfile.
+[dev-dependencies]
+rusqlite = { version = "0.40.1", features = ["bundled"] }

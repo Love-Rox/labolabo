@@ -76,18 +76,49 @@ opens the Swift `SessionDatabase` (two live apps must never write the same
 SQLite file, and this schema shares nothing with GRDB's) — see
 `labolabo-core`'s `store::task_database` module docs for the full contract.
 
+### Importing from the Swift app
+
+On a genuinely fresh install (no Task at all, active or archived) that also
+has a Swift `labolabo.db` (`~/Library/Application Support/LaboLabo/
+labolabo.db`), the app automatically imports every Swift session as a Task
+on first launch, and shows a one-line, closable result banner at the top of
+the sidebar ("Swift 版から n 件の作業を取り込みました…"). You can also
+trigger it manually at any time via **ファイル > Swift 版からインポート…**
+(`crate::swift_import`, `labolabo_core::import_from_swift`) — this always
+runs (not just on a fresh install) and always leaves a banner, using the
+same duplicate-directory skip rule (a Swift session whose directory already
+matches an existing Task, active or archived, is skipped).
+
+The read from the Swift database is strictly read-only
+(`SQLITE_OPEN_READ_ONLY`, never `ensure_schema`'s `ALTER TABLE`) — safe to
+run while a real Swift `LaboLabo.app` is open at the same time. **After
+importing, don't open the same directory in both apps at once**: each app
+injects its own Claude Code hooks (`.claude/settings.local.json`) into a
+Task/session's working directory while it's open, and two concurrent
+injections into the same directory will conflict (see "Claude Code hooks
+integration" below for what that file does).
+
+`LABOLABO_SWIFT_DB_PATH` (empty = unset) overrides the Swift database path
+the importer reads — a `LABOLABO_RS_DATA_DIR`-style developer escape hatch,
+used by the smoke-run recipe below so an exploratory launch never reads a
+real Swift `labolabo.db` either.
+
 ### Smoke runs: always isolate the data directory
 
 Launching against the real database is not a harmless read: every restored
 Task spawns shells in — and, since wave 5c, **injects Claude Code hooks
 into** — that Task's real working directory. An exploratory "does it start"
-run must therefore never see the real `tasks.db`. Set
+run must therefore never see the real `tasks.db`, and (since the Swift
+importer above runs automatically whenever `tasks.db` starts out empty)
+must not see a real Swift `labolabo.db` either. Set both
 `LABOLABO_RS_DATA_DIR` (developer escape hatch, honored by
-`labolabo_core::store::rust_app_data_dir`; empty value = unset) to a scratch
-directory:
+`labolabo_core::store::rust_app_data_dir`; empty value = unset) and
+`LABOLABO_SWIFT_DB_PATH` (see above) to scratch/nonexistent paths:
 
 ```sh
-LABOLABO_RS_DATA_DIR=$(mktemp -d) timeout 5 cargo run -p labolabo-app
+LABOLABO_RS_DATA_DIR=$(mktemp -d) \
+  LABOLABO_SWIFT_DB_PATH=/nonexistent \
+  timeout 5 cargo run -p labolabo-app
 ```
 
 (macOS ships no `timeout`; use coreutils' `gtimeout`, or just quit the app
@@ -122,6 +153,7 @@ GHOSTTY_SOURCE_DIR=/path/to/ghostty-zig016-src \
 | `task_lifecycle.rs` | Archive/delete logic (gpui-free): next-selection math (pure, unit-tested) and worktree removal — `git worktree remove` (never forced) + optional `git branch -d` — integration-tested against real temp repos. |
 | `ide_open.rs` | "IDE で開く" (macOS): the Swift app's editor-candidate list, Spotlight (`mdfind`) installed-detection, and `open -b`/`open -R` launching. Pure detection/filter helpers unit-tested. |
 | `window_bounds.rs` | Window bounds persistence (wave 6c): JSON encode/decode of `{x,y,w,h}` and the "does it still intersect any display" restore validation — pure, unit-tested. |
+| `swift_import.rs` | Thin glue around `labolabo_core::import_from_swift`: locates the Swift database (`LABOLABO_SWIFT_DB_PATH` override), persists the resulting Tasks, and formats the sidebar result banner. See "Importing from the Swift app" above. |
 | `app.rs` | The gpui root view (`LaboLaboApp`): owns the `TaskDatabase`, the Task list, one `TaskWorkspace` per loaded Task, Task selection/persistence, the new-Task flows' orchestration, key routing, the action handlers for every keybinding (including Cmd+V paste), and the `EntityInputHandler` impl that wires up IME composition. |
 | `task_workspace.rs` | One Task's live workspace: its `PaneTilingModel` + one `PaneRuntime` (real `Terminal` session + redraw bridge) per terminal pane, and the recursive split/tab-bar render tree (wave 5b-2's tree, made per-Task — every render/click path carries a `task_id`). The focused pane's leaf also registers the IME input handler and paints the preedit overlay each frame. |
 | `sidebar.rs` | The Task sidebar: pure, unit-tested repo-grouping (`group_tasks_by_repo`) + minimal rendering (title + a one-glyph worktree/attached marker, "+ Attached"/"+ Worktree" buttons, error banner). |
