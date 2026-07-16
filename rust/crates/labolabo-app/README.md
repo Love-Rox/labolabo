@@ -24,8 +24,10 @@ wave** adds drag & drop (`plans/012` §3): dragging a tab chip onto another
 pane splits (edge) or merges (center) it via `PaneTilingModel::move_pane`,
 dragging a sidebar Task row reorders it within its repo group, and dropping
 OS files/folders inserts shell-quoted paths into a terminal pane or starts a
-new attached Task from a dropped folder — see "Drag & drop" below. Still not
-the full production UI — Task rename/done/archive and interactive divider
+new attached Task from a dropped folder — see "Drag & drop" below. Wave 6c
+adds the menu bar (see "Menu bar"), Task archive/delete (see "Task archive /
+delete"), and window-bounds persistence (see "Window bounds persistence").
+Still not the full production UI — Task rename/done and interactive divider
 drag-resize are later waves' scope.
 
 Not in the workspace's `default-members` (see `rust/Cargo.toml`): gpui is a
@@ -114,7 +116,12 @@ GHOSTTY_SOURCE_DIR=/path/to/ghostty-zig016-src \
 
 | Module | Responsibility |
 |---|---|
-| `main.rs` | Entry point: reads the Ghostty font config, registers the tile/tab keybindings (`cx.bind_keys`), opens the one window at a starting size. |
+| `main.rs` | Entry point: reads the Ghostty font config, registers the tile/tab keybindings (`cx.bind_keys`), installs the menu bar (`cx.set_menus`), and opens the one window at the persisted (or centered-default) bounds. |
+| `menus.rs` | The menu bar definition (wave 6c, `gpui::Menu`/`MenuItem` over the same actions the keybindings dispatch) and the About overlay (version + `build.rs`-injected build number). |
+| `task_menu.rs` | The sidebar row "…" menu and delete-confirmation overlay (wave 6c): a pure, unit-tested phase state machine (`TaskMenuState`) + rendering. See "Task archive / delete" below. |
+| `task_lifecycle.rs` | Archive/delete logic (gpui-free): next-selection math (pure, unit-tested) and worktree removal — `git worktree remove` (never forced) + optional `git branch -d` — integration-tested against real temp repos. |
+| `ide_open.rs` | "IDE で開く" (macOS): the Swift app's editor-candidate list, Spotlight (`mdfind`) installed-detection, and `open -b`/`open -R` launching. Pure detection/filter helpers unit-tested. |
+| `window_bounds.rs` | Window bounds persistence (wave 6c): JSON encode/decode of `{x,y,w,h}` and the "does it still intersect any display" restore validation — pure, unit-tested. |
 | `app.rs` | The gpui root view (`LaboLaboApp`): owns the `TaskDatabase`, the Task list, one `TaskWorkspace` per loaded Task, Task selection/persistence, the new-Task flows' orchestration, key routing, the action handlers for every keybinding (including Cmd+V paste), and the `EntityInputHandler` impl that wires up IME composition. |
 | `task_workspace.rs` | One Task's live workspace: its `PaneTilingModel` + one `PaneRuntime` (real `Terminal` session + redraw bridge) per terminal pane, and the recursive split/tab-bar render tree (wave 5b-2's tree, made per-Task — every render/click path carries a `task_id`). The focused pane's leaf also registers the IME input handler and paints the preedit overlay each frame. |
 | `sidebar.rs` | The Task sidebar: pure, unit-tested repo-grouping (`group_tasks_by_repo`) + minimal rendering (title + a one-glyph worktree/attached marker, "+ Attached"/"+ Worktree" buttons, error banner). |
@@ -138,8 +145,9 @@ control CLI without gpui): `store::Task` (`id` = UUID v4, repo identity from
 `GitEngine::repo_info` — `repo_key` is the shared git dir, the sidebar's
 grouping key —, `kind` = `Worktree { branch, base, path }` \|
 `Attached { directory }`, `title`, `layout: TileLayout`, `status`
-(active/done/archived — schema-level reservation, nothing transitions past
-active yet), `created_at`/`last_active_at`, `sort_order`, and an
+(active/done/archived — archive/restore transitions landed in wave 6c, see
+"Task archive / delete"; `done` is still a schema-level reservation),
+`created_at`/`last_active_at`, `sort_order`, and an
 `agent_bindings` column reserved for the plan's per-tab agent-session
 bindings), and `store::TaskDatabase` (rusqlite; own
 `schemaMigrations`-ledger migrations, **no GRDB compatibility constraint** —
@@ -347,6 +355,8 @@ so there's no conflict with typing.
 | Cmd+[ | Focus the previous pane (cycles leaves in tree order, wraps around) |
 | Cmd+V | Paste the system clipboard's text into the focused pane (see "Text selection, scroll & copy" below) |
 | Cmd+C | Copy the focused pane's current text selection to the system clipboard, if any (see "Text selection, scroll & copy" below) |
+| Cmd+Q | Quit (same graceful path as closing the last pane — hooks `settings.local.json` restore runs) |
+| Cmd+M | Minimize the window |
 
 "Next/previous pane" cycles the tree's leaves in depth-first order rather
 than true on-screen (left/right/up/down) adjacency — the simpler of the two
@@ -356,6 +366,58 @@ focus there, and the focused pane's frame gets a subtle accent-colored
 border. There is no keybinding (or UI) for divider drag-resize —
 see "Known limitations". There are no Task-switching keybindings yet (click
 the sidebar).
+
+### Menu bar (wave 6c)
+
+`menus::app_menus()` (wired via gpui's `cx.set_menus`) provides a standard
+menu bar; every item references the same gpui actions the keybindings above
+dispatch, so there is a single handler per operation:
+
+- **LaboLabo-rs**: LaboLabo-rs について (About overlay: version + build
+  number, the latter injected at compile time by `build.rs` from
+  `git rev-list --count HEAD`) / 設定… (Cmd+,) / LaboLabo-rs を終了 (Cmd+Q)
+- **ファイル**: 新しい作業（フォルダ直付け）… / 新しい作業（worktree を作成）…
+  / 選択中の作業を IDE で開く (macOS のみ、検出済みエディタの先頭で開く。
+  未検出なら Finder で表示) / 新しいタブ (Cmd+T) / タブを閉じる (Cmd+W)
+- **編集**: コピー (Cmd+C) / ペースト (Cmd+V)
+- **表示**: Git ペインを表示/非表示 (Cmd+Shift+G) / 右に分割 (Cmd+D) /
+  下に分割 (Cmd+Shift+D) / 次のペイン (Cmd+]) / 前のペイン (Cmd+[)
+- **ウィンドウ**: しまう (Cmd+M) / 拡大/縮小 — gpui は英語名 `"Window"` の
+  メニューにしか OS のウィンドウリストを差し込まないため、日本語文言を
+  優先して自前アクション（`Window::minimize_window`/`zoom_window`）で配線
+  している（単一ウィンドウアプリなのでウィンドウリストは実害なし）。
+
+### Task archive / delete (wave 6c)
+
+Hovering a sidebar Task row reveals a "…" button → a small overlay menu
+(`task_menu.rs`): エディタで開く (macOS, installed editors only —
+`ide_open.rs`, Spotlight `mdfind` detection cached at startup) /
+Finder で表示 / アーカイブ / 削除….
+
+- **アーカイブ**: sessions are shut down, the Task moves (status
+  `archived`) to a collapsed "アーカイブ済み (n)" section at the sidebar's
+  bottom, and selection moves to the next active Task. 復元 brings it back
+  (appended at the end, fresh shells spawn on selection).
+- **削除…** (confirmation required): an *attached* Task is only
+  unregistered from the database — its directory is never touched. A
+  *worktree* Task shuts its sessions down, then runs `git worktree remove`
+  (never `--force`: uncommitted changes make git refuse, and the dialog
+  shows 未コミットの変更があるため削除できません — the Task stays). Only
+  after a successful removal, the optional「ブランチも削除」checkbox
+  (default off) runs `git branch -d` (never `-D`; an unmerged branch shows
+  a warning but the worktree deletion still counts as done). All git work
+  runs on a background thread via `GitEngine`/`git_runner`
+  (`task_lifecycle.rs`, integration-tested against throwaway repos).
+
+### Window bounds persistence (wave 6c)
+
+The window's position/size is saved (debounced ~500ms) to the `appState`
+table (`windowBounds` key, JSON `{x,y,w,h}`) and restored at launch
+(`window_bounds.rs`). If the saved bounds no longer intersect any connected
+display (e.g. an unplugged external monitor), the window falls back to the
+centered default. **Fullscreen/maximized state is not restored in this
+first version** — the restore size is saved and the window always reopens
+as a normal window.
 
 ### Ghostty configuration (font-family / font-size / colors)
 
@@ -684,8 +746,9 @@ close-last-surface behavior, scoped to the degenerate one-Task case now
 that Tasks outlive their panes' sessions.
 
 **Not implemented this wave** (see `plans/012-task-model-and-control-cli.md`
-for where these land in the product model): Task rename/done/archive (§1's
-completion flow) and interactive divider drag-resize (explicitly out of
+for where these land in the product model): Task rename/done (§1's
+completion flow; archive/delete landed in wave 6c — see "Task archive /
+delete") and interactive divider drag-resize (explicitly out of
 this DnD wave's scope, per the wave's own brief). Claude Code hooks
 integration (agent status, per-tab session memory, resume-at-restore)
 landed in wave 5c — see "Claude Code hooks integration" above; the control
@@ -758,10 +821,15 @@ Three independent DnD systems, all built on gpui 0.2's `on_drag`/
 
 ## Known limitations
 
-- **No Task rename/done/archive/delete.** The schema has `status`, but the
-  UI never transitions it; a created Task stays in the sidebar until a
-  future wave adds lifecycle UI. (Deleting the row by hand from `tasks.db`
-  works in a pinch — the app only reads it at launch.)
+- **No Task rename/done.** Archive/delete landed in wave 6c (see "Task
+  archive / delete"); rename and the `done` status transition are still a
+  future wave's scope (the "…" menu deliberately shows no rename item).
+- **Fullscreen/maximized window state is not restored.** Wave 6c persists
+  the window's (restore-size) bounds only; the window always reopens as a
+  normal window (see "Window bounds persistence").
+- **"IDE で開く" detection relies on Spotlight.** Installed editors are
+  found via `mdfind` by bundle id at startup; with Spotlight indexing
+  disabled the editor entries disappear (Finder で表示 always remains).
 - **The "+ Worktree" flow has no branch/base input.** The branch name is
   always auto-generated (`labolabo/<YYYYMMDD>-<n>`), the base is the repo's
   current branch (fallback `main`), and the worktree always lands under

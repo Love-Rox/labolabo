@@ -6,13 +6,17 @@
 //! in the Task's working directory), and Tasks + layouts persist to a
 //! Rust-only SQLite database (restored on relaunch). Not the production
 //! UI: see `crates/labolabo-app/README.md` for scope and known TODOs (IME,
-//! Linux gpui build support, drag & drop, Task rename/done/archive).
+//! Linux gpui build support).
 //!
 //! The control CLI (`docs/control-protocol.md`, `plans/012-task-model-and-
 //! control-cli.md` §2) is implemented: `crate::control` wires
 //! `labolabo_core::control::ControlServer` into this window (see that
 //! module and `app.rs`'s `LaboLaboApp::dispatch_control`), and the
 //! `labolabo` CLI bin (`src/bin/labolabo.rs`) is the client.
+//!
+//! Wave 6c adds the menu bar (`crate::menus`), Task archive/delete
+//! (`crate::task_menu`/`crate::task_lifecycle`), and window-bounds
+//! persistence (`crate::window_bounds`) -- see those modules' doc comments.
 
 mod app;
 mod control;
@@ -21,8 +25,10 @@ mod ghostty_config;
 mod git_pane;
 mod grid;
 mod hooks;
+mod ide_open;
 mod ime;
 mod keys;
+mod menus;
 mod motion;
 mod mouse_report;
 mod new_task;
@@ -31,24 +37,32 @@ mod render;
 mod selection;
 mod settings;
 mod sidebar;
+mod task_lifecycle;
+mod task_menu;
 mod task_workspace;
 mod theme;
+mod window_bounds;
 
 use gpui::{
-    prelude::*, px, size, App, Application, Bounds, KeyBinding, WindowBounds, WindowOptions,
+    prelude::*, px, size, App, Application, Bounds, KeyBinding, Pixels, WindowBounds, WindowOptions,
 };
+
+use labolabo_core::TaskDatabase;
 
 use app::{
-    CloseTab, Copy, FocusNextPane, FocusPrevPane, LaboLaboApp, NewTab, Paste, SelectTab1,
-    SelectTab2, SelectTab3, SelectTab4, SelectTab5, SelectTab6, SelectTab7, SelectTab8, SelectTab9,
-    SplitDown, SplitRight, ToggleGitPane, ToggleSettings,
+    CloseTab, Copy, FocusNextPane, FocusPrevPane, LaboLaboApp, MinimizeWindow, NewTab, Paste, Quit,
+    SelectTab1, SelectTab2, SelectTab3, SelectTab4, SelectTab5, SelectTab6, SelectTab7, SelectTab8,
+    SelectTab9, SplitDown, SplitRight, ToggleGitPane, ToggleSettings,
 };
 
-/// Initial window size -- purely a starting point. The initial terminal
-/// grid size is derived from this via the same `grid::grid_size_for_window`
-/// function window-resize uses (see `LaboLaboApp::viewport_grid_size`), so
-/// there is no separately-hardcoded initial column/row count to keep in
-/// sync with it. Wider than wave 5b-2's 900 to leave room for the sidebar.
+/// Initial window size -- purely a starting point (used when there are no
+/// persisted window bounds yet, or the persisted ones no longer intersect
+/// any connected display -- see `crate::window_bounds`). The initial
+/// terminal grid size is derived from this via the same
+/// `grid::grid_size_for_window` function window-resize uses (see
+/// `LaboLaboApp::viewport_grid_size`), so there is no separately-hardcoded
+/// initial column/row count to keep in sync with it. Wider than wave
+/// 5b-2's 900 to leave room for the sidebar.
 const INITIAL_WIDTH: f32 = 1120.0;
 const INITIAL_HEIGHT: f32 = 600.0;
 
@@ -60,13 +74,25 @@ fn main() {
     let font_config = ghostty_config::load_user_font_config();
     let color_config = ghostty_config::load_user_color_config();
 
+    // Saved window bounds (wave 6c §3) -- read up front like the Ghostty
+    // config (pure file I/O; a second, short-lived SQLite connection to the
+    // same database `LaboLaboApp::new` opens later, which is fine for
+    // SQLite). Any failure (no database yet, key absent, undecodable JSON)
+    // just means the centered default below.
+    let saved_bounds = TaskDatabase::open(&TaskDatabase::default_path())
+        .ok()
+        .and_then(|db| db.window_bounds().ok().flatten())
+        .and_then(|json| window_bounds::decode(&json));
+
     Application::new().run(move |cx: &mut App| {
         // Tile/tab keybindings (see `app.rs`'s `actions!` list for the
         // handlers; README.md documents this table for users). Cmd-modified
         // keystrokes never reach a terminal's own input (`keys::
         // keystroke_to_bytes` reserves the whole `platform` modifier for
         // application shortcuts), so there's no conflict with typing into a
-        // pane.
+        // pane. Menu items (`crate::menus`) reference these same actions,
+        // and gpui renders each menu item's shortcut from this keymap --
+        // so `bind_keys` must run before `set_menus` below.
         cx.bind_keys([
             KeyBinding::new("cmd-t", NewTab, None),
             KeyBinding::new("cmd-w", CloseTab, None),
@@ -91,9 +117,36 @@ fn main() {
             // Settings overlay (`crate::settings`) -- matches the Swift
             // app's `Cmd+,` (macOS's conventional "Preferences" shortcut).
             KeyBinding::new("cmd-,", ToggleSettings, None),
+            // Menu-bar standards (wave 6c §1): quit and minimize.
+            KeyBinding::new("cmd-q", Quit, None),
+            KeyBinding::new("cmd-m", MinimizeWindow, None),
         ]);
 
-        let bounds = Bounds::centered(None, size(px(INITIAL_WIDTH), px(INITIAL_HEIGHT)), cx);
+        // Quit is a *global* action handler (not a window-scoped
+        // `.on_action` in `LaboLaboApp::render`) so the menu item works
+        // even with no window focused. `cx.quit()` runs the app's
+        // `on_app_quit` cleanup (hooks `settings.local.json` restore --
+        // see `LaboLaboApp::new`).
+        cx.on_action(|_: &Quit, cx| cx.quit());
+
+        // Menu bar (wave 6c §1) -- after `bind_keys` (see above).
+        cx.set_menus(menus::app_menus());
+
+        // Window bounds restore (wave 6c §3): saved bounds win if they
+        // still intersect a connected display; otherwise (display
+        // unplugged, corrupt value, first run) fall back to centered.
+        // Fullscreen/maximized windows are restored as normal windows in
+        // this first version (README).
+        let display_bounds: Vec<Bounds<Pixels>> = cx
+            .displays()
+            .iter()
+            .map(|display| display.bounds())
+            .collect();
+        let bounds = saved_bounds
+            .and_then(|saved| window_bounds::restore_bounds(saved, &display_bounds))
+            .unwrap_or_else(|| {
+                Bounds::centered(None, size(px(INITIAL_WIDTH), px(INITIAL_HEIGHT)), cx)
+            });
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
