@@ -41,8 +41,8 @@ use gpui::{
 #[cfg(target_os = "macos")]
 use crate::app::OpenSelectedInIde;
 use crate::app::{
-    About, CloseTab, Copy, FocusNextPane, FocusPrevPane, LaboLaboApp, MinimizeWindow,
-    NewAttachedTask, NewTab, NewWorktreeTask, OpenGitCommitsPane, OpenGitDiffPane,
+    About, CloseTab, Copy, FocusNextPane, FocusPrevPane, ImportFromSwift, LaboLaboApp,
+    MinimizeWindow, NewAttachedTask, NewTab, NewWorktreeTask, OpenGitCommitsPane, OpenGitDiffPane,
     OpenGitFilesPane, Paste, Quit, SplitDown, SplitRight, ToggleGitPane, ToggleSettings,
     ZoomWindow,
 };
@@ -123,6 +123,11 @@ fn file_menu_items() -> Vec<MenuItem> {
     let mut items = vec![
         MenuItem::action("新しい作業（フォルダ直付け）…", NewAttachedTask),
         MenuItem::action("新しい作業（worktree を作成）…", NewWorktreeTask),
+        MenuItem::separator(),
+        // Swift 版インポータ (`crate::swift_import`, `plans` W6e §3 のトリ
+        // ガー②): 起動時の自動インポート(①)とは別に、いつでも手動で再実行
+        // できる入口。同じ重複スキップ規則を使う。
+        MenuItem::action("Swift 版からインポート…", ImportFromSwift),
     ];
     #[cfg(target_os = "macos")]
     {
@@ -274,6 +279,7 @@ mod tests {
         let names = item_names(&menus[1]);
         assert_eq!(names[0], "新しい作業（フォルダ直付け）…");
         assert_eq!(names[1], "新しい作業（worktree を作成）…");
+        assert!(names.contains(&"Swift 版からインポート…".to_string()));
         #[cfg(target_os = "macos")]
         assert!(names.contains(&"選択中の作業を IDE で開く".to_string()));
         #[cfg(not(target_os = "macos"))]

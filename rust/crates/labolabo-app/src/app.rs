@@ -86,6 +86,7 @@ use crate::render::RenderSpec;
 use crate::selection::{self, CellPos};
 use crate::settings::{self, AppSettings};
 use crate::sidebar;
+use crate::swift_import;
 use crate::task_lifecycle::{self, WorktreeRemoveOutcome};
 use crate::task_menu::{self, TaskMenuState};
 use crate::task_workspace::{self, PaneDragHover, PaneRuntime, TabDragPayload, TaskWorkspace};
@@ -148,6 +149,11 @@ actions!(
         OpenGitFilesPane,
         OpenGitDiffPane,
         OpenGitCommitsPane,
+        // Swift-app importer (`crate::swift_import`, `plans` W6e): manual
+        // "ファイル > Swift 版からインポート…" trigger. The automatic
+        // first-launch trigger (`LaboLaboApp::new`) has no action/menu item
+        // of its own -- it just runs inline at startup.
+        ImportFromSwift,
     ]
 );
 
@@ -254,6 +260,12 @@ pub struct LaboLaboApp {
     bounds_save_generation: u64,
     /// 直近の（まだ保存されていない）ウィンドウ bounds。
     pending_window_bounds: Option<Bounds<Pixels>>,
+    /// Swift 版インポータ (`crate::swift_import`, `plans` W6e) の直近の結果
+    /// 一行バナー -- サイドバー上部に表示し、ユーザーが閉じるまで残る
+    /// （`new_task_error` と違い、次の操作で自動クリアはしない）。起動時の
+    /// 自動インポート・「ファイル > Swift 版からインポート…」のどちらも
+    /// ここへ書く。
+    import_banner: Option<String>,
 }
 
 /// The focused pane's in-progress IME composition, tracked by
@@ -314,6 +326,27 @@ impl LaboLaboApp {
                 // `Done` は W5b-3 のスキーマ予約のみで、遷移させる UI は
                 // まだ無い -- 読み飛ばす（DB には残る）。
                 TaskStatus::Done => {}
+            }
+        }
+
+        // Swift-app importer (`crate::swift_import`, `plans` W6e §3's
+        // trigger ①): only on a genuinely fresh install (no Task at all,
+        // active or archived yet -- restoring an already-populated sidebar
+        // never auto-imports, matching the brief's "初回起動" scoping).
+        // Runs before `selected_task_id` below so a freshly imported Task
+        // can become the initial selection like any other restored Task.
+        let mut import_banner: Option<String> = None;
+        if tasks.is_empty() && archived_tasks.is_empty() {
+            match swift_import::run(&db, &mut tasks, &HashSet::new()) {
+                Some(Ok(summary)) if swift_import::is_notable(&summary) => {
+                    import_banner = Some(swift_import::format_banner(&summary));
+                }
+                Some(Ok(_)) => {} // Swift db existed but had nothing worth reporting.
+                Some(Err(message)) => {
+                    eprintln!("labolabo-app: {message}");
+                    import_banner = Some(message);
+                }
+                None => {} // No Swift database on this machine -- nothing to do.
             }
         }
 
@@ -405,6 +438,7 @@ impl LaboLaboApp {
             installed_editors: None,
             bounds_save_generation: 0,
             pending_window_bounds: None,
+            import_banner,
         };
 
         if let Some(id) = selected_task_id {
@@ -525,6 +559,43 @@ impl LaboLaboApp {
 
     pub(crate) fn new_task_error(&self) -> Option<&str> {
         self.new_task_error.as_deref()
+    }
+
+    pub(crate) fn import_banner(&self) -> Option<&str> {
+        self.import_banner.as_deref()
+    }
+
+    /// Closes the Swift-importer result banner (`crate::sidebar`'s "閉じる"
+    /// button) -- unlike `new_task_error`, nothing auto-clears this, so an
+    /// explicit dismiss is the only way to get rid of it.
+    pub(crate) fn dismiss_import_banner(&mut self, cx: &mut Context<Self>) {
+        if self.import_banner.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// "ファイル > Swift 版からインポート…" (`ImportFromSwift`): runs
+    /// `swift_import::run` on demand, any time (unlike the automatic
+    /// first-launch trigger in `Self::new`, which only fires once on a
+    /// genuinely empty sidebar) -- so this always builds the full
+    /// existing-directories set (active + archived Tasks) for the
+    /// duplicate-skip rule, and always leaves a banner behind (including
+    /// "no Swift database found", which the silent auto-trigger swallows).
+    pub(crate) fn import_from_swift_menu(&mut self, cx: &mut Context<Self>) {
+        let existing_directories: HashSet<String> = self
+            .tasks
+            .iter()
+            .chain(self.archived_tasks.iter())
+            .map(|task| task.working_directory().to_string())
+            .collect();
+        self.import_banner = Some(
+            match swift_import::run(&self.db, &mut self.tasks, &existing_directories) {
+                Some(Ok(summary)) => swift_import::format_banner(&summary),
+                Some(Err(message)) => message,
+                None => "Swift 版のデータベースが見つかりませんでした。".to_string(),
+            },
+        );
+        cx.notify();
     }
 
     pub(crate) fn focus_handle(&self) -> &FocusHandle {
@@ -3115,6 +3186,18 @@ impl LaboLaboApp {
         }
     }
 
+    /// 「ファイル → Swift 版からインポート…」(`ImportFromSwift`, `crate::
+    /// swift_import`) -- `Self::import_from_swift_menu` へ委譲するだけの
+    /// アクションハンドラ（他の `action_*` と同じ薄い配線パターン）。
+    fn action_import_from_swift(
+        &mut self,
+        _: &ImportFromSwift,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.import_from_swift_menu(cx);
+    }
+
     pub(crate) fn close_settings(&mut self, cx: &mut Context<Self>) {
         if !self.settings_open {
             return;
@@ -3589,6 +3672,7 @@ impl Render for LaboLaboApp {
             .on_action(cx.listener(Self::action_minimize_window))
             .on_action(cx.listener(Self::action_zoom_window))
             .on_action(cx.listener(Self::action_open_selected_in_ide))
+            .on_action(cx.listener(Self::action_import_from_swift))
             .relative()
             .flex()
             .flex_row()

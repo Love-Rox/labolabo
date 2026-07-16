@@ -46,3 +46,10 @@ pub use task_record::{Task, TaskKind, TaskStatus};
 mod agent_bindings;
 
 pub use agent_bindings::AgentBindings;
+
+// Rust wave 6e: the Swift-app-to-Rust-port session importer. See
+// `swift_import`'s module doc comment for the read-only contract and the
+// full conversion-rule writeup.
+mod swift_import;
+
+pub use swift_import::{import_from_swift, ImportOutcome};

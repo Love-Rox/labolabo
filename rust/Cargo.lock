@@ -3047,6 +3047,7 @@ dependencies = [
  "gpui",
  "labolabo-core",
  "labolabo-term",
+ "rusqlite",
  "serde_json",
  "unicode-width",
  "uuid",

@@ -38,6 +38,7 @@ mod render;
 mod selection;
 mod settings;
 mod sidebar;
+mod swift_import;
 mod task_lifecycle;
 mod task_menu;
 mod task_workspace;
