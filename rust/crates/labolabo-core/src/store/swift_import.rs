@@ -438,6 +438,10 @@ impl SwiftSessionReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Only used by `saved_layout_round_trips_verbatim_and_seeds_agent_
+    // bindings_from_last_pane`, which is `#[cfg(unix)]`-gated -- see the
+    // `git`/`init_repo_with_commit` helpers' doc comment above.
+    #[cfg(unix)]
     use crate::tiling::{PaneItem, PaneKind, TileOrientation};
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -453,11 +457,24 @@ mod tests {
         dir
     }
 
+    // Every test below that reaches `resolve_task_kind` -- i.e. calls
+    // `import_from_swift` with at least one session that isn't skipped as a
+    // duplicate -- ends up invoking the real `ToolLocator` (via
+    // `GitEngine::repo_info`/`git_runner::run`), whose `#[cfg(not(unix))]`
+    // arm is an `unimplemented!()` stub (`tool_locator.rs`'s module doc
+    // comment: Windows tool-location support is deferred future work).
+    // `#[cfg(unix)]`-gated per test, matching `git_engine.rs`'s own tests'
+    // established convention for the same reason (see that module's test
+    // section) -- these two helpers are only used by such tests, so they're
+    // gated too (avoids an `unused function` warning on non-unix targets).
+
+    #[cfg(unix)]
     fn git(args: &[&str], dir: &Path) {
         let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
         crate::git_runner::run(&args, dir).unwrap();
     }
 
+    #[cfg(unix)]
     fn init_repo_with_commit(dir: &Path) {
         git(&["init", "-b", "main"], dir);
         git(&["config", "user.email", "test@example.com"], dir);
@@ -525,6 +542,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(unix)] // see the `git`/`init_repo_with_commit` helpers' doc comment above
     #[test]
     fn attached_directory_imports_with_default_layout_when_no_layout_saved() {
         let dir = scratch_dir("labolabo-swift-import-attached");
@@ -561,6 +579,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&target);
     }
 
+    #[cfg(unix)] // see the `git`/`init_repo_with_commit` helpers' doc comment above
     #[test]
     fn linked_worktree_directory_becomes_a_worktree_task_with_current_branch() {
         let dir = scratch_dir("labolabo-swift-import-wt-db");
@@ -613,6 +632,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&repo);
     }
 
+    #[cfg(unix)] // see the `git`/`init_repo_with_commit` helpers' doc comment above
     #[test]
     fn main_worktree_directory_is_attached_not_worktree_kind() {
         let dir = scratch_dir("labolabo-swift-import-main-db");
@@ -644,6 +664,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&repo);
     }
 
+    #[cfg(unix)] // see the `git`/`init_repo_with_commit` helpers' doc comment above
     #[test]
     fn non_git_directory_degrades_to_attached() {
         let dir = scratch_dir("labolabo-swift-import-nongit-db");
@@ -672,6 +693,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&target);
     }
 
+    #[cfg(unix)] // see the `git`/`init_repo_with_commit` helpers' doc comment above
     #[test]
     fn saved_layout_round_trips_verbatim_and_seeds_agent_bindings_from_last_pane() {
         let dir = scratch_dir("labolabo-swift-import-layout-db");
@@ -726,6 +748,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&target);
     }
 
+    #[cfg(unix)] // see the `git`/`init_repo_with_commit` helpers' doc comment above
     #[test]
     fn malformed_layout_json_degrades_to_default_layout_with_a_warning() {
         let dir = scratch_dir("labolabo-swift-import-badjson-db");
@@ -754,6 +777,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&target);
     }
 
+    #[cfg(unix)] // see the `git`/`init_repo_with_commit` helpers' doc comment above
     #[test]
     fn session_level_agent_fields_seed_bindings_when_layout_has_none() {
         let dir = scratch_dir("labolabo-swift-import-legacy-agent-db");
@@ -821,6 +845,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&target);
     }
 
+    #[cfg(unix)] // see the `git`/`init_repo_with_commit` helpers' doc comment above
     #[test]
     fn duplicate_directory_within_the_same_batch_is_skipped_after_the_first() {
         let dir = scratch_dir("labolabo-swift-import-dup-batch-db");
@@ -855,6 +880,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&target);
     }
 
+    #[cfg(unix)] // see the `git`/`init_repo_with_commit` helpers' doc comment above
     #[test]
     fn sort_order_is_rebased_after_starting_sort_order_preserving_relative_order() {
         let dir = scratch_dir("labolabo-swift-import-sortorder-db");
@@ -880,6 +906,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&target_b);
     }
 
+    #[cfg(unix)] // see the `git`/`init_repo_with_commit` helpers' doc comment above
     #[test]
     fn created_at_is_carried_over_from_added_at() {
         let dir = scratch_dir("labolabo-swift-import-createdat-db");
@@ -921,6 +948,7 @@ mod tests {
     /// mainly for the read-only byte-identity guarantee (see the next test)
     /// and as a second, independently-written-DB smoke test beyond the
     /// hand-authored fixtures above.
+    #[cfg(unix)] // see the `git`/`init_repo_with_commit` helpers' doc comment above
     #[test]
     fn imports_every_fixture_session_with_default_layout() {
         let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/store/fixture.db");
@@ -967,6 +995,7 @@ mod tests {
     /// against a copy of the real-GRDB golden fixture must not change a
     /// single byte of that file, and must not create any sibling journal/
     /// WAL/SHM file next to it either.
+    #[cfg(unix)] // see the `git`/`init_repo_with_commit` helpers' doc comment above
     #[test]
     fn read_only_open_never_mutates_the_fixture_file() {
         let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/store/fixture.db");
