@@ -33,6 +33,7 @@ menu:
 
 about:
   version_line: "Version %{version} (Build %{build})"
+  backend_line: "VT: %{backend}"
   tagline: "LaboLabo's Rust cross-platform edition"
 
 settings:

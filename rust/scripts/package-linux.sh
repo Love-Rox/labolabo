@@ -58,12 +58,80 @@ PACKAGE_DIR="$RUST_DIR/target/package"
 STAGE_NAME="LaboLabo-linux-$VERSION-$ARCH"
 STAGE_DIR="$PACKAGE_DIR/$STAGE_NAME"
 
+# --- VT backend selection --------------------------------------------------
+#
+# Same default-to-ghostty-vt policy as `bundle-macos.sh` -- see that
+# script's "VT backend selection" section for the full rationale (Ghostty
+# identity as the production VT core vs. the Zig-free `backend-alacritty`
+# dev default) and `rust/README.md`'s "配布 vs 開発の既定バックエンド"
+# section. `LABOLABO_VT_BACKEND=alacritty` is the same escape hatch.
+VT_BACKEND="${LABOLABO_VT_BACKEND:-ghostty}"
+CARGO_FEATURE_ARGS=""
+case "$VT_BACKEND" in
+    ghostty)
+        if ! command -v zig >/dev/null 2>&1; then
+            cat >&2 <<EOF
+error: the ghostty-vt backend requires Zig 0.16 on PATH, but no 'zig' binary was found.
+
+Set up:
+  1. Install Zig 0.16.0 (https://ziglang.org/download/) and put it on PATH
+     ('zig version' must print 0.16.x).
+  2. Clone the Zig-0.16-compatible Ghostty fork this project pins in CI (see
+     .github/workflows/ci.yml's 'rust-term-ghostty' job -- vancluever/ghostty,
+     GHOSTTY_REF for the exact pinned commit) and export:
+       export GHOSTTY_SOURCE_DIR=/path/to/that/checkout
+
+Or fall back to the alacritty backend (not the intended production backend --
+see rust/README.md):
+  LABOLABO_VT_BACKEND=alacritty $0 ${1:-}
+EOF
+            exit 1
+        fi
+        ZIG_VERSION="$(zig version)"
+        case "$ZIG_VERSION" in
+            0.16.*) ;;
+            *)
+                echo "error: the ghostty-vt backend requires Zig 0.16.x; found '$(command -v zig)' reporting version $ZIG_VERSION. Put a 0.16.x zig first on PATH, or set LABOLABO_VT_BACKEND=alacritty to fall back." >&2
+                exit 1
+                ;;
+        esac
+        if [ -z "${GHOSTTY_SOURCE_DIR:-}" ] || [ ! -f "${GHOSTTY_SOURCE_DIR}/build.zig" ]; then
+            cat >&2 <<EOF
+error: the ghostty-vt backend requires GHOSTTY_SOURCE_DIR to point at a
+Ghostty source checkout containing build.zig, but it is $( [ -z "${GHOSTTY_SOURCE_DIR:-}" ] && echo "unset" || echo "set to '$GHOSTTY_SOURCE_DIR', which has no build.zig" ).
+
+Clone the Zig-0.16-compatible fork this project pins in CI (see
+.github/workflows/ci.yml's 'rust-term-ghostty' job -- vancluever/ghostty,
+GHOSTTY_REF for the exact pinned commit) and export:
+  export GHOSTTY_SOURCE_DIR=/path/to/that/checkout
+
+Or fall back to the alacritty backend (not the intended production backend --
+see rust/README.md):
+  LABOLABO_VT_BACKEND=alacritty $0 ${1:-}
+EOF
+            exit 1
+        fi
+        CARGO_FEATURE_ARGS="--no-default-features --features backend-ghostty-vt"
+        VT_BACKEND_LABEL="libghostty-vt"
+        ;;
+    alacritty)
+        VT_BACKEND_LABEL="alacritty (fallback -- see rust/README.md)"
+        ;;
+    *)
+        echo "error: unknown LABOLABO_VT_BACKEND '$VT_BACKEND' (expected 'ghostty' or 'alacritty')" >&2
+        exit 1
+        ;;
+esac
+echo "==> VT backend: $VT_BACKEND_LABEL"
+
 echo "==> cargo build --release (labolabo-app, labolabo, labolabo-hook), version $VERSION"
 # Same two `-p` flags as bundle-macos.sh: `-p labolabo-app` builds this
 # package's two bin targets (labolabo-app, the gpui GUI; labolabo, the
 # control CLI); `-p labolabo-core` additionally builds its own
-# `src/bin/labolabo-hook.rs` (the hooks forwarder).
-(cd "$RUST_DIR" && cargo build --release -p labolabo-app -p labolabo-core)
+# `src/bin/labolabo-hook.rs` (the hooks forwarder). `$CARGO_FEATURE_ARGS`
+# selects the VT backend -- see "VT backend selection" above.
+# shellcheck disable=SC2086
+(cd "$RUST_DIR" && cargo build --release -p labolabo-app -p labolabo-core $CARGO_FEATURE_ARGS)
 
 BUILD_DIR="$RUST_DIR/target/release"
 for bin in labolabo-app labolabo labolabo-hook; do
