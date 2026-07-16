@@ -40,7 +40,8 @@ use labolabo_core::{
 use labolabo_term::{TermEvent, Terminal};
 
 use crate::app::{LaboLaboApp, PreeditState};
-use crate::git_pane::GitPaneState;
+use crate::commit_pane;
+use crate::git_pane::{self, GitPaneState};
 use crate::grid;
 use crate::motion::{self, DotAnimState};
 use crate::render::RenderSpec;
@@ -503,6 +504,7 @@ pub fn render_tile(
     runtimes: &HashMap<PaneId, PaneRuntime>,
     pane_status: &HashMap<PaneId, AgentStatus>,
     pane_usage: &HashMap<PaneId, AgentUsage>,
+    git_state: &GitPaneState,
     focused_pane: PaneId,
     spec: &RenderSpec,
     focus_handle: &FocusHandle,
@@ -519,6 +521,7 @@ pub fn render_tile(
             runtimes,
             pane_status,
             pane_usage,
+            git_state,
             focused_pane,
             spec,
             focus_handle,
@@ -540,6 +543,7 @@ pub fn render_tile(
             runtimes,
             pane_status,
             pane_usage,
+            git_state,
             focused_pane,
             spec,
             focus_handle,
@@ -563,6 +567,7 @@ pub fn render_tile(
         runtimes,
         pane_status,
         pane_usage,
+        git_state,
         focused_pane,
         spec,
         focus_handle,
@@ -578,6 +583,7 @@ pub fn render_tile(
         runtimes,
         pane_status,
         pane_usage,
+        git_state,
         focused_pane,
         spec,
         focus_handle,
@@ -695,6 +701,7 @@ fn render_leaf(
     runtimes: &HashMap<PaneId, PaneRuntime>,
     pane_status: &HashMap<PaneId, AgentStatus>,
     pane_usage: &HashMap<PaneId, AgentUsage>,
+    git_state: &GitPaneState,
     focused_pane: PaneId,
     spec: &RenderSpec,
     focus_handle: &FocusHandle,
@@ -706,8 +713,9 @@ fn render_leaf(
 ) -> AnyElement {
     let is_focused_leaf = node.panes.iter().any(|p| p.id == focused_pane);
     let selected_id = node.selected_pane().map(|p| p.id);
+    let selected_kind = node.selected_pane().map(|p| p.kind);
     let runtime = selected_id.and_then(|id| runtimes.get(&id));
-    let is_terminal_leaf = node.selected_pane().map(|p| p.kind) == Some(PaneKind::Terminal);
+    let is_terminal_leaf = selected_kind == Some(PaneKind::Terminal);
     let leaf_pane_ids: Vec<PaneId> = node.panes.iter().map(|p| p.id).collect();
     // This leaf's selected tab *is* the app's single focused pane -- the
     // only canvas that should register the IME input handler / paint the
@@ -715,214 +723,230 @@ fn render_leaf(
     // wide, so at most one leaf's canvas ever matches).
     let is_input_target = selected_id == Some(focused_pane);
 
-    let session_for_resize = runtime.map(|rt| rt.session.clone());
-    let last_size = runtime.map(|rt| rt.last_size.clone());
-    let last_bounds = runtime.map(|rt| rt.last_bounds.clone());
-    let last_bounds_for_prepaint = last_bounds.clone();
-    let snapshot = runtime.map(|rt| rt.session.snapshot());
-    let selection = runtime.and_then(|rt| rt.selection);
-    let prepaint_spec = spec.clone();
-    let paint_spec = spec.clone();
+    // Terminal panes get the real canvas + PTY-driven mouse/IME wiring
+    // below; a Files/Diff/Commits pane has no PTY (no `PaneRuntime` is ever
+    // spawned for it, see `crate::app::LaboLaboApp::ensure_workspace_loaded`)
+    // and gets its content from the shared per-Task `GitPaneState` instead
+    // (`plans` W6d) -- no IME/text-selection/mouse-report wiring, and (per
+    // `plans/012` §3.1) it never accepts an OS file drop either (that gate
+    // lives on `is_terminal_leaf` further down, unchanged by this branch).
+    let content: AnyElement = if is_terminal_leaf {
+        let session_for_resize = runtime.map(|rt| rt.session.clone());
+        let last_size = runtime.map(|rt| rt.last_size.clone());
+        let last_bounds = runtime.map(|rt| rt.last_bounds.clone());
+        let last_bounds_for_prepaint = last_bounds.clone();
+        let snapshot = runtime.map(|rt| rt.session.snapshot());
+        let selection = runtime.and_then(|rt| rt.selection);
+        let prepaint_spec = spec.clone();
+        let paint_spec = spec.clone();
 
-    // `ElementInputHandler::new` needs the bounds `canvas` only hands us
-    // inside the paint closure, so just the (focus_handle, entity) pair is
-    // captured here -- constructed fresh every frame, matching
-    // `Window::handle_input`'s "active for the upcoming frame only"
-    // contract.
-    let input_handler_setup = is_input_target.then(|| (focus_handle.clone(), cx.entity()));
-    let preedit_text = is_input_target
-        .then(|| {
-            active_preedit
-                .filter(|p| p.task_id == task_id && p.pane_id == focused_pane)
-                .map(|p| p.text.clone())
-        })
-        .flatten();
+        // `ElementInputHandler::new` needs the bounds `canvas` only hands us
+        // inside the paint closure, so just the (focus_handle, entity) pair is
+        // captured here -- constructed fresh every frame, matching
+        // `Window::handle_input`'s "active for the upcoming frame only"
+        // contract.
+        let input_handler_setup = is_input_target.then(|| (focus_handle.clone(), cx.entity()));
+        let preedit_text = is_input_target
+            .then(|| {
+                active_preedit
+                    .filter(|p| p.task_id == task_id && p.pane_id == focused_pane)
+                    .map(|p| p.text.clone())
+            })
+            .flatten();
 
-    let canvas_el = canvas(
-        move |bounds, _window, _cx| {
-            if let Some(last_bounds) = &last_bounds_for_prepaint {
-                last_bounds.set(bounds);
-            }
-            // While any divider anywhere in this Task's tree is actively
-            // being dragged, `Terminal::resize` is suppressed here --
-            // `last_size` (and therefore whether a resize is due) is left
-            // untouched, so the *first* prepaint after the drag ends (once
-            // `divider_drag_active` goes back to `false` -- `app::
-            // LaboLaboApp::finish_divider_drag` clears it and calls
-            // `cx.notify()`) still detects the full accumulated size
-            // change against whatever `last_size` was before the drag
-            // started, and resizes exactly once with the final bounds.
-            // This is the "間引き" (throttle) `plans` W5j #2 asks for,
-            // applied as "finalize once at drag-end" rather than a
-            // time-based interval -- deliberately simpler to reason about
-            // than a mid-drag 16ms timer, and the task's own wording
-            // permits either.
-            if !divider_drag_active {
-                if let (Some(session), Some(last_size)) = (&session_for_resize, &last_size) {
-                    let (cols, rows) = grid::grid_size_for_area(
-                        bounds.size.width.into(),
-                        bounds.size.height.into(),
-                        prepaint_spec.cell_width,
-                        prepaint_spec.cell_height,
-                    );
-                    if last_size.get() != (cols, rows) {
-                        last_size.set((cols, rows));
-                        session.resize(cols, rows);
+        let canvas_el = canvas(
+            move |bounds, _window, _cx| {
+                if let Some(last_bounds) = &last_bounds_for_prepaint {
+                    last_bounds.set(bounds);
+                }
+                // While any divider anywhere in this Task's tree is actively
+                // being dragged, `Terminal::resize` is suppressed here --
+                // `last_size` (and therefore whether a resize is due) is left
+                // untouched, so the *first* prepaint after the drag ends (once
+                // `divider_drag_active` goes back to `false` -- `app::
+                // LaboLaboApp::finish_divider_drag` clears it and calls
+                // `cx.notify()`) still detects the full accumulated size
+                // change against whatever `last_size` was before the drag
+                // started, and resizes exactly once with the final bounds.
+                // This is the "間引き" (throttle) `plans` W5j #2 asks for,
+                // applied as "finalize once at drag-end" rather than a
+                // time-based interval -- deliberately simpler to reason about
+                // than a mid-drag 16ms timer, and the task's own wording
+                // permits either.
+                if !divider_drag_active {
+                    if let (Some(session), Some(last_size)) = (&session_for_resize, &last_size) {
+                        let (cols, rows) = grid::grid_size_for_area(
+                            bounds.size.width.into(),
+                            bounds.size.height.into(),
+                            prepaint_spec.cell_width,
+                            prepaint_spec.cell_height,
+                        );
+                        if last_size.get() != (cols, rows) {
+                            last_size.set((cols, rows));
+                            session.resize(cols, rows);
+                        }
                     }
                 }
-            }
-        },
-        move |bounds, _, window, cx| {
-            if let Some((focus_handle, entity)) = input_handler_setup {
-                window.handle_input(&focus_handle, ElementInputHandler::new(bounds, entity), cx);
-            }
-            if let Some(snapshot) = &snapshot {
-                crate::render::paint_grid(
-                    snapshot,
-                    &paint_spec,
-                    selection.as_ref(),
-                    bounds,
-                    window,
-                    cx,
-                );
-                if let Some(text) = &preedit_text {
-                    crate::render::paint_preedit(
-                        text,
-                        &snapshot.cursor,
-                        snapshot.cols,
+            },
+            move |bounds, _, window, cx| {
+                if let Some((focus_handle, entity)) = input_handler_setup {
+                    window.handle_input(
+                        &focus_handle,
+                        ElementInputHandler::new(bounds, entity),
+                        cx,
+                    );
+                }
+                if let Some(snapshot) = &snapshot {
+                    crate::render::paint_grid(
+                        snapshot,
                         &paint_spec,
+                        selection.as_ref(),
                         bounds,
                         window,
                         cx,
                     );
+                    if let Some(text) = &preedit_text {
+                        crate::render::paint_preedit(
+                            text,
+                            &snapshot.cursor,
+                            snapshot.cols,
+                            &paint_spec,
+                            bounds,
+                            window,
+                            cx,
+                        );
+                    }
                 }
-            }
-        },
-    )
-    .size_full();
+            },
+        )
+        .size_full();
 
-    // Mouse wiring for this leaf's canvas: click-to-focus (pre-existing)
-    // plus mouse-down/move/up for text selection *or* SGR mouse-report
-    // forwarding (`app::LaboLaboApp::begin_selection` decides which, per
-    // gesture -- see `crate::mouse_report`'s module doc comment) and
-    // wheel/trackpad scroll, all keyed off `click_target` (this leaf's
-    // selected pane -- the one a click or scroll here should act on) and
-    // `task_id` (so a handler fired later, on whichever Task happens to be
-    // selected then, still routes back to *this* leaf's own Task -- see
-    // this function's doc comment). Each handler needs its own `move`
-    // capture of `task_id` since `cx.listener` closures can't share one.
-    let click_target = selected_id;
-    let mousedown_task_id = task_id.to_string();
-    let canvas_area = div().flex_1().w_full().on_mouse_down(
-        MouseButton::Left,
-        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-            if let Some(id) = click_target {
-                this.select_pane(&mousedown_task_id, id, window, cx);
-                this.begin_selection(&mousedown_task_id, id, event, cx);
-            }
-        }),
-    );
+        // Mouse wiring for this leaf's canvas: click-to-focus (pre-existing)
+        // plus mouse-down/move/up for text selection *or* SGR mouse-report
+        // forwarding (`app::LaboLaboApp::begin_selection` decides which, per
+        // gesture -- see `crate::mouse_report`'s module doc comment) and
+        // wheel/trackpad scroll, all keyed off `click_target` (this leaf's
+        // selected pane -- the one a click or scroll here should act on) and
+        // `task_id` (so a handler fired later, on whichever Task happens to be
+        // selected then, still routes back to *this* leaf's own Task -- see
+        // this function's doc comment). Each handler needs its own `move`
+        // capture of `task_id` since `cx.listener` closures can't share one.
+        let click_target = selected_id;
+        let mousedown_task_id = task_id.to_string();
+        let canvas_area = div().flex_1().w_full().on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                if let Some(id) = click_target {
+                    this.select_pane(&mousedown_task_id, id, window, cx);
+                    this.begin_selection(&mousedown_task_id, id, event, cx);
+                }
+            }),
+        );
 
-    let move_task_id = task_id.to_string();
-    let canvas_area = canvas_area.on_mouse_move(cx.listener(
-        move |this, event: &MouseMoveEvent, _window, cx| {
-            // Only an active left-button drag extends a selection or a
-            // mouse-report gesture -- a plain hover (no button held) does
-            // neither. Bare-hover mouse-move forwarding (relevant only
-            // under `MouseTracking::Any`) is out of scope for this wave --
-            // see `crate::mouse_report`'s module doc comment.
-            if !event.dragging() {
-                return;
-            }
-            if let Some(id) = click_target {
-                this.extend_selection(&move_task_id, id, event, cx);
-            }
-        },
-    ));
+        let move_task_id = task_id.to_string();
+        let canvas_area = canvas_area.on_mouse_move(cx.listener(
+            move |this, event: &MouseMoveEvent, _window, cx| {
+                // Only an active left-button drag extends a selection or a
+                // mouse-report gesture -- a plain hover (no button held) does
+                // neither. Bare-hover mouse-move forwarding (relevant only
+                // under `MouseTracking::Any`) is out of scope for this wave --
+                // see `crate::mouse_report`'s module doc comment.
+                if !event.dragging() {
+                    return;
+                }
+                if let Some(id) = click_target {
+                    this.extend_selection(&move_task_id, id, event, cx);
+                }
+            },
+        ));
 
-    let mouseup_task_id = task_id.to_string();
-    let canvas_area = canvas_area.on_mouse_up(
-        MouseButton::Left,
-        cx.listener(move |this, event: &MouseUpEvent, _window, cx| {
-            if let Some(id) = click_target {
-                this.finish_selection(&mouseup_task_id, id, event, cx);
-            }
-        }),
-    );
+        let mouseup_task_id = task_id.to_string();
+        let canvas_area = canvas_area.on_mouse_up(
+            MouseButton::Left,
+            cx.listener(move |this, event: &MouseUpEvent, _window, cx| {
+                if let Some(id) = click_target {
+                    this.finish_selection(&mouseup_task_id, id, event, cx);
+                }
+            }),
+        );
 
-    // Right/middle-button clicks have no *local* behavior in this app (no
-    // context menu, no paste-on-middle-click) -- they're wired only for
-    // SGR mouse-report forwarding, a silent no-op when the pane's program
-    // hasn't requested mouse tracking (or Shift is held).
-    let right_down_task_id = task_id.to_string();
-    let canvas_area = canvas_area.on_mouse_down(
-        MouseButton::Right,
-        cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
-            if let Some(id) = click_target {
-                this.report_mouse_click(
-                    &right_down_task_id,
-                    id,
-                    crate::mouse_report::MouseButtonKind::Right,
-                    event,
-                    cx,
-                );
-            }
-        }),
-    );
-    let right_up_task_id = task_id.to_string();
-    let canvas_area = canvas_area.on_mouse_up(
-        MouseButton::Right,
-        cx.listener(move |this, event: &MouseUpEvent, _window, _cx| {
-            if let Some(id) = click_target {
-                this.report_mouse_release(
-                    &right_up_task_id,
-                    id,
-                    crate::mouse_report::MouseButtonKind::Right,
-                    event,
-                );
-            }
-        }),
-    );
-    let middle_down_task_id = task_id.to_string();
-    let canvas_area = canvas_area.on_mouse_down(
-        MouseButton::Middle,
-        cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
-            if let Some(id) = click_target {
-                this.report_mouse_click(
-                    &middle_down_task_id,
-                    id,
-                    crate::mouse_report::MouseButtonKind::Middle,
-                    event,
-                    cx,
-                );
-            }
-        }),
-    );
-    let middle_up_task_id = task_id.to_string();
-    let canvas_area = canvas_area.on_mouse_up(
-        MouseButton::Middle,
-        cx.listener(move |this, event: &MouseUpEvent, _window, _cx| {
-            if let Some(id) = click_target {
-                this.report_mouse_release(
-                    &middle_up_task_id,
-                    id,
-                    crate::mouse_report::MouseButtonKind::Middle,
-                    event,
-                );
-            }
-        }),
-    );
+        // Right/middle-button clicks have no *local* behavior in this app (no
+        // context menu, no paste-on-middle-click) -- they're wired only for
+        // SGR mouse-report forwarding, a silent no-op when the pane's program
+        // hasn't requested mouse tracking (or Shift is held).
+        let right_down_task_id = task_id.to_string();
+        let canvas_area = canvas_area.on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                if let Some(id) = click_target {
+                    this.report_mouse_click(
+                        &right_down_task_id,
+                        id,
+                        crate::mouse_report::MouseButtonKind::Right,
+                        event,
+                        cx,
+                    );
+                }
+            }),
+        );
+        let right_up_task_id = task_id.to_string();
+        let canvas_area = canvas_area.on_mouse_up(
+            MouseButton::Right,
+            cx.listener(move |this, event: &MouseUpEvent, _window, _cx| {
+                if let Some(id) = click_target {
+                    this.report_mouse_release(
+                        &right_up_task_id,
+                        id,
+                        crate::mouse_report::MouseButtonKind::Right,
+                        event,
+                    );
+                }
+            }),
+        );
+        let middle_down_task_id = task_id.to_string();
+        let canvas_area = canvas_area.on_mouse_down(
+            MouseButton::Middle,
+            cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                if let Some(id) = click_target {
+                    this.report_mouse_click(
+                        &middle_down_task_id,
+                        id,
+                        crate::mouse_report::MouseButtonKind::Middle,
+                        event,
+                        cx,
+                    );
+                }
+            }),
+        );
+        let middle_up_task_id = task_id.to_string();
+        let canvas_area = canvas_area.on_mouse_up(
+            MouseButton::Middle,
+            cx.listener(move |this, event: &MouseUpEvent, _window, _cx| {
+                if let Some(id) = click_target {
+                    this.report_mouse_release(
+                        &middle_up_task_id,
+                        id,
+                        crate::mouse_report::MouseButtonKind::Middle,
+                        event,
+                    );
+                }
+            }),
+        );
 
-    let scroll_task_id = task_id.to_string();
-    let canvas_area = canvas_area.on_scroll_wheel(cx.listener(
-        move |this, event: &ScrollWheelEvent, _window, cx| {
-            if let Some(id) = click_target {
-                this.handle_pane_scroll(&scroll_task_id, id, event, cx);
-            }
-        },
-    ));
+        let scroll_task_id = task_id.to_string();
+        let canvas_area = canvas_area.on_scroll_wheel(cx.listener(
+            move |this, event: &ScrollWheelEvent, _window, cx| {
+                if let Some(id) = click_target {
+                    this.handle_pane_scroll(&scroll_task_id, id, event, cx);
+                }
+            },
+        ));
 
-    let canvas_area = canvas_area.child(canvas_el);
+        let canvas_area = canvas_area.child(canvas_el);
+        canvas_area.into_any_element()
+    } else {
+        render_git_kind_body(task_id, selected_kind, selected_id, git_state, spec, cx)
+    };
 
     let tab_bar = render_pane_tab_bar(
         task_id,
@@ -950,7 +974,7 @@ fn render_leaf(
             IDLE_BORDER_COLOR
         }))
         .child(tab_bar)
-        .child(canvas_area);
+        .child(content);
 
     // DnD drop-target wiring (`plans/012-task-model-and-control-cli.md`
     // §3): this leaf accepts both an in-app tab-chip drag
@@ -1020,6 +1044,65 @@ fn render_leaf(
     }
 
     leaf.into_any_element()
+}
+
+/// Body for a non-terminal (`Files`/`Diff`/`Commits`) leaf (`plans` W6d) --
+/// reuses `crate::git_pane`'s existing `Files`/`Diff` content-rendering
+/// functions verbatim (the *same* bodies the fixed right pane shows, not a
+/// second implementation of the same feature -- see [`git_pane::
+/// render_file_list`]/[`git_pane::render_detail`]'s own doc comments) and
+/// `crate::commit_pane` for the commit graph. `git_state` is `task_id`'s
+/// shared per-Task [`GitPaneState`] (`TaskWorkspace::git`) -- the same
+/// state object the fixed pane reads, so selecting a file in a `Files` tile
+/// updates the very state a `Diff` tile (tile *or* fixed pane) reads back,
+/// keeping "the selected file" in sync everywhere it's shown at once.
+///
+/// A click anywhere in the body focuses this leaf (mirrors the terminal
+/// canvas's click-to-focus), so tab switching/DnD/the focus border behave
+/// the same regardless of pane kind -- but unlike the terminal branch there
+/// is no PTY here, so no IME/text-selection/mouse-report wiring at all: a
+/// keystroke while this leaf is focused simply has nowhere to go (`plans`
+/// W6d's "非 Terminal ペインは...キー入力はフォーカスされても PTY に流さ
+/// ない").
+fn render_git_kind_body(
+    task_id: &str,
+    kind: Option<PaneKind>,
+    anchor_pane_id: Option<PaneId>,
+    git_state: &GitPaneState,
+    spec: &RenderSpec,
+    cx: &mut Context<LaboLaboApp>,
+) -> AnyElement {
+    let inner = match kind {
+        Some(PaneKind::Files) => {
+            git_pane::render_file_list(task_id, git_state, spec, cx).into_any_element()
+        }
+        Some(PaneKind::Diff) => git_pane::render_detail(task_id, git_state, cx),
+        Some(PaneKind::Commits) => {
+            commit_pane::render_commits_pane(task_id, &git_state.commits, cx)
+        }
+        Some(PaneKind::Terminal) | None => div().size_full().into_any_element(),
+    };
+
+    let focus_task_id = task_id.to_string();
+    div()
+        .id(SharedString::from(format!(
+            "git-tile-body-{task_id}-{anchor_pane_id:?}"
+        )))
+        .flex_1()
+        .w_full()
+        .min_h(px(0.0))
+        .overflow_hidden()
+        .bg(rgb(theme::surface::SUNKEN))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                if let Some(id) = anchor_pane_id {
+                    this.select_pane(&focus_task_id, id, window, cx);
+                }
+            }),
+        )
+        .child(inner)
+        .into_any_element()
 }
 
 /// The tab/pane-move drag's drop-zone highlight for one [`DropEdge`]
@@ -1225,6 +1308,64 @@ fn render_pane_tab_bar(
                 )
                 .child("+")
         })
+        // `plans` W6d §3.1: "フォーカスペインのタブバー「+」の隣...に
+        // 「Git ペインを開く ▸ 変更ファイル/Diff/コミット」" -- only the
+        // *focused* pane's tab bar gets these (not every leaf's), so they
+        // don't clutter every tab bar in a busy layout.
+        .when(is_focused, |el| {
+            el.child(render_open_git_tile_buttons(task_id, cx))
+        })
+}
+
+/// The three small icon buttons (`plans` W6d §3.1) that open this Task's
+/// `Files`/`Diff`/`Commits` Git-tile panes -- brings the pane to front if
+/// it already exists somewhere in the tree (possibly as a hidden tab),
+/// otherwise splits a new one off the current layout (see
+/// `LaboLaboApp::open_git_tile_pane`). Same small-square-icon-+-native-
+/// tooltip shape as `crate::sidebar::icon_button` (reusing its
+/// [`crate::sidebar::IconTooltip`] view rather than a second one), just
+/// sized to fit a tab bar rather than the sidebar.
+fn render_open_git_tile_buttons(task_id: &str, cx: &mut Context<LaboLaboApp>) -> impl IntoElement {
+    // Plain Unicode glyphs, no emoji (project policy -- see
+    // `crate::sidebar::icon_button`'s doc comment): ▤ (list/file lines) for
+    // Files, ± for Diff, ⧖ (hourglass -- history) for Commits.
+    let buttons = [
+        (PaneKind::Files, "\u{25a4}", "Git: 変更ファイルを開く"),
+        (PaneKind::Diff, "\u{00b1}", "Git: Diff を開く"),
+        (PaneKind::Commits, "\u{29d6}", "Git: コミット履歴を開く"),
+    ];
+    let mut row = div().flex().flex_row().items_center().gap_1().pl_1();
+    for (kind, glyph, tooltip) in buttons {
+        let open_task_id = task_id.to_string();
+        let id: SharedString = format!("tab-open-git-{}-{task_id}", kind.raw_value()).into();
+        let tooltip_text: SharedString = tooltip.into();
+        row = row.child(
+            div()
+                .id(id)
+                .w(px(20.0))
+                .h(px(20.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_sm()
+                .text_color(rgb(theme::text::SECONDARY))
+                .text_size(px(11.0))
+                .hover(|el| el.bg(rgb(theme::surface::ACTIVE)))
+                .active(|el| el.opacity(0.7))
+                .tooltip(move |_window, cx| {
+                    cx.new(|_| crate::sidebar::IconTooltip(tooltip_text.clone()))
+                        .into()
+                })
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                        this.open_git_tile_pane(&open_task_id, kind, window, cx);
+                    }),
+                )
+                .child(glyph),
+        );
+    }
+    row
 }
 
 #[cfg(test)]

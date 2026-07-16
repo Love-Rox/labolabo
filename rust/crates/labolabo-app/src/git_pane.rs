@@ -83,7 +83,8 @@ use gpui::{
 };
 
 use labolabo_core::{
-    DiffLine, FileDiff, FileWatcher, GitEngine, GitStatus, Kind, LineKind, NumstatEntry,
+    CommitGraphRow, DiffLine, FileDiff, FileWatcher, GitEngine, GitStatus, Kind, LineKind,
+    NumstatEntry, DEFAULT_COMMIT_GRAPH_LIMIT,
 };
 
 use crate::app::LaboLaboApp;
@@ -251,6 +252,18 @@ pub struct GitSnapshot {
     pub items: Vec<ChangedFileItem>,
     pub diff: Option<FileDiff>,
     pub whole_text: Option<String>,
+    /// The commit-history graph (`GitEngine::commit_graph`,
+    /// `labolabo_core::commit_graph::build`'s laid-out rows), fetched
+    /// alongside everything else in [`compute_git_snapshot`] -- this
+    /// module's doc comment's "常に全体のsnapshotを再計算する" design (a
+    /// Task's working directory is always exactly one repo, so one more
+    /// bounded `git log` call per refresh is cheap enough to always include
+    /// rather than gate on whether a `Commits`-kind pane happens to be
+    /// visible this round). Empty (never `None`) when `git log` itself
+    /// fails for a reason other than "not a repo" (that case is folded into
+    /// [`Self::load_error`] like every other field here) -- a `Commits` tile
+    /// pane simply shows no rows rather than surfacing a second error UI.
+    pub commits: Vec<CommitGraphRow>,
     /// `Some` only when `git status` itself failed (e.g. `working_dir` isn't
     /// a git repository at all -- possible for an `attached`-kind Task,
     /// which places no git-repo requirement on the directory the user
@@ -274,6 +287,7 @@ pub fn compute_git_snapshot(working_dir: &Path, selected_path: Option<&str>) -> 
                 items: Vec::new(),
                 diff: None,
                 whole_text: None,
+                commits: Vec::new(),
                 load_error: Some(err.to_string()),
             };
         }
@@ -294,11 +308,16 @@ pub fn compute_git_snapshot(working_dir: &Path, selected_path: Option<&str>) -> 
         whole_text = engine.file_contents(working_dir, path).ok();
     }
 
+    let commits = engine
+        .commit_graph(working_dir, DEFAULT_COMMIT_GRAPH_LIMIT)
+        .unwrap_or_default();
+
     GitSnapshot {
         status: Some(status),
         items,
         diff,
         whole_text,
+        commits,
         load_error: None,
     }
 }
@@ -393,6 +412,11 @@ pub struct GitPaneState {
     pub view_mode: FileViewMode,
     pub diff: Option<FileDiff>,
     pub whole_text: Option<String>,
+    /// The commit-history graph -- see [`GitSnapshot::commits`]'s doc
+    /// comment. Read by a `Commits`-kind tile pane
+    /// (`crate::commit_pane::render_commits_pane`); the fixed right pane
+    /// never shows it (this module's doc comment's own scope note).
+    pub commits: Vec<CommitGraphRow>,
     pub load_error: Option<String>,
     refreshing: bool,
     refresh_pending: bool,
@@ -409,6 +433,7 @@ impl Default for GitPaneState {
             view_mode: FileViewMode::Diff,
             diff: None,
             whole_text: None,
+            commits: Vec::new(),
             load_error: None,
             refreshing: false,
             refresh_pending: false,
@@ -463,6 +488,7 @@ impl GitPaneState {
         self.items = snapshot.items;
         self.diff = snapshot.diff;
         self.whole_text = snapshot.whole_text;
+        self.commits = snapshot.commits;
         self.load_error = snapshot.load_error;
     }
 
@@ -582,6 +608,7 @@ fn render_branch_bar(
     let dirty = state.status.as_ref().map(|s| s.is_dirty()).unwrap_or(false);
 
     let close_task_id = task_id.to_string();
+    let promote_task_id = task_id.to_string();
 
     div()
         .flex()
@@ -614,6 +641,33 @@ fn render_branch_bar(
             )
         })
         .child(
+            // `plans` W6d §3: "右固定ペインのヘッダに「タイルとして開く」
+            // ボタン" -- moves this Task's Git state into the ordinary
+            // tile tree (a `Files` + `Diff` pane, split off the current
+            // layout) and hides this fixed pane, so it can then be
+            // tabbed/split/dragged/persisted exactly like any other pane
+            // (`LaboLaboApp::promote_git_pane_to_tiles`'s doc comment).
+            div()
+                .id("git-pane-promote-to-tiles")
+                .px_1p5()
+                .py_0p5()
+                .rounded_sm()
+                .text_color(rgb(theme::text::SECONDARY))
+                .hover(|el| el.bg(rgb(theme::surface::ACTIVE)))
+                .active(|el| el.opacity(0.8))
+                .tooltip(move |_window, cx| {
+                    cx.new(|_| crate::sidebar::IconTooltip("タイルとして開く".into()))
+                        .into()
+                })
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                        this.promote_git_pane_to_tiles(&promote_task_id, window, cx);
+                    }),
+                )
+                .child(SharedString::from("\u{25a6}")), // ▦ grid/tile glyph, plain Unicode
+        )
+        .child(
             div()
                 .px_1()
                 .text_color(rgb(theme::text::SECONDARY))
@@ -627,7 +681,14 @@ fn render_branch_bar(
         )
 }
 
-fn render_file_list(
+/// The changed-files list content (staged/unstaged/untracked rows) --
+/// `pub(crate)` so `crate::task_workspace::render_leaf` can reuse it
+/// verbatim as a `Files`-kind tile pane's body (`plans` W6d), the same
+/// content the fixed pane's own [`render_git_pane`] already shows. Clicking
+/// a row calls [`LaboLaboApp::select_git_file`], which mutates the shared
+/// per-Task [`GitPaneState`] -- so a `Files` tile and a `Diff` tile (or the
+/// fixed pane) always agree on "the selected file," wherever each is drawn.
+pub(crate) fn render_file_list(
     task_id: &str,
     state: &GitPaneState,
     spec: &RenderSpec,
@@ -738,7 +799,17 @@ fn render_file_row(
         )
 }
 
-fn render_detail(task_id: &str, state: &GitPaneState, cx: &mut Context<LaboLaboApp>) -> AnyElement {
+/// The selected file's detail (header w/ Diff⇄Whole toggle + the diff or
+/// whole-file content) -- `pub(crate)` so `crate::task_workspace::render_leaf`
+/// can reuse it verbatim as a `Diff`-kind tile pane's body (`plans` W6d),
+/// exactly what [`render_git_pane`] already shows below the fixed pane's own
+/// file list. See [`render_file_list`]'s doc comment for how the two panes
+/// stay in sync on "which file."
+pub(crate) fn render_detail(
+    task_id: &str,
+    state: &GitPaneState,
+    cx: &mut Context<LaboLaboApp>,
+) -> AnyElement {
     let Some(path) = state.selected_path.clone() else {
         return div()
             .p_2()
@@ -958,7 +1029,11 @@ fn render_whole_text(text: Option<&str>) -> AnyElement {
     col.into_any_element()
 }
 
-fn placeholder(text: &'static str) -> AnyElement {
+/// A muted, centered-in-nothing placeholder message (e.g. "No changes",
+/// "Select a file") -- `pub(crate)` so `crate::commit_pane` can show the
+/// same "nothing here yet" treatment for an empty commit list instead of
+/// hand-rolling its own.
+pub(crate) fn placeholder(text: &'static str) -> AnyElement {
     div()
         .p_2()
         .text_size(px(11.0))
@@ -1294,6 +1369,21 @@ mod tests {
         assert!(state.begin_refresh());
     }
 
+    fn commit_row(subject: &str) -> CommitGraphRow {
+        CommitGraphRow {
+            id: 0,
+            commit: labolabo_core::Commit {
+                hash: "abc1234".to_string(),
+                subject: subject.to_string(),
+                author: "Alice".to_string(),
+                date: Some(1_700_000_000),
+                refs: String::new(),
+            },
+            node_lane: 0,
+            edges: Vec::new(),
+        }
+    }
+
     #[test]
     fn apply_sets_all_snapshot_fields() {
         let mut state = GitPaneState::new();
@@ -1307,12 +1397,15 @@ mod tests {
             }],
             diff: None,
             whole_text: Some("hello".to_string()),
+            commits: vec![commit_row("init")],
             load_error: None,
         };
         state.apply(snapshot);
         assert!(state.status.is_some());
         assert_eq!(state.items.len(), 1);
         assert_eq!(state.whole_text.as_deref(), Some("hello"));
+        assert_eq!(state.commits.len(), 1);
+        assert_eq!(state.commits[0].commit.subject, "init");
         assert!(state.load_error.is_none());
     }
 
@@ -1325,14 +1418,17 @@ mod tests {
             adds: None,
             dels: None,
         }];
+        state.commits = vec![commit_row("stale")];
         state.apply(GitSnapshot {
             status: None,
             items: Vec::new(),
             diff: None,
             whole_text: None,
+            commits: Vec::new(),
             load_error: Some("not a git repository".to_string()),
         });
         assert!(state.items.is_empty());
+        assert!(state.commits.is_empty());
         assert_eq!(state.load_error.as_deref(), Some("not a git repository"));
     }
 
@@ -1410,6 +1506,10 @@ mod tests {
             .items
             .iter()
             .any(|i| i.path == "untracked.txt" && i.section == FileSection::Untracked));
+        // `commit_graph` is fetched alongside status/numstat on every
+        // refresh -- the one commit `scratch_repo` made ("init").
+        assert_eq!(snapshot.commits.len(), 1);
+        assert_eq!(snapshot.commits[0].commit.subject, "init");
 
         // Selecting the unstaged copy of the file fetches both its diff
         // (against the index) and its current whole-file contents.
