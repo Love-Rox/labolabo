@@ -141,6 +141,96 @@ GHOSTTY_SOURCE_DIR=/path/to/ghostty-zig016-src \
 (Not exercised in CI — local-only, same as `labolabo-term`'s own
 `rust-term-ghostty` job.)
 
+## Linux (wave 7a)
+
+This crate builds, lints, and unit-tests on Linux — the `rust-app-linux`
+CI job (`.github/workflows/ci.yml`, ubuntu-latest) runs the same
+`cargo build`/`clippy`/`test -p labolabo-app` gauntlet as the macOS
+`rust-app` job on every PR, and `scripts/package-linux.sh` (run by
+`rust-app-bundle.yml`'s `package-linux` job, `workflow_dispatch`-only, same
+as the macOS bundle) packages a release build into a portable
+`LaboLabo-rs-linux-<version>-<arch>.tar.gz` (three binaries + a
+freedesktop.org `.desktop` launcher + a root-less per-user `install.sh` +
+icon + README).
+
+> **Verification honesty**: what CI proves is "compiles, clippy-clean, and
+> the headless unit/integration tests (no window ever opened) pass on
+> Linux". **Actually displaying a window on a real X11/Wayland desktop has
+> not been verified** — there is no Linux machine in this project's
+> development loop yet. Treat the first real-desktop launch as an open
+> verification task (rendering, keyboard, clipboard, IME are all
+> theoretically wired through gpui's cross-platform APIs but unproven here).
+
+### System dependencies
+
+Build-time (link) dependencies on Debian/Ubuntu — what the CI job installs:
+
+```sh
+sudo apt-get install -y pkg-config libxcb1-dev libxkbcommon-dev \
+  libxkbcommon-x11-dev libfreetype-dev
+```
+
+Only three libraries are actually *linked*: `libxcb` (gpui's `x11rb`
+dependency compiles its `xcb_ffi` module unconditionally under the
+`allow-unsafe-code` feature gpui enables) and `libxkbcommon` /
+`libxkbcommon-x11` (the `xkbcommon` crate's `#[link]` attributes).
+`libfreetype-dev` is optional (freetype-sys falls back to building its
+vendored copy via `cc` when pkg-config can't find the system one — the
+system one is just faster). Everything else gpui needs on Linux is
+**dlopen'd at runtime, not linked**, by explicit upstream feature choices
+(`wayland-backend` with its `dlopen` feature, `font-kit` with
+`source-fontconfig-dlopen`, Vulkan via `ash`'s default `loaded` =
+`libloading`): at runtime you additionally need `libwayland-client` *or* an
+X11 server's client libs, `libfontconfig`, and a working Vulkan driver
+(`libvulkan` + the GPU's ICD; gpui's blade renderer is Vulkan-only on
+Linux) — all present on any mainstream desktop install.
+
+### Wayland vs. X11
+
+gpui picks its backend at runtime: Wayland when `WAYLAND_DISPLAY` is set,
+else X11 (this is upstream's standard detection — nothing in this crate
+chooses). Neither has been exercised for this app (see the verification
+note above); gpui itself ships Zed on both daily.
+
+### Known Linux differences / limitations
+
+- **"IDE で開く" / "Finder で表示" are macOS-only and hidden on Linux** (the
+  menu items are `#[cfg(target_os = "macos")]`-gated out; detection returns
+  empty). Decision for this wave: *hide* rather than degrade to a single
+  `xdg-open` item — editor detection is Spotlight-based (`mdfind`) with no
+  Linux equivalent implemented, and this wave deliberately avoids adding
+  new user-facing menu strings while the i18n pass is in flight. Revisit as
+  a follow-up (an `xdg-open <dir>` "open in file manager" item is the
+  natural shape).
+- **The `platform` modifier is Super, not Ctrl.** All "Cmd+…" keybindings
+  in the table above are gpui `platform` bindings, which map to the
+  Super/Windows key on Linux (upstream keystroke semantics). Ctrl stays
+  reserved for the terminal itself, same as on macOS — but Super+T/W/D…
+  may collide with desktop-environment shortcuts; remapping is a follow-up.
+- **Fallback font is per-OS.** Menlo doesn't exist on Linux, and the CSS
+  generic `"monospace"` doesn't resolve through gpui's cosmic-text font
+  database (it matches face families literally; "monospace" is a
+  fontconfig alias) — so when no configured Ghostty `font-family` resolves,
+  `render::FALLBACK_FONT_FAMILIES` probes DejaVu Sans Mono → Noto Sans
+  Mono → Liberation Mono → Ubuntu Mono (first installed wins). The Git
+  panes' monospace bits (diff/whole-file/commit hash/date) reuse the same
+  resolved font instead of hardcoding Menlo.
+- **Ghostty config discovery is already XDG-native**: `$XDG_CONFIG_HOME/
+  ghostty/config` (`~/.config/ghostty/config`) etc. — the macOS-only
+  `~/Library/Application Support` and `/Applications/Ghostty.app` bundled-
+  themes locations are skipped on Linux (`ghostty_config.rs`). Data lives
+  in `$XDG_DATA_HOME/LaboLabo-rs` (`~/.local/share/LaboLabo-rs`).
+- **Hooks + control CLI are unix-domain-socket based and shared with
+  macOS** (`#[cfg(unix)]` in `labolabo-core`) — no Linux-specific work was
+  needed; the same `labolabo-hook`-as-sibling-binary resolution applies
+  (`package-linux.sh` keeps all three binaries side by side in `bin/`).
+- **IME on Linux (xim / wayland text-input) is untested** — the overlay
+  logic (`ime.rs`) is platform-independent gpui API, but no Linux IME has
+  ever been driven against it.
+- **Window menu's しまう/拡大・縮小** call gpui's cross-platform
+  `Window::minimize_window`/`zoom_window`; behavior under Wayland (where
+  minimize-self is compositor-dependent) is unverified.
+
 ## Design
 
 ### Module layout
@@ -973,11 +1063,12 @@ Three independent DnD systems, all built on gpui 0.2's `on_drag`/
 - **Font availability matching is exact-name.** `RenderSpec::resolve`
   matches `font-family` case-insensitively against installed family names;
   Ghostty's own font discovery is fuzzier, so a family Ghostty finds under a
-  variant name may fall back to Menlo here (a stderr warning says so).
-- Linux gpui builds are not exercised by CI yet (`rust-app` is macOS-only —
-  see `.github/workflows/ci.yml`'s comment on that job for why: gpui's Linux
-  system-dependency footprint is heavier to provision than this wave wanted
-  to take on).
+  variant name may fall back to `render::FALLBACK_FONT_FAMILIES` (Menlo on
+  macOS, the first installed of DejaVu Sans Mono/Noto Sans Mono/Liberation
+  Mono/Ubuntu Mono on Linux) here — a stderr warning says so.
+- Linux builds/tests run in CI (`rust-app-linux`), but **no window has ever
+  been opened on a real Linux desktop** — see "Linux (wave 7a)" above for
+  what is and isn't verified there, and the Linux-specific limitations.
 - **Cross-session conflict detection only sees Tasks whose Git status has
   already been fetched at least once this run** (`LaboLaboApp::
   task_conflicts`/`changed_files_cache`, `app.rs`). The Git pane's

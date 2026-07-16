@@ -97,9 +97,9 @@ jobs:
 
   # labolabo-app（gpui 端末シェル、第5波 a）。gpui はビルドが重いデスクトップ UI 依存
   # なので rust/Cargo.toml の default-members から外してあり（上の `rust` ジョブは
-  # gpui を一切ビルドしない）、専用ジョブでのみ検証する。まずは macOS のみ -- Linux
-  # 版 gpui のビルドはシステム依存の導入が重く、この波では見送り
-  # （crates/labolabo-app/README.md 参照）。
+  # gpui を一切ビルドしない）、専用ジョブでのみ検証する。Linux 版は下の
+  # `rust-app-linux` ジョブ（第7波 a で追加 -- crates/labolabo-app/README.md の
+  # "Linux" 節参照）。
   rust-app:
     name: rust-app (macos-15)
     runs-on: macos-15
@@ -122,6 +122,47 @@ jobs:
         run: cargo clippy -p labolabo-app --all-targets -- -D warnings
       # ユニットテストは grid/keys/focus/ghostty_config の純関数のみ（ウィンドウ生成なし）
       # なのでヘッドレスな CI ランナーでもそのまま走る。
+      - name: cargo test -p labolabo-app
+        run: cargo test -p labolabo-app
+
+  # labolabo-app（gpui）の Linux 版（第7波 a）。gpui のデフォルト機能（wayland/x11）が
+  # 要求するシステムライブラリの大半は dlopen 経由（gpui 自身の Cargo.toml が
+  # `wayland-backend` に "dlopen"、`font-kit` に "source-fontconfig-dlopen" を明示指定、
+  # Vulkan も ash の既定 "loaded"=libloading）なので実行時のみの依存。ビルド（リンク）時に
+  # 必要なのは `#[link]` 直リンクの 3 つ: libxcb（x11rb の xcb_ffi -- gpui が有効化する
+  # "allow-unsafe-code" で常時コンパイルされる）と libxkbcommon / libxkbcommon-x11
+  # （xkbcommon crate）。freetype は freetype-sys が pkg-config で見つからなければ
+  # vendored ソースを cc でビルドするので必須ではないが、システム版の方が速いので
+  # dev パッケージを入れておく。ヘッドレス（GUI 不要）なユニットテストのみなので
+  # 上の `rust-app`（macOS）ジョブと同じ理由でそのまま CI で通る。
+  rust-app-linux:
+    name: rust-app-linux (ubuntu-latest)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system dependencies (gpui link-time deps)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libfreetype-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: cargo fmt --check
+        run: cargo fmt --check
+      - name: cargo build -p labolabo-app
+        run: cargo build -p labolabo-app
+      - name: cargo clippy -p labolabo-app
+        run: cargo clippy -p labolabo-app --all-targets -- -D warnings
+      # macOS 版の rust-app ジョブと同じ理由でヘッドレスのまま通る（ウィンドウを
+      # 開くテストが無い -- grid/keys/focus/ghostty_config 等の純関数のみ）。
       - name: cargo test -p labolabo-app
         run: cargo test -p labolabo-app
 

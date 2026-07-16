@@ -5,8 +5,9 @@
 //! tab groups, each tab a real `labolabo-term` `Terminal` session spawned
 //! in the Task's working directory), and Tasks + layouts persist to a
 //! Rust-only SQLite database (restored on relaunch). Not the production
-//! UI: see `crates/labolabo-app/README.md` for scope and known TODOs (IME,
-//! Linux gpui build support).
+//! UI: see `crates/labolabo-app/README.md` for scope and known TODOs
+//! (e.g. Linux builds/tests run in CI since wave 7a, but a real Linux
+//! desktop launch is still unverified -- that README's "Linux" section).
 //!
 //! The control CLI (`docs/control-protocol.md`, `plans/012-task-model-and-
 //! control-cli.md` §2) is implemented: `crate::control` wires

@@ -27,6 +27,7 @@ use labolabo_core::{CommitGraphRow, EdgeShape};
 
 use crate::app::LaboLaboApp;
 use crate::git_pane;
+use crate::render::RenderSpec;
 use crate::theme;
 
 /// Width of one lane column, in logical pixels.
@@ -165,6 +166,7 @@ fn format_commit_date(epoch_secs: Option<i64>) -> String {
 pub fn render_commits_pane(
     task_id: &str,
     rows: &[CommitGraphRow],
+    spec: &RenderSpec,
     _cx: &mut Context<LaboLaboApp>,
 ) -> AnyElement {
     let _ = task_id; // no click-through affordance yet (rows aren't selectable this wave)
@@ -186,12 +188,16 @@ pub fn render_commits_pane(
 
     let mut col = div().flex().flex_col().overflow_hidden();
     for row in rows {
-        col = col.child(render_commit_row(row, graph_width));
+        col = col.child(render_commit_row(row, graph_width, spec));
     }
     col.into_any_element()
 }
 
-fn render_commit_row(row: &CommitGraphRow, graph_width: f32) -> AnyElement {
+// `spec.font.family` rather than a hardcoded `"Menlo"` literal -- see
+// `git_pane::render_diff_line`'s doc comment (same reasoning: Menlo is
+// macOS-only, and gpui's generic cross-platform font fallback stack isn't
+// guaranteed to be monospace).
+fn render_commit_row(row: &CommitGraphRow, graph_width: f32, spec: &RenderSpec) -> AnyElement {
     let mut graph = div()
         .relative()
         .flex_shrink_0()
@@ -229,7 +235,7 @@ fn render_commit_row(row: &CommitGraphRow, graph_width: f32) -> AnyElement {
         .child(
             div()
                 .flex_shrink_0()
-                .font_family("Menlo")
+                .font_family(spec.font.family.clone())
                 .text_color(rgb(theme::text::MUTED))
                 .child(hash),
         )
@@ -243,7 +249,7 @@ fn render_commit_row(row: &CommitGraphRow, graph_width: f32) -> AnyElement {
         .child(
             div()
                 .flex_shrink_0()
-                .font_family("Menlo")
+                .font_family(spec.font.family.clone())
                 .text_size(px(theme::font_size::CAPTION))
                 .text_color(rgb(theme::text::SECONDARY))
                 .child(date),
