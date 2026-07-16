@@ -32,6 +32,7 @@ mod ide_open;
 mod ime;
 mod keys;
 mod menus;
+mod missing_dir;
 mod motion;
 mod mouse_report;
 mod new_task;
