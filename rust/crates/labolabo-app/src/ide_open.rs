@@ -30,6 +30,14 @@ pub struct EditorCandidate {
 }
 
 /// 主要エディタの候補。Swift 版 `Editor.candidates` と同一の 6 つ・同順。
+///
+/// 非 macOS の production 経路（[`detect_installed_editors`] の空実装）からは
+/// この定数も下の純関数 2 つ（[`is_installed_output`]/[`installed_editors`]）
+/// も参照されず dead code になる（Linux CI の `-D warnings` でエラー化）が、
+/// いずれも OS 非依存の純ロジックで、ユニットテストは全プラットフォームで
+/// 走らせたい（Linux CI の `cargo test` がまさに実行する）。よって cfg で
+/// 落とさず、`allow(dead_code)` を非 macOS に限って付ける。
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub const EDITOR_CANDIDATES: [EditorCandidate; 6] = [
     EditorCandidate {
         name: "Visual Studio Code",
@@ -60,12 +68,18 @@ pub const EDITOR_CANDIDATES: [EditorCandidate; 6] = [
 /// `mdfind` の出力（stdout）からインストール済みかを判定する純関数 --
 /// 一致したアプリのパスが 1 行以上出れば「あり」。検出コマンドの実行
 /// （プロセス起動）から切り離してこの判定だけをユニットテストする。
+/// 非 macOS で `allow(dead_code)` な理由は [`EDITOR_CANDIDATES`] の doc
+/// コメント参照。
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn is_installed_output(stdout: &str) -> bool {
     !stdout.trim().is_empty()
 }
 
 /// [`EDITOR_CANDIDATES`] から「インストール済み検出結果」でフィルタした
 /// メニュー掲載リストを返す純関数。`detected` は各候補（同順）の検出結果。
+/// 非 macOS で `allow(dead_code)` な理由は [`EDITOR_CANDIDATES`] の doc
+/// コメント参照。
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn installed_editors(detected: &[bool]) -> Vec<EditorCandidate> {
     EDITOR_CANDIDATES
         .iter()

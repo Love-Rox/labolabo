@@ -528,6 +528,11 @@ fn body_text(text: SharedString) -> impl IntoElement {
         .child(text)
 }
 
+// Only the macOS-only "IDE で開く" section above inserts a separator today,
+// so on other platforms this helper is dead code (a `-D warnings` error in
+// the Linux CI job) -- cfg'd to match its one caller rather than `allow`'d,
+// so a future cross-platform caller consciously removes the gate.
+#[cfg(target_os = "macos")]
 fn menu_separator() -> impl IntoElement {
     div().my_1().h(px(1.0)).bg(rgb(theme::surface::STROKE))
 }
