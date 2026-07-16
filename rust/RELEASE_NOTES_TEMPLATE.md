@@ -9,10 +9,14 @@
   してあるので、RC を切るときもこのテンプレートをそのまま使える。
 -->
 
-# LaboLabo-rs {{VERSION}}
+# LaboLabo {{VERSION}}
 
 Claude Code などの AI コーディングエージェントを複数の git worktree で並列に走らせ、
-端末とライブな Git 差分を横に並べて確認するアプリの **Rust / クロスプラットフォーム版**（macOS / Linux / Windows）です。
+端末とライブな Git 差分を横に並べて確認するアプリ（Rust / クロスプラットフォーム: macOS / Linux / Windows）です。
+
+> **1.1.0 で「LaboLabo-rs」から「LaboLabo」に改名しました。** 旧 Swift（macOS ネイティブ）版は引退し、
+> この Rust 版が正式に LaboLabo の名前を引き継ぎます。旧 LaboLabo-rs からのデータ
+> （`~/Library/Application Support/LaboLabo-rs/tasks.db` 等）は初回起動時に自動で新しい場所へ移動されます。
 
 > macOS で最も長く検証されています。Windows / Linux は比較的新しい対応です。
 > 既知の制限は下記「既知の制限」を必ずお読みください。
@@ -25,7 +29,7 @@ Claude Code などの AI コーディングエージェントを複数の git wo
 - **Claude Code hooks 連携** -- エージェントの状態（実行中/待機中など）をサイドバーのドットで表示し、
   タブ別にセッションを記憶して再起動時に自動 resume します。
 - **セッションの永続化** -- Task とタイルレイアウトはローカル SQLite に保存され、再起動後も復元されます。
-- **Swift 版からのインポート** -- 既存の Swift（macOS ネイティブ）版のセッション DB を検出し、初回起動時に自動インポートします。
+- **旧 Swift 版からのインポート** -- 旧 Swift（macOS ネイティブ）版のセッション DB を検出し、初回起動時に取り込み確認を表示します。
 - **日英 UI 切り替え**（設定 > 言語）。
 
 ## インストール
@@ -34,9 +38,9 @@ Claude Code などの AI コーディングエージェントを複数の git wo
 
 | OS | ダウンロード | 手順 |
 |---|---|---|
-| macOS | `LaboLabo-rs-{{VERSION}}.zip` | 展開して `LaboLabo-rs.app` を `/Applications` などへ。アドホック署名のため初回起動は右クリック > 開く、または `xattr -dr com.apple.quarantine LaboLabo-rs.app` が必要な場合があります。 |
-| Linux | `LaboLabo-rs-linux-{{VERSION}}-<arch>.tar.gz` | 展開して同梱の `install.sh` を実行（root 不要、`~/.local` 配下にインストール）。詳細は同梱の README.md 参照。 |
-| Windows | `LaboLabo-rs-windows-{{VERSION}}-<arch>.zip` | 展開して `bin\labolabo-app.exe` を実行、または同梱の `.ico` でショートカットを作成。詳細は同梱の README.md 参照。 |
+| macOS | `LaboLabo-{{VERSION}}.zip` | 展開して `LaboLabo.app` を `/Applications` などへ。アドホック署名のため初回起動は右クリック > 開く、または `xattr -dr com.apple.quarantine LaboLabo.app` が必要な場合があります。 |
+| Linux | `LaboLabo-linux-{{VERSION}}-<arch>.tar.gz` | 展開して同梱の `install.sh` を実行（root 不要、`~/.local` 配下にインストール）。詳細は同梱の README.md 参照。 |
+| Windows | `LaboLabo-windows-{{VERSION}}-<arch>.zip` | 展開して `bin\labolabo-app.exe` を実行、または同梱の `.ico` でショートカットを作成。詳細は同梱の README.md 参照。 |
 
 いずれも署名は行っていません（macOS はアドホック署名・Developer ID なし、Linux/Windows は無署名）。
 詳しい配布方針は [`rust/README.md`](https://github.com/Love-Rox/labolabo/blob/main/rust/README.md) を参照してください。
