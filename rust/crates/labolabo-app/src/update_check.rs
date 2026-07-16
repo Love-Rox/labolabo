@@ -1,6 +1,7 @@
 //! Lightweight update check (RC release wave, `.github/workflows/
 //! rust-release.yml`'s counterpart in-app): once per launch, in the
-//! background, ask GitHub for the newest LaboLabo-rs release and show a
+//! background, ask GitHub for the newest LaboLabo (Rust, `rs-v*`) release
+//! and show a
 //! dismissible banner (`crate::sidebar::render_update_banner`) if it's
 //! newer than the running binary. A minimal Rust port of the Swift app's
 //! `app/Sources/UpdateChecker.swift`, deliberately smaller in scope per the

@@ -13,7 +13,7 @@
 //!
 //! ## 各メニューの判断メモ
 //!
-//! - **LaboLabo-rs**（アプリメニュー）: About は gpui に標準 About パネル
+//! - **LaboLabo**（アプリメニュー）: About は gpui に標準 About パネル
 //!   API が無い（`platform/mac/platform.rs` に orderFrontStandardAboutPanel
 //!   への経路なし -- 確認済み）ため、settings.rs のオーバーレイパターンを
 //!   流用した簡易オーバーレイ（[`render_about_overlay`]）で出す。
@@ -68,8 +68,9 @@ use crate::motion;
 use crate::theme;
 
 /// 表示用アプリ名（メニュー/About）。バンドル名
-/// （`rust/scripts/bundle-macos.sh` の `APP_NAME`）と揃える。
-pub const APP_NAME: &str = "LaboLabo-rs";
+/// （`rust/scripts/bundle-macos.sh` の `APP_NAME`）と揃える。1.1.0 の
+/// 正式名改名（Swift 版引退に伴い「LaboLabo-rs」→「LaboLabo」）済み。
+pub const APP_NAME: &str = "LaboLabo";
 
 /// マーケティングバージョン。`build.rs` がコンパイル時に注入する
 /// `LABOLABO_RS_VERSION`（単一ソース: `rust/VERSION`、CI からは env で
@@ -341,7 +342,7 @@ mod tests {
         let names: Vec<String> = menus.iter().map(|m| m.name.to_string()).collect();
         assert_eq!(
             names,
-            vec!["LaboLabo-rs", "ファイル", "編集", "表示", "ウィンドウ"]
+            vec!["LaboLabo", "ファイル", "編集", "表示", "ウィンドウ"]
         );
     }
 
@@ -349,7 +350,7 @@ mod tests {
     fn menu_bar_has_the_five_standard_menus_in_order_in_english() {
         let menus = app_menus("en");
         let names: Vec<String> = menus.iter().map(|m| m.name.to_string()).collect();
-        assert_eq!(names, vec!["LaboLabo-rs", "File", "Edit", "View", "Window"]);
+        assert_eq!(names, vec!["LaboLabo", "File", "Edit", "View", "Window"]);
     }
 
     #[test]
@@ -358,11 +359,11 @@ mod tests {
         assert_eq!(
             item_names(&menus[0]),
             vec![
-                "LaboLabo-rs について",
+                "LaboLabo について",
                 "---",
                 "設定…",
                 "---",
-                "LaboLabo-rs を終了",
+                "LaboLabo を終了",
             ]
         );
     }
@@ -372,13 +373,7 @@ mod tests {
         let menus = app_menus("en");
         assert_eq!(
             item_names(&menus[0]),
-            vec![
-                "About LaboLabo-rs",
-                "---",
-                "Settings…",
-                "---",
-                "Quit LaboLabo-rs",
-            ]
+            vec!["About LaboLabo", "---", "Settings…", "---", "Quit LaboLabo",]
         );
     }
 
