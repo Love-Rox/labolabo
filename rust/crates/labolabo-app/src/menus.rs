@@ -71,11 +71,15 @@ use crate::theme;
 /// （`rust/scripts/bundle-macos.sh` の `APP_NAME`）と揃える。
 pub const APP_NAME: &str = "LaboLabo-rs";
 
-/// マーケティングバージョン。`rust/scripts/bundle-macos.sh` の `VERSION`
-/// （CFBundleShortVersionString）と同じ値 -- Rust 版バンドルは Swift 版の
-/// 0.7.x 系からメジャーバンプした 1.0.0 系で配布する決定（同スクリプトの
-/// コメント参照）。ここを変えるときは bundle-macos.sh も揃えること。
-pub const APP_VERSION: &str = "1.0.0";
+/// マーケティングバージョン。`build.rs` がコンパイル時に注入する
+/// `LABOLABO_RS_VERSION`（単一ソース: `rust/VERSION`、CI からは env で
+/// 上書き可 -- `build.rs` の doc コメント参照）と同じ値なので、
+/// `rust/scripts/{bundle-macos.sh,package-linux.sh,package-windows.ps1}`
+/// が生成する配布物のバージョンと常に一致する（手動での同期は不要）。
+/// RC リリース波（`.github/workflows/rust-release.yml`）は Swift 版の
+/// 0.7.x 系からメジャーバンプした 1.0.0 系で配布する決定 -- `rust/
+/// README.md`「RC リリース手順」参照。
+pub const APP_VERSION: &str = env!("LABOLABO_RS_VERSION");
 
 /// ビルド番号: `git rev-list --count HEAD`（`build.rs` がコンパイル時に
 /// 注入。Swift 版の CFBundleVersion / bundle-macos.sh の BUILD_NUMBER と
@@ -471,8 +475,16 @@ mod tests {
 
     #[test]
     fn version_constants_look_sane() {
-        // bundle-macos.sh の VERSION と揃える契約（doc コメント参照）。
-        assert_eq!(APP_VERSION, "1.0.0");
+        // `build.rs` が `rust/VERSION` から注入する値 -- ハードコードした
+        // リテラルと比べるとリリースのたびにこのテストを更新する羽目になる
+        // ので、構造的な妥当性のみ確認する（doc コメント参照: 単一ソースは
+        // `rust/VERSION`、CI は env で上書き）。
+        assert!(!APP_VERSION.is_empty());
+        assert!(APP_VERSION
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_digit()));
+        assert!(APP_VERSION.contains('.'));
         // build.rs 注入値: 数字のみ（git 外ビルドのフォールバック "0" を含む）。
         assert!(BUILD_NUMBER.chars().all(|c| c.is_ascii_digit()));
         assert!(!BUILD_NUMBER.is_empty());

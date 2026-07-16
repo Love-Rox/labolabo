@@ -11,13 +11,20 @@
 # known limitations (GUI launch is unverified -- built and headless-tested
 # in CI only, see that section).
 #
-# Usage: pwsh rust/scripts/package-windows.ps1   (or: .\package-windows.ps1)
+# Usage: pwsh rust/scripts/package-windows.ps1 [-Version <version>]
+#   -Version: optional -- see bundle-macos.sh's usage comment for the exact
+#             resolution order and how it also stamps the compiled binary's
+#             own About-panel version (LABOLABO_RS_VERSION env var).
 # Output: rust/target/package/LaboLabo-rs-windows-<version>-<arch>.zip
 #
 # Requires Windows (produces/copies real .exe binaries) -- run on
-# `windows-latest` CI (`rust-app-bundle.yml`'s `package-windows` job) or a
-# local Windows/PowerShell dev machine, same constraint `bundle-macos.sh`
-# has for macOS.
+# `windows-latest` CI (`rust-app-bundle.yml`'s `package-windows` job, or
+# `rust-release.yml`'s) or a local Windows/PowerShell dev machine, same
+# constraint `bundle-macos.sh` has for macOS.
+param(
+    [string]$Version
+)
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
@@ -37,10 +44,25 @@ $RustDir = Resolve-Path (Join-Path $ScriptDir "..")
 # Same marketing version as the macOS bundle / Linux package (`bundle-macos.sh`
 # / `package-linux.sh`) -- one version number across every platform's
 # packaged artifact, deliberately decoupled from the workspace crates' own
-# (unbumped, pre-1.0) Cargo.toml `version`. Keep in sync with
-# `crates/labolabo-app/src/menus.rs` `APP_VERSION` and the other two
-# packaging scripts' own `VERSION`/`$VERSION`.
-$Version = "1.0.0"
+# (unbumped, pre-1.0) Cargo.toml `version`. Same resolution order as
+# `bundle-macos.sh` (`-Version` param > `$env:LABOLABO_RS_VERSION` >
+# `rust/VERSION` file > literal fallback) -- see that script's comment for
+# the full rationale, including why this is exported (as an env var, for
+# `cargo build`'s `build.rs` to pick up) before the build below.
+if ($Version) {
+    # explicit param wins
+} elseif ($env:LABOLABO_RS_VERSION) {
+    $Version = $env:LABOLABO_RS_VERSION
+} else {
+    $VersionFile = Join-Path $RustDir "VERSION"
+    if (Test-Path $VersionFile -PathType Leaf) {
+        $Version = (Get-Content $VersionFile -Raw).Trim()
+    }
+}
+if (-not $Version) {
+    $Version = "1.0.0-rc.1"
+}
+$env:LABOLABO_RS_VERSION = $Version
 # No ARM64 Windows runner exists in this project's CI yet (`windows-latest`
 # is x86_64-only) -- hardcoded rather than probed, same "one arch for now"
 # simplification `package-linux.sh` avoids only because `uname -m` already
@@ -51,7 +73,7 @@ $PackageDir = Join-Path $RustDir "target\package"
 $StageName = "LaboLabo-rs-windows-$Version-$Arch"
 $StageDir = Join-Path $PackageDir $StageName
 
-Write-Host "==> cargo build --release (labolabo-app, labolabo, labolabo-hook)"
+Write-Host "==> cargo build --release (labolabo-app, labolabo, labolabo-hook), version $Version"
 # Same two `-p` flags as bundle-macos.sh/package-linux.sh: `-p labolabo-app`
 # builds this package's two bin targets (labolabo-app, the gpui GUI;
 # labolabo, the control CLI); `-p labolabo-core` additionally builds its own
