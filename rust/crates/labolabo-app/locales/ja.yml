@@ -53,6 +53,14 @@ settings:
     auto: "自動"
     name_ja: "日本語"
     name_en: "English"
+  update_check:
+    label: "アップデートを自動確認"
+    footer: "起動時にバックグラウンドで新しいバージョンを確認します。"
+
+update:
+  available:
+    message: "新しいバージョン %{version} が利用可能です"
+    open: "開く"
 
 sidebar:
   new_attached_task_tooltip: "既存のフォルダを開く…"

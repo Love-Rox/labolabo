@@ -31,6 +31,12 @@
 //! 4. **言語 / Language** (`AppSettings::locale`, wave 6f) -- 自動 (OS
 //!    locale) / 日本語 / English, applied live (see `crate::i18n`'s module
 //!    doc comment) and persisted like everything else here.
+//! 5. **アップデートを自動確認** (`AppSettings::update_check_enabled`, RC
+//!    release wave) -- mirrors Swift's `checkUpdatesOnLaunch` `@AppStorage`
+//!    toggle. Gates `crate::update_check`'s once-per-launch background
+//!    GitHub-releases check (`LaboLaboApp::new`); the `LABOLABO_NO_
+//!    UPDATE_CHECK` env var is a separate, settings-independent kill switch
+//!    (`update_check::update_check_disabled`) for smoke-testing/CI.
 //!
 //! **Deliberately not here**: font/color settings -- the project's own
 //! policy (`CLAUDE.md` for this wave) is that Ghostty config remains the
@@ -90,6 +96,10 @@ pub struct AppSettings {
     /// UI language (wave 6f, `crate::i18n`). Defaults to `Auto` (OS-
     /// detected) -- see [`crate::i18n::LocaleSetting`]'s doc comment.
     pub locale: LocaleSetting,
+    /// "アップデートを自動確認" (RC release wave) -- gates
+    /// `crate::update_check`'s once-per-launch background check. See this
+    /// module's doc comment, item 5.
+    pub update_check_enabled: bool,
 }
 
 impl Default for AppSettings {
@@ -99,13 +109,16 @@ impl Default for AppSettings {
     /// `DEFAULT_SCROLLBACK_LINES`. A brand-new database (every key absent)
     /// therefore behaves identically to before this wave. `locale` defaults
     /// to `Auto`, matching this port's pre-i18n-wave behavior for a `ja*`
-    /// system (everything was hardcoded Japanese).
+    /// system (everything was hardcoded Japanese). `update_check_enabled`
+    /// defaults to `true` -- same "opt-out, not opt-in" posture as Swift's
+    /// own `checkUpdatesOnLaunch` default.
     fn default() -> Self {
         Self {
             auto_resume_enabled: true,
             git_pane_default_visible: true,
             scrollback_lines: DEFAULT_SCROLLBACK_LINES,
             locale: LocaleSetting::Auto,
+            update_check_enabled: true,
         }
     }
 }
@@ -136,6 +149,11 @@ impl AppSettings {
                 .flatten()
                 .unwrap_or(defaults.scrollback_lines),
             locale: crate::i18n::load_locale_setting(db),
+            update_check_enabled: db
+                .update_check_enabled()
+                .ok()
+                .flatten()
+                .unwrap_or(defaults.update_check_enabled),
         }
     }
 }
@@ -275,7 +293,21 @@ pub fn render_settings_overlay(
             ),
         )
         .child(scrollback_row(settings.scrollback_lines, cx))
-        .child(language_row(settings.locale, cx));
+        .child(language_row(settings.locale, cx))
+        .child(
+            toggle_row(
+                "update-check-enabled",
+                t!("settings.update_check.label").to_string(),
+                t!("settings.update_check.footer").to_string(),
+                settings.update_check_enabled,
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseDownEvent, _window, cx| {
+                    this.set_update_check_enabled(!this.settings().update_check_enabled, cx);
+                }),
+            ),
+        );
 
     // The "gather in" width nudge lives on the panel alone (no `.opacity()`
     // here) -- `opacity` composes multiplicatively with an ancestor's
@@ -540,6 +572,7 @@ mod tests {
         assert!(defaults.git_pane_default_visible);
         assert_eq!(defaults.scrollback_lines, DEFAULT_SCROLLBACK_LINES);
         assert_eq!(defaults.locale, LocaleSetting::Auto);
+        assert!(defaults.update_check_enabled);
     }
 
     #[test]
@@ -555,6 +588,7 @@ mod tests {
         db.set_git_pane_default_visible(false).unwrap();
         db.set_scrollback_lines(5000).unwrap();
         db.set_locale("ja").unwrap();
+        db.set_update_check_enabled(false).unwrap();
 
         let loaded = AppSettings::load(&db);
         assert_eq!(
@@ -564,6 +598,7 @@ mod tests {
                 git_pane_default_visible: false,
                 scrollback_lines: 5000,
                 locale: LocaleSetting::Ja,
+                update_check_enabled: false,
             }
         );
     }
@@ -579,6 +614,7 @@ mod tests {
         assert!(loaded.auto_resume_enabled);
         assert!(loaded.git_pane_default_visible);
         assert_eq!(loaded.scrollback_lines, 42);
+        assert!(loaded.update_check_enabled);
     }
 
     // MARK: - adjust_scrollback_lines
