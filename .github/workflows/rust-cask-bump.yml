@@ -1,0 +1,61 @@
+name: Rust cask bump
+
+# Rust 版（rs-v* タグ）のリリースが **publish** されたら、homebrew-tap の
+# `labolabo-rs` cask を新バージョンへ自動更新する。Swift 版
+# （release-build.yml 内の "Bump Homebrew cask" ステップ、v* タグ限定）の
+# Rust 版対応。draft 作成時点（rust-release.yml）ではなく publish 時に
+# 動くのは、draft の間はアセット URL が未公開で cask が 404 を指して
+# しまうため。
+#
+# TAP_TOKEN（Love-Rox/homebrew-tap へ Contents: Read and write を持つ
+# fine-grained PAT）が未設定ならジョブごとスキップする（Swift 版と同じ方針）。
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  bump:
+    name: bump labolabo-rs cask
+    if: startsWith(github.event.release.tag_name, 'rs-v')
+    runs-on: ubuntu-latest
+    env:
+      TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.event.release.tag_name }}
+    steps:
+      - name: Download macOS asset and compute sha256
+        id: asset
+        run: |
+          set -euo pipefail
+          if [ -z "$TAP_TOKEN" ]; then
+            echo "::notice::TAP_TOKEN 未設定のため cask bump をスキップします"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          VERSION="${TAG#rs-v}"
+          # macOS 用 zip は LaboLabo-rs-<version>.zip（linux/windows は
+          # ファイル名にプラットフォーム名を含むので単純一致で拾える）
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern "LaboLabo-rs-${VERSION}.zip" --output asset.zip
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "sha256=$(sha256sum asset.zip | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Bump Casks/labolabo-rs.rb
+        if: steps.asset.outputs.skip == 'false'
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.asset.outputs.version }}"
+          SHA="${{ steps.asset.outputs.sha256 }}"
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/Love-Rox/homebrew-tap.git" tap
+          cd tap
+          sed -i -E "s/  version \"[^\"]*\"/  version \"${VERSION}\"/" Casks/labolabo-rs.rb
+          sed -i -E "s/  sha256 \"[^\"]*\"/  sha256 \"${SHA}\"/" Casks/labolabo-rs.rb
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "labolabo-rs ${VERSION}"
+          git push
