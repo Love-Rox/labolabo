@@ -93,6 +93,7 @@ use crate::task_lifecycle::{self, WorktreeRemoveOutcome};
 use crate::task_menu::{self, TaskMenuState};
 use crate::task_workspace::{self, PaneDragHover, PaneRuntime, TabDragPayload, TaskWorkspace};
 use crate::theme;
+use crate::update_check::{self, ReleaseInfo};
 use crate::window_bounds;
 
 /// Initial grid size for a pane created after startup with no viewport to
@@ -268,6 +269,12 @@ pub struct LaboLaboApp {
     /// 自動インポート・「ファイル > Swift 版からインポート…」のどちらも
     /// ここへ書く。
     import_banner: Option<String>,
+    /// アップデート確認 (`crate::update_check`, RC release wave) の結果 --
+    /// 起動時のバックグラウンドチェックが新しいバージョンを見つけたら
+    /// `Some` になり、サイドバーにバナーを出す。`None` = 未検出/確認中/
+    /// 既に最新/確認無効。`dismiss_update_banner` が閉じる（と同時に
+    /// "このバージョンを通知しない" を appState へ永続化する）。
+    update_banner: Option<ReleaseInfo>,
 }
 
 /// The focused pane's in-progress IME composition, tracked by
@@ -415,6 +422,35 @@ impl LaboLaboApp {
         })
         .detach();
 
+        // アップデート確認 (RC release wave、`crate::update_check`): 起動時
+        // に一度だけバックグラウンドで GitHub Releases を確認する（常駐
+        // ポーリングはしない）。設定 (`AppSettings::update_check_enabled`)
+        // と env (`LABOLABO_NO_UPDATE_CHECK=1`、主にスモークテスト/CI 用)
+        // のどちらでも独立に無効化できる。curl 不在/ネットワーク失敗/
+        // 既に最新はすべて `None` に潰れる（`update_check`のモジュール doc
+        // コメント参照）ので、ここではバナーを出すかどうかだけ判定する。
+        if settings.update_check_enabled && !update_check::update_check_disabled() {
+            let current_version = menus::APP_VERSION.to_string();
+            cx.spawn(async move |this, cx| {
+                let result = cx
+                    .background_spawn(
+                        async move { update_check::check_for_update(&current_version) },
+                    )
+                    .await;
+                let _ = this.update(cx, |app, cx| {
+                    let Some(release) = result else {
+                        return;
+                    };
+                    let ignored = app.db.ignored_update_version().ok().flatten();
+                    if update_check::should_notify(&release, ignored.as_deref()) {
+                        app.update_banner = Some(release);
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+        }
+
         let mut this = Self {
             db,
             tasks,
@@ -440,6 +476,7 @@ impl LaboLaboApp {
             installed_editors: None,
             bounds_save_generation: 0,
             pending_window_bounds: None,
+            update_banner: None,
             import_banner,
         };
 
@@ -574,6 +611,52 @@ impl LaboLaboApp {
         if self.import_banner.take().is_some() {
             cx.notify();
         }
+    }
+
+    /// The update-available banner (`crate::update_check`, RC release
+    /// wave), if the startup check found a newer release the user hasn't
+    /// already dismissed.
+    pub(crate) fn update_banner(&self) -> Option<&ReleaseInfo> {
+        self.update_banner.as_ref()
+    }
+
+    /// Closes the update banner (`crate::sidebar`'s "×" button) -- and,
+    /// unlike `dismiss_import_banner`, this *also* persists the dismissed
+    /// version to `TaskDatabase::set_ignored_update_version` so it doesn't
+    /// reappear on the next launch. This doubles as the task brief's "今後
+    /// このバージョンを通知しない": there is no separate checkbox for it --
+    /// dismissing *is* "don't notify me about this version again" (a
+    /// genuinely newer release later still notifies, since
+    /// `update_check::should_notify` only suppresses an exact version
+    /// match). Judgment call: simpler than a two-affordance banner
+    /// ("閉じる" vs. "今後通知しない" as separate buttons) for the same
+    /// practical effect.
+    pub(crate) fn dismiss_update_banner(&mut self, cx: &mut Context<Self>) {
+        if let Some(release) = self.update_banner.take() {
+            if let Err(err) = self.db.set_ignored_update_version(Some(&release.version)) {
+                eprintln!("labolabo-app: failed to persist ignored_update_version: {err}");
+            }
+            cx.notify();
+        }
+    }
+
+    /// "開く"/"Open" on the update banner -- launches the release page in
+    /// the user's default browser (`update_check::open_url`, blocking, so
+    /// run in the background -- same contract as `open_task_in_editor`/
+    /// `reveal_task_in_finder` below). Does not dismiss the banner (the "×"
+    /// button is the only dismiss affordance -- see
+    /// `dismiss_update_banner`'s doc comment for why dismiss and "don't
+    /// notify again" are the same action).
+    pub(crate) fn open_update_release_page(&mut self, cx: &mut Context<Self>) {
+        let Some(release) = self.update_banner.clone() else {
+            return;
+        };
+        cx.background_spawn(async move {
+            if let Err(err) = update_check::open_url(&release.url) {
+                eprintln!("labolabo-app: failed to open update release page: {err}");
+            }
+        })
+        .detach();
     }
 
     /// "ファイル > Swift 版からインポート…" (`ImportFromSwift`): runs
@@ -3304,6 +3387,23 @@ impl LaboLaboApp {
         self.settings.scrollback_lines = next;
         if let Err(err) = self.db.set_scrollback_lines(next) {
             eprintln!("labolabo-app: failed to persist scrollback_lines: {err}");
+        }
+        cx.notify();
+    }
+
+    /// Toggles "アップデートを自動確認" (RC release wave) and persists it
+    /// immediately. Only gates *future* launches' startup check
+    /// (`Self::new`'s `if settings.update_check_enabled` gate) -- turning it
+    /// off does not retract an already-shown `update_banner` for the
+    /// current run (same "takes effect going forward, not retroactively"
+    /// posture as `set_auto_resume_enabled`/`set_git_pane_default_visible`).
+    pub(crate) fn set_update_check_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.settings.update_check_enabled == enabled {
+            return;
+        }
+        self.settings.update_check_enabled = enabled;
+        if let Err(err) = self.db.set_update_check_enabled(enabled) {
+            eprintln!("labolabo-app: failed to persist update_check_enabled: {err}");
         }
         cx.notify();
     }

@@ -479,6 +479,7 @@ a Windows machine joins the dev loop to verify it against.
 | `task_lifecycle.rs` | Archive/delete logic (gpui-free): next-selection math (pure, unit-tested) and worktree removal — `git worktree remove` (never forced) + optional `git branch -d` — integration-tested against real temp repos. |
 | `ide_open.rs` | "IDE で開く" (macOS): the Swift app's editor-candidate list, Spotlight (`mdfind`) installed-detection, and `open -b`/`open -R` launching. Pure detection/filter helpers unit-tested. |
 | `window_bounds.rs` | Window bounds persistence (wave 6c): JSON encode/decode of `{x,y,w,h}` and the "does it still intersect any display" restore validation — pure, unit-tested. |
+| `update_check.rs` | RC release wave: once-per-launch background GitHub-releases check + the dismissible sidebar banner's data/state (`ReleaseInfo`, `is_update_available`, `should_notify`). See `rust/README.md`'s "RC リリース手順" section. |
 | `swift_import.rs` | Thin glue around `labolabo_core::import_from_swift`: locates the Swift database (`LABOLABO_SWIFT_DB_PATH` override), persists the resulting Tasks, and formats the sidebar result banner. See "Importing from the Swift app" above. |
 | `app.rs` | The gpui root view (`LaboLaboApp`): owns the `TaskDatabase`, the Task list, one `TaskWorkspace` per loaded Task, Task selection/persistence, the new-Task flows' orchestration, key routing, the action handlers for every keybinding (including Cmd+V paste), and the `EntityInputHandler` impl that wires up IME composition. |
 | `task_workspace.rs` | One Task's live workspace: its `PaneTilingModel` + one `PaneRuntime` (real `Terminal` session + redraw bridge) per terminal pane, and the recursive split/tab-bar render tree (wave 5b-2's tree, made per-Task — every render/click path carries a `task_id`). The focused pane's leaf also registers the IME input handler and paints the preedit overlay each frame. |
@@ -1751,9 +1752,11 @@ logic (and one Rust-only addition) into the UI --
   for the "only status-fetched Tasks participate" scope decision.
 - **Settings screen** (`crate::settings`, `Cmd+,`): an in-window overlay
   (auto-resume toggle, Git-pane-default-visibility toggle, scrollback-lines
-  stepper), persisted through three new `TaskDatabase` `appState` methods
-  (`auto_resume_enabled`/`git_pane_default_visible`/`scrollback_lines` and
-  their `set_*` counterparts). Scrollback itself required threading a new
+  stepper, language picker, and — RC release wave — an "automatically check
+  for updates" toggle), persisted through `TaskDatabase` `appState` methods
+  (`auto_resume_enabled`/`git_pane_default_visible`/`scrollback_lines`/
+  `update_check_enabled` and their `set_*` counterparts). Scrollback itself
+  required threading a new
   `max_scrollback: usize` parameter through `labolabo_term`'s `VtBackend::
   new` (both backends) and a new `TermSession::spawn_with_scrollback_options`
   entry point -- see `crates/labolabo-term/README.md`/this crate's own

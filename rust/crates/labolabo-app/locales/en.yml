@@ -53,6 +53,14 @@ settings:
     auto: "Automatic"
     name_ja: "日本語"
     name_en: "English"
+  update_check:
+    label: "Automatically check for updates"
+    footer: "Checks for a new version in the background at launch."
+
+update:
+  available:
+    message: "Version %{version} is available"
+    open: "Open"
 
 sidebar:
   new_attached_task_tooltip: "Open an existing folder…"
