@@ -108,6 +108,7 @@ pub mod worktree;
 pub mod hooks;
 
 pub use agent_status::{AgentStatus, AgentStatusEvent};
+pub use commit_graph::{Commit, CommitGraphRow, Edge, EdgeShape};
 pub use git_models::{Change, GitFileEntry, GitStatus, Kind};
 pub use tiling::{
     drop_edge_for_point, DropEdge, LayoutPreset, NodeId, PaneId, PaneItem, PaneKind, PanePayload,
@@ -139,7 +140,7 @@ pub mod git_runner;
 pub mod process;
 pub mod tool_locator;
 
-pub use git_engine::{GitEngine, NumstatEntry, RepoInfo};
+pub use git_engine::{GitEngine, NumstatEntry, RepoInfo, DEFAULT_COMMIT_GRAPH_LIMIT};
 pub use git_runner::{GitCommandError, GitRunError};
 pub use process::Output as ProcessOutput;
 pub use tool_locator::{ToolLocating, ToolLocator};

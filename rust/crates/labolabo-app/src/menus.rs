@@ -42,8 +42,9 @@ use gpui::{
 use crate::app::OpenSelectedInIde;
 use crate::app::{
     About, CloseTab, Copy, FocusNextPane, FocusPrevPane, LaboLaboApp, MinimizeWindow,
-    NewAttachedTask, NewTab, NewWorktreeTask, Paste, Quit, SplitDown, SplitRight, ToggleGitPane,
-    ToggleSettings, ZoomWindow,
+    NewAttachedTask, NewTab, NewWorktreeTask, OpenGitCommitsPane, OpenGitDiffPane,
+    OpenGitFilesPane, Paste, Quit, SplitDown, SplitRight, ToggleGitPane, ToggleSettings,
+    ZoomWindow,
 };
 use crate::motion;
 use crate::theme;
@@ -92,6 +93,14 @@ pub fn app_menus() -> Vec<Menu> {
             name: "表示".into(),
             items: vec![
                 MenuItem::action("Git ペインを表示/非表示", ToggleGitPane),
+                MenuItem::separator(),
+                // `plans` W6d §3.2: Git のタイルペインを開く導線 --
+                // フォーカス中のタスクに、対応する種類のタイルが無ければ
+                // 新規追加、既にあれば前面に出す
+                // (`LaboLaboApp::open_git_tile_pane`)。
+                MenuItem::action("変更ファイルをタイルとして開く", OpenGitFilesPane),
+                MenuItem::action("Diff をタイルとして開く", OpenGitDiffPane),
+                MenuItem::action("コミット履歴をタイルとして開く", OpenGitCommitsPane),
                 MenuItem::separator(),
                 MenuItem::action("右に分割", SplitRight),
                 MenuItem::action("下に分割", SplitDown),
@@ -281,6 +290,10 @@ mod tests {
             item_names(&menus[3]),
             vec![
                 "Git ペインを表示/非表示",
+                "---",
+                "変更ファイルをタイルとして開く",
+                "Diff をタイルとして開く",
+                "コミット履歴をタイルとして開く",
                 "---",
                 "右に分割",
                 "下に分割",

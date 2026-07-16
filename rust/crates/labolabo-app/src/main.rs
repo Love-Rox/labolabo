@@ -19,6 +19,7 @@
 //! persistence (`crate::window_bounds`) -- see those modules' doc comments.
 
 mod app;
+mod commit_pane;
 mod control;
 mod focus;
 mod ghostty_config;
