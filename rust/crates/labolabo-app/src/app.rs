@@ -57,7 +57,7 @@ use gpui::{
     actions, div, point, prelude::*, px, rgb, size, Bounds, ClipboardItem, Context, DragMoveEvent,
     EntityInputHandler, ExternalPaths, FocusHandle, IntoElement, KeyDownEvent, Modifiers,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels, Point, Render,
-    ScrollWheelEvent, Task as GpuiTask, UTF16Selection, Window,
+    ScrollWheelEvent, SharedString, Task as GpuiTask, UTF16Selection, Window,
 };
 
 use labolabo_core::{
@@ -69,6 +69,7 @@ use labolabo_core::{
 use labolabo_term::{ColorScheme, Terminal};
 use rust_i18n::t;
 
+use crate::color_picker::{self, TabColorMenuState};
 use crate::control::{self, ControlRuntime};
 use crate::focus;
 use crate::ghostty_config::FontConfig;
@@ -86,14 +87,16 @@ use crate::motion::DotAnimState;
 use crate::mouse_report::{self, MouseAction, MouseButtonKind, MouseMods};
 use crate::new_task;
 use crate::paste;
+use crate::path_abbrev;
 use crate::render::RenderSpec;
 use crate::selection::{self, CellPos};
 use crate::settings::{self, AppSettings};
 use crate::sidebar;
 use crate::swift_import;
 use crate::task_lifecycle::{self, WorktreeRemoveOutcome};
-use crate::task_menu::{self, TaskMenuState};
+use crate::task_menu::{self, TaskMenuPhase, TaskMenuState};
 use crate::task_workspace::{self, PaneDragHover, PaneRuntime, TabDragPayload, TaskWorkspace};
+use crate::text_field::TextFieldState;
 use crate::theme;
 use crate::update_check::{self, ReleaseInfo};
 use crate::window_bounds;
@@ -245,6 +248,10 @@ pub struct LaboLaboApp {
     /// タスク行「…」メニュー / 削除確認オーバーレイの状態 (wave 6c §2、
     /// `crate::task_menu`)。`None` = 閉じている。
     task_menu: Option<TaskMenuState>,
+    /// タブチップ右クリックの色ポップオーバー (第10波、
+    /// `crate::color_picker`)。`None` = 閉じている。`task_menu` とは同時に
+    /// 開かない（互いの open が他方を閉じる/開かせない）。
+    tab_color_menu: Option<TabColorMenuState>,
     /// About オーバーレイ (`crate::menus::render_about_overlay`) の開閉 --
     /// `settings_open` と同じく純粋な UI 状態。
     about_open: bool,
@@ -488,6 +495,7 @@ impl LaboLaboApp {
             archived_tasks,
             archived_expanded: false,
             task_menu: None,
+            tab_color_menu: None,
             about_open: false,
             installed_editors: None,
             bounds_save_generation: 0,
@@ -933,7 +941,11 @@ impl LaboLaboApp {
             return;
         };
         let missing = self.missing_task_ids.contains(task_id);
-        self.task_menu = Some(TaskMenuState::new(task, anchor, missing));
+        let state = TaskMenuState::new(task, anchor, missing);
+        // 同時に 2 つのポップオーバーは開かない (`tab_color_menu` の
+        // フィールド doc コメント)。
+        self.tab_color_menu = None;
+        self.task_menu = Some(state);
         cx.notify();
     }
 
@@ -947,6 +959,254 @@ impl LaboLaboApp {
         }
         if self.task_menu.take().is_some() {
             cx.notify();
+        }
+    }
+
+    // MARK: - 名前変更・色設定 (第10波 パーソナライズ、`crate::task_menu`
+    // の Rename/ColorPick 相と `crate::color_picker`)
+
+    /// メニューの「名前を変更…」: Rename 相へ（`TaskMenuState::
+    /// request_rename` -- 現在タイトルをプリフィル）。
+    pub(crate) fn request_rename_task(&mut self, cx: &mut Context<Self>) {
+        if let Some(menu) = &mut self.task_menu {
+            menu.request_rename();
+            cx.notify();
+        }
+    }
+
+    /// メニューの「色を設定…」: ColorPick 相へ（hex 入力は現在色を
+    /// プリフィル）。
+    pub(crate) fn request_task_color_pick(&mut self, cx: &mut Context<Self>) {
+        let Some(menu) = &self.task_menu else {
+            return;
+        };
+        let current = self
+            .tasks
+            .iter()
+            .find(|t| t.id == menu.task_id)
+            .and_then(|t| t.color.clone());
+        if let Some(menu) = &mut self.task_menu {
+            menu.request_color_pick(current);
+            cx.notify();
+        }
+    }
+
+    /// Rename 相の確定: trim 済みの新タイトルで `Task::title` を更新して
+    /// 永続化し、メニューを閉じる。空入力（`rename_result` が `None`）は
+    /// no-op -- 「変更」ボタンも出ていない（Enter からの誤確定も同じ
+    /// ゲートを通る）。
+    pub(crate) fn commit_rename_task(&mut self, cx: &mut Context<Self>) {
+        let Some(menu) = &self.task_menu else {
+            return;
+        };
+        let Some(new_title) = menu.rename_result() else {
+            return;
+        };
+        let task_id = menu.task_id.clone();
+        if let Some(task) = self.tasks.iter_mut().find(|t| t.id == task_id) {
+            task.title = new_title;
+            if let Err(err) = self.db.upsert_task(task) {
+                eprintln!("labolabo-app: failed to persist task rename {task_id}: {err}");
+            }
+        }
+        self.task_menu = None;
+        cx.notify();
+    }
+
+    /// タスクの色を設定して永続化する（`None` = 「なし」= 色を外す）。
+    fn set_task_color(&mut self, task_id: &str, color: Option<String>, _cx: &mut Context<Self>) {
+        if let Some(task) = self.tasks.iter_mut().find(|t| t.id == task_id) {
+            task.color = color;
+            if let Err(err) = self.db.upsert_task(task) {
+                eprintln!("labolabo-app: failed to persist task color {task_id}: {err}");
+            }
+        }
+    }
+
+    /// スウォッチ/「なし」の選択を、いま開いているピッカー（タスクの
+    /// ColorPick 相 or タブ色ポップオーバー）の対象へ適用して閉じる --
+    /// `color_picker::render_color_swatch_panel` が対象非依存でいられる
+    /// 一点（同モジュールの doc コメント）。
+    pub(crate) fn pick_color(&mut self, value: Option<String>, cx: &mut Context<Self>) {
+        if let Some(menu) = &self.task_menu {
+            if matches!(menu.phase, TaskMenuPhase::ColorPick { .. }) {
+                let task_id = menu.task_id.clone();
+                self.set_task_color(&task_id, value, cx);
+                self.task_menu = None;
+                cx.notify();
+                return;
+            }
+        }
+        if let Some(state) = self.tab_color_menu.take() {
+            self.set_tab_color(&state.task_id, state.pane_id, value);
+            cx.notify();
+        }
+    }
+
+    /// カスタム hex の「適用」: いま開いているピッカーの入力欄を検証
+    /// (`color_picker::normalize_hex_color`) して適用。不正なら
+    /// `hex_error` を立てて開いたまま（入力が変わればクリア --
+    /// `clear_hex_error`）。
+    pub(crate) fn apply_custom_hex_color(&mut self, cx: &mut Context<Self>) {
+        let Some(raw) = self.active_text_field().map(|f| f.text.clone()) else {
+            return;
+        };
+        match color_picker::normalize_hex_color(&raw) {
+            Some(hex) => self.pick_color(Some(hex), cx),
+            None => {
+                if let Some(menu) = &mut self.task_menu {
+                    if let TaskMenuPhase::ColorPick { hex_error, .. } = &mut menu.phase {
+                        *hex_error = true;
+                    }
+                }
+                if let Some(state) = &mut self.tab_color_menu {
+                    state.hex_error = true;
+                }
+                cx.notify();
+            }
+        }
+    }
+
+    /// タブチップの右クリックから開く（`anchor` はクリック位置）。タスク
+    /// メニューが開いている間は開かない（モーダルの重なりを作らない）。
+    pub(crate) fn open_tab_color_menu(
+        &mut self,
+        task_id: &str,
+        pane_id: PaneId,
+        anchor: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.task_menu.is_some() {
+            return;
+        }
+        let current = self.tab_color(task_id, pane_id);
+        self.tab_color_menu = Some(TabColorMenuState::new(task_id, pane_id, anchor, current));
+        cx.notify();
+    }
+
+    pub(crate) fn close_tab_color_menu(&mut self, cx: &mut Context<Self>) {
+        if self.tab_color_menu.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn tab_color_menu(&self) -> Option<&TabColorMenuState> {
+        self.tab_color_menu.as_ref()
+    }
+
+    /// `task_id` の `pane_id` タブの現在色（レイアウト内の
+    /// `PaneItem::color`）。
+    pub(crate) fn tab_color(&self, task_id: &str, pane_id: PaneId) -> Option<String> {
+        self.workspaces
+            .get(task_id)?
+            .model
+            .panes()
+            .into_iter()
+            .find(|p| p.id == pane_id)
+            .and_then(|p| p.color.clone())
+    }
+
+    /// タブの色を設定してレイアウトごと永続化する（`PaneItem::color` →
+    /// `persist_workspace` -- タブ移動やタイトルと同じ経路で
+    /// `Task::layout` の JSON に入る）。
+    fn set_tab_color(&mut self, task_id: &str, pane_id: PaneId, color: Option<String>) {
+        let Some(workspace) = self.workspaces.get_mut(task_id) else {
+            return;
+        };
+        let Some(pane) = workspace.model.pane_mut(pane_id) else {
+            return;
+        };
+        pane.color = color;
+        self.persist_workspace(task_id);
+    }
+
+    // MARK: - テキスト入力のルーティング (第10波、`crate::text_field` の
+    // モジュール doc コメント参照)
+
+    /// いま開いている単一行テキスト入力欄（Rename の入力 / タスク・タブ
+    /// 色ピッカーの hex 入力）。`Some` の間、`EntityInputHandler` 実装と
+    /// `key_down` は端末 PTY ではなくこの欄へルーティングする。
+    fn active_text_field(&self) -> Option<&TextFieldState> {
+        if let Some(menu) = &self.task_menu {
+            match &menu.phase {
+                TaskMenuPhase::Rename { field } => return Some(field),
+                TaskMenuPhase::ColorPick { hex_field, .. } => return Some(hex_field),
+                _ => {}
+            }
+        }
+        self.tab_color_menu.as_ref().map(|m| &m.hex_field)
+    }
+
+    fn active_text_field_mut(&mut self) -> Option<&mut TextFieldState> {
+        if let Some(menu) = &mut self.task_menu {
+            match &mut menu.phase {
+                TaskMenuPhase::Rename { field } => return Some(field),
+                TaskMenuPhase::ColorPick { hex_field, .. } => return Some(hex_field),
+                _ => {}
+            }
+        }
+        self.tab_color_menu.as_mut().map(|m| &mut m.hex_field)
+    }
+
+    /// いまの IME 変換中(preedit)テキスト: 入力欄が開いていればその欄の
+    /// preedit、でなければ端末側 (`active_preedit`) -- `EntityInputHandler`
+    /// 実装の preedit 系メソッド共通の分岐点。
+    fn ime_preedit_text(&self) -> Option<&str> {
+        if let Some(field) = self.active_text_field() {
+            return field.preedit.as_deref();
+        }
+        self.active_preedit.as_ref().map(|p| p.text.as_str())
+    }
+
+    /// hex 入力の変更でエラー表示を消す（`apply_custom_hex_color` の
+    /// 失敗表示は「直前の適用が失敗した」ことしか意味しないため、入力が
+    /// 変わったら古いエラーを残さない）。
+    fn clear_hex_error(&mut self) {
+        if let Some(menu) = &mut self.task_menu {
+            if let TaskMenuPhase::ColorPick { hex_error, .. } = &mut menu.phase {
+                *hex_error = false;
+            }
+        }
+        if let Some(state) = &mut self.tab_color_menu {
+            state.hex_error = false;
+        }
+    }
+
+    /// Enter: いま開いている入力欄の「確定」。Rename はタイトル確定、
+    /// 色ピッカーは hex が入力されていれば「適用」、空なら閉じるだけ。
+    fn confirm_text_input(&mut self, cx: &mut Context<Self>) {
+        if let Some(menu) = &self.task_menu {
+            match &menu.phase {
+                TaskMenuPhase::Rename { .. } => {
+                    self.commit_rename_task(cx);
+                    return;
+                }
+                TaskMenuPhase::ColorPick { hex_field, .. } => {
+                    if hex_field.text.trim().is_empty() {
+                        self.close_task_menu(cx);
+                    } else {
+                        self.apply_custom_hex_color(cx);
+                    }
+                    return;
+                }
+                _ => {}
+            }
+        }
+        if let Some(state) = &self.tab_color_menu {
+            if state.hex_field.text.trim().is_empty() {
+                self.close_tab_color_menu(cx);
+            } else {
+                self.apply_custom_hex_color(cx);
+            }
+        }
+    }
+
+    /// Escape: いま開いている入力欄ごとオーバーレイを閉じる。
+    fn cancel_text_input(&mut self, cx: &mut Context<Self>) {
+        if self.task_menu.is_some() {
+            self.close_task_menu(cx);
+        } else {
+            self.close_tab_color_menu(cx);
         }
     }
 
@@ -2691,11 +2951,48 @@ impl LaboLaboApp {
     /// key bindings map it to `moveToBeginningOfLine:`), re-dispatching this
     /// same handler a second time for the one keystroke.
     fn key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        // 単一行テキスト入力欄が開いている間 (第10波、`crate::text_field`)
+        // は端末 PTY へ一切書かない: 編集キーはここで欄に適用し、それ以外
+        // の「PTY 直行キー」(`keystroke_to_bytes` が Some を返すもの) は
+        // 飲み込む。プレーン文字/IME は従来どおり `EntityInputHandler`
+        // 経由で届く（そちらも欄へルーティングされる）。
+        if self.text_input_active() {
+            match event.keystroke.key.as_str() {
+                "enter" => {
+                    self.confirm_text_input(cx);
+                    cx.stop_propagation();
+                }
+                "escape" => {
+                    self.cancel_text_input(cx);
+                    cx.stop_propagation();
+                }
+                "backspace" => {
+                    if let Some(field) = self.active_text_field_mut() {
+                        field.backspace();
+                    }
+                    self.clear_hex_error();
+                    cx.notify();
+                    cx.stop_propagation();
+                }
+                _ => {
+                    if keystroke_to_bytes(&event.keystroke).is_some() {
+                        cx.stop_propagation();
+                    }
+                }
+            }
+            return;
+        }
         if let Some(bytes) = keystroke_to_bytes(&event.keystroke) {
             if self.write_focused_pane_input(&bytes) {
                 cx.stop_propagation();
             }
         }
+    }
+
+    /// `active_text_field().is_some()` -- `key_down`/`EntityInputHandler`
+    /// のルーティング分岐と、`Render` がオーバーレイを組むときの判定用。
+    fn text_input_active(&self) -> bool {
+        self.active_text_field().is_some()
     }
 
     // MARK: - text selection, mouse reporting & wheel scroll
@@ -3082,6 +3379,18 @@ impl LaboLaboApp {
             return;
         };
         if text.is_empty() {
+            return;
+        }
+        // テキスト入力欄が開いている間の Cmd+V はそちらへ (第10波) --
+        // でなければ、モーダルの裏に隠れた端末へ流れてしまう。単一行
+        // 入力なので改行や制御文字は落とす。
+        if self.text_input_active() {
+            let sanitized: String = text.chars().filter(|c| !c.is_control()).collect();
+            if let Some(field) = self.active_text_field_mut() {
+                field.commit(&sanitized);
+            }
+            self.clear_hex_error();
+            cx.notify();
             return;
         }
         let Some(runtime) = self.focused_pane_runtime() else {
@@ -3787,6 +4096,8 @@ fn compute_task_conflicts(
 impl EntityInputHandler for LaboLaboApp {
     /// Only ever asked about the live preedit string (there is no other
     /// "document" -- see this impl's doc comment); `None` otherwise.
+    /// 第10波: テキスト入力欄が開いている間はその欄の preedit が対象
+    /// (`Self::ime_preedit_text`)。
     fn text_for_range(
         &mut self,
         range_utf16: Range<usize>,
@@ -3794,22 +4105,23 @@ impl EntityInputHandler for LaboLaboApp {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<String> {
-        let preedit = self.active_preedit.as_ref()?;
+        let preedit = self.ime_preedit_text()?.to_string();
         *adjusted_range = Some(range_utf16.clone());
-        Some(ime::utf16_slice(&preedit.text, range_utf16))
+        Some(ime::utf16_slice(&preedit, range_utf16))
     }
 
     /// A terminal never has a persistent text selection to report; while
     /// composing, the caret is always at the end of the preedit string (we
-    /// don't support moving it within an in-progress composition).
+    /// don't support moving it within an in-progress composition). The
+    /// single-line text field (第10波) has the same always-at-the-end caret
+    /// model (`text_field.rs`), so one implementation covers both.
     fn selected_text_range(
         &mut self,
         _ignore_disabled_input: bool,
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<UTF16Selection> {
-        let preedit = self.active_preedit.as_ref()?;
-        let len = ime::utf16_len(&preedit.text);
+        let len = ime::utf16_len(self.ime_preedit_text()?);
         Some(UTF16Selection {
             range: len..len,
             reversed: false,
@@ -3825,22 +4137,29 @@ impl EntityInputHandler for LaboLaboApp {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Range<usize>> {
-        self.active_preedit
-            .as_ref()
-            .map(|preedit| 0..ime::utf16_len(&preedit.text))
+        self.ime_preedit_text()
+            .map(|preedit| 0..ime::utf16_len(preedit))
     }
 
     /// IME composition cancelled (e.g. Escape while composing, or focus
     /// loss) without committing -- clear the preedit and redraw. Never
-    /// writes to the PTY.
+    /// writes to the PTY (or the text field's committed text).
     fn unmark_text(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.text_input_active() {
+            if let Some(field) = self.active_text_field_mut() {
+                field.set_preedit(None);
+            }
+            cx.notify();
+            return;
+        }
         if self.active_preedit.take().is_some() {
             cx.notify();
         }
     }
 
     /// A commit: either a plain (non-composing) character/string being
-    /// typed, or an IME composition's final confirmed text. Either way, any
+    /// typed, or an IME composition's final confirmed text. Routed to the
+    /// open text field when one is active (第10波); otherwise any
     /// in-progress preedit is cleared and `text` is written verbatim to the
     /// focused pane's PTY as UTF-8 bytes.
     fn replace_text_in_range(
@@ -3850,6 +4169,14 @@ impl EntityInputHandler for LaboLaboApp {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.text_input_active() {
+            if let Some(field) = self.active_text_field_mut() {
+                field.commit(text);
+            }
+            self.clear_hex_error();
+            cx.notify();
+            return;
+        }
         self.active_preedit = None;
         if !text.is_empty() {
             self.write_focused_pane_input(text.as_bytes());
@@ -3860,7 +4187,8 @@ impl EntityInputHandler for LaboLaboApp {
     /// An IME composition update (`setMarkedText:`): `new_text` is the
     /// current preedit string. Never written to the PTY -- only tracked, so
     /// `task_workspace::render_leaf` can paint it inline over the focused
-    /// pane's cursor (`render::paint_preedit`) -- until a later
+    /// pane's cursor (`render::paint_preedit`), or the open text field can
+    /// render it underlined (第10波) -- until a later
     /// `replace_text_in_range` commits it or `unmark_text` cancels it.
     fn replace_and_mark_text_in_range(
         &mut self,
@@ -3870,6 +4198,14 @@ impl EntityInputHandler for LaboLaboApp {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.text_input_active() {
+            let preedit = (!new_text.is_empty()).then(|| new_text.to_string());
+            if let Some(field) = self.active_text_field_mut() {
+                field.set_preedit(preedit);
+            }
+            cx.notify();
+            return;
+        }
         self.active_preedit = if new_text.is_empty() {
             None
         } else {
@@ -3888,6 +4224,10 @@ impl EntityInputHandler for LaboLaboApp {
     /// when `task_workspace::render_leaf` constructed the
     /// `ElementInputHandler` this frame) -- used by the platform to
     /// position the IME candidate window right over the terminal cursor.
+    /// 第10波: テキスト入力欄が開いている間は、勝っている登録が入力欄側
+    /// (`text_field::render_text_field` の canvas -- ツリー末尾のオーバー
+    /// レイなので最後に登録され、gpui は最後の registration を使う) なの
+    /// で、`element_bounds` = 入力欄自身。候補ウィンドウは欄の直下に出す。
     fn bounds_for_range(
         &mut self,
         _range_utf16: Range<usize>,
@@ -3895,6 +4235,9 @@ impl EntityInputHandler for LaboLaboApp {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
+        if self.text_input_active() {
+            return Some(element_bounds);
+        }
         let runtime = self.focused_pane_runtime()?;
         let cursor = runtime.session.snapshot().cursor;
         let origin = element_bounds.origin
@@ -4019,6 +4362,10 @@ impl Render for LaboLaboApp {
         // (wave 6c §1) -- settings と同じ「開いている間だけ子が存在する」
         // オーバーレイ。
         let task_menu_el = task_menu::render_task_menu_overlay(self, window, cx);
+        // タブチップ右クリックの色ポップオーバー (第10波、
+        // `crate::color_picker`) -- task_menu と同時には開かない排他は
+        // open 側で保証済み。
+        let tab_color_el = color_picker::render_tab_color_overlay(self, window, cx);
         let about_el = menus::render_about_overlay(self, cx);
         // 起動時の Swift 版インポート確認プロンプト (`crate::import_prompt`,
         // 第8波d) -- 同じく「開いている間だけ子が存在する」オーバーレイ。
@@ -4065,6 +4412,7 @@ impl Render for LaboLaboApp {
             .children(git_pane_el)
             .children(settings_el)
             .children(task_menu_el)
+            .children(tab_color_el)
             .children(about_el)
             .children(import_prompt_el)
     }
@@ -4103,7 +4451,12 @@ fn empty_state(message: impl Into<String>) -> gpui::AnyElement {
 /// している -- 独立した削除フローには見えず、あくまで同じ削除確認へ入る
 /// 入り口だと分かるように。
 fn render_missing_task_placeholder(task: &Task, cx: &mut Context<LaboLaboApp>) -> gpui::AnyElement {
-    let path = task.working_directory().to_string();
+    // パスは省略表示 (第10波 §3、`crate::path_abbrev`)。フルパスは
+    // ツールチップに残す(同モジュールの契約)。
+    let full_path: SharedString = task.working_directory().to_string().into();
+    let shown_path: SharedString =
+        path_abbrev::abbreviate_path(task.working_directory(), path_abbrev::os_home().as_deref())
+            .into();
     let recheck_task_id = task.id.clone();
     let delete_task_id = task.id.clone();
     div()
@@ -4121,9 +4474,13 @@ fn render_missing_task_placeholder(task: &Task, cx: &mut Context<LaboLaboApp>) -
         )
         .child(
             div()
+                .id("missing-task-path")
                 .text_color(rgb(theme::text::MUTED))
                 .text_size(px(theme::font_size::CAPTION))
-                .child(path),
+                .tooltip(move |_window, cx| {
+                    cx.new(|_| sidebar::IconTooltip(full_path.clone())).into()
+                })
+                .child(shown_path),
         )
         .child(
             div()

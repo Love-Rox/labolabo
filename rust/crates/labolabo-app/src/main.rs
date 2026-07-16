@@ -20,6 +20,7 @@
 //! persistence (`crate::window_bounds`) -- see those modules' doc comments.
 
 mod app;
+mod color_picker;
 mod commit_pane;
 mod control;
 mod focus;
@@ -38,6 +39,7 @@ mod motion;
 mod mouse_report;
 mod new_task;
 mod paste;
+mod path_abbrev;
 mod render;
 mod selection;
 mod settings;
@@ -46,6 +48,7 @@ mod swift_import;
 mod task_lifecycle;
 mod task_menu;
 mod task_workspace;
+mod text_field;
 mod theme;
 mod update_check;
 mod window_bounds;

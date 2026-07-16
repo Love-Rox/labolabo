@@ -75,6 +75,16 @@ task:
   menu:
     ide_section_title: "Open in IDE"
     reveal_in_finder: "Reveal in Finder"
+    # Wave 10 (sidebar personalization): rename / color menu items. Added
+    # inside this existing block (rather than appended at the end of the
+    # file) because a duplicate top-level `task:` mapping would be invalid
+    # YAML.
+    rename: "Rename…"
+    set_color: "Set Color…"
+    rename_title: "Rename “%{title}”"
+    rename_placeholder: "New name"
+    rename_confirm: "Rename"
+    set_color_title: "Color for “%{title}”"
     archive: "Archive"
     delete: "Delete…"
     confirm:
@@ -168,3 +178,14 @@ import_prompt:
   once_notice: "This confirmation only appears once."
   accept: "Import"
   decline: "Don't Import"
+
+# Wave 10 (sidebar personalization): shared color-picker strings
+# (`crate::color_picker` -- used by both the task color phase and the tab
+# color popover). Appended at the end of the file, same rationale as the
+# wave-8d block above.
+color:
+  none: "None"
+  custom_label: "Custom (#rrggbb)"
+  custom_apply: "Apply"
+  invalid_hex: "Enter a color as #rrggbb"
+  tab_menu_title: "Tab color"
