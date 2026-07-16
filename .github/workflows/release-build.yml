@@ -18,6 +18,12 @@ permissions:
 jobs:
   build:
     name: build & attach .app
+    # Swift 版のリリース（release-please の `v*` タグ）のときだけ動かす。
+    # Rust 版（`rs-v*`、.github/workflows/rust-release.yml が作成）の publish に
+    # 反応して Swift アプリの zip を Rust 版リリースへ添付してしまった事故
+    # （rs-v1.0.0、2026-07-16）の再発防止。workflow_dispatch は従来どおり
+    # タグを問わない（手動実行者の責任で指定する）。
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'v')
     runs-on: macos-15
     env:
       # 未設定なら Cask 自動更新ステップをスキップする（step の if で参照するため job レベルに置く）。
