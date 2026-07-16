@@ -18,6 +18,7 @@
 use std::path::Path;
 
 use labolabo_core::{git_runner, GitEngine, GitRunError};
+use rust_i18n::t;
 
 /// 選択中タスク `removed` が一覧から消えるとき、次に選択すべきタスク id。
 /// 削除位置の「次」（一覧上で同じ位置に来るタスク）を優先し、末尾なら
@@ -45,22 +46,36 @@ pub enum WorktreeRemoveOutcome {
 }
 
 /// worktree 削除の本体。ブロッキング -- バックグラウンドスレッドから呼ぶ。
+///
+/// `locale` (`"ja"`/`"en"`) is threaded through **explicitly** to
+/// [`remove_error_message`]/[`delete_branch_gently`] rather than read via
+/// `rust_i18n::locale()` ambiently at the point those error strings are
+/// built -- this whole call runs on a background thread
+/// (`cx.background_spawn`, `app.rs`'s `execute_delete_task`) started from
+/// whatever the UI locale was at click time, so passing it down as a plain
+/// argument is both correct (no risk of the global locale changing out from
+/// under a long `git worktree remove` if the user flips the language
+/// setting mid-operation) and keeps this module's own unit tests below
+/// deterministic without mutating `rust_i18n`'s process-global current
+/// locale (a shared mutable global `cargo test`'s default parallel
+/// execution would otherwise race across every other test in this binary).
 pub fn remove_worktree_and_maybe_branch(
     repo_root: &Path,
     worktree_path: &Path,
     branch: &str,
     delete_branch: bool,
+    locale: &str,
 ) -> WorktreeRemoveOutcome {
     let engine = GitEngine::new();
     // force = false 固定: 未コミット変更（変更・未追跡ファイル）があれば
     // git が非ゼロ exit で拒否する。それを砕けない安全弁として使う。
     if let Err(err) = engine.remove_worktree(repo_root, worktree_path, false) {
         return WorktreeRemoveOutcome::Refused {
-            message: remove_error_message(&err),
+            message: remove_error_message(&err, locale),
         };
     }
     let branch_warning = if delete_branch {
-        delete_branch_gently(repo_root, branch).err()
+        delete_branch_gently(repo_root, branch, locale).err()
     } else {
         None
     };
@@ -68,31 +83,35 @@ pub fn remove_worktree_and_maybe_branch(
 }
 
 /// `git branch -d`（マージ済みのブランチのみ削除できる、安全な方）。
-fn delete_branch_gently(repo_root: &Path, branch: &str) -> Result<(), String> {
+fn delete_branch_gently(repo_root: &Path, branch: &str, locale: &str) -> Result<(), String> {
     git_runner::run(
         &["branch".to_string(), "-d".to_string(), branch.to_string()],
         repo_root,
     )
     .map(|_| ())
     .map_err(|err| {
-        format!("ブランチ {branch} は削除できませんでした（マージ未済の可能性があります）: {err}")
+        t!(
+            "task.delete.branch_delete_failed",
+            locale = locale,
+            branch = branch,
+            err = err
+        )
+        .to_string()
     })
 }
 
 /// `git worktree remove` の失敗をユーザー向けメッセージへ。未コミット変更
 /// による拒否（`contains modified or untracked files` / `use --force`）は
 /// 定型文へ、それ以外は stderr をそのまま添える。
-pub fn remove_error_message(err: &GitRunError) -> String {
+pub fn remove_error_message(err: &GitRunError, locale: &str) -> String {
     if let GitRunError::Command(command_err) = err {
         let stderr = command_err.stderr.to_lowercase();
         if stderr.contains("contains modified or untracked files") || stderr.contains("use --force")
         {
-            return "未コミットの変更があるため削除できません。\
-                    先にコミットするか worktree 内で確認してください。"
-                .to_string();
+            return t!("task.delete.worktree_dirty", locale = locale).to_string();
         }
     }
-    format!("worktree を削除できませんでした: {err}")
+    t!("task.delete.worktree_failed", locale = locale, err = err).to_string()
 }
 
 #[cfg(test)]
@@ -148,14 +167,24 @@ mod tests {
             "fatal: '/repo/.worktrees/x' contains modified or untracked files, \
              use --force to delete it",
         );
-        let message = remove_error_message(&err);
+        let message = remove_error_message(&err, "ja");
         assert!(message.contains("未コミットの変更があるため削除できません"));
+    }
+
+    #[test]
+    fn dirty_worktree_refusal_maps_to_the_fixed_english_message() {
+        let err = command_error(
+            "fatal: '/repo/.worktrees/x' contains modified or untracked files, \
+             use --force to delete it",
+        );
+        let message = remove_error_message(&err, "en");
+        assert!(message.contains("uncommitted changes"));
     }
 
     #[test]
     fn other_git_failures_keep_the_underlying_stderr() {
         let err = command_error("fatal: '/nope' is not a working tree");
-        let message = remove_error_message(&err);
+        let message = remove_error_message(&err, "ja");
         assert!(message.contains("worktree を削除できませんでした"));
         assert!(message.contains("is not a working tree"));
     }
@@ -213,7 +242,7 @@ mod tests {
         let worktree = add_worktree(&repo, "feature/x");
 
         // ブランチは main と同一コミット = マージ済み扱いなので -d が通る。
-        let outcome = remove_worktree_and_maybe_branch(&repo, &worktree, "feature/x", true);
+        let outcome = remove_worktree_and_maybe_branch(&repo, &worktree, "feature/x", true, "ja");
         assert_eq!(
             outcome,
             WorktreeRemoveOutcome::Removed {
@@ -232,7 +261,8 @@ mod tests {
         init_repo_with_commit(&repo);
         let worktree = add_worktree(&repo, "feature/keep");
 
-        let outcome = remove_worktree_and_maybe_branch(&repo, &worktree, "feature/keep", false);
+        let outcome =
+            remove_worktree_and_maybe_branch(&repo, &worktree, "feature/keep", false, "ja");
         assert_eq!(
             outcome,
             WorktreeRemoveOutcome::Removed {
@@ -253,7 +283,8 @@ mod tests {
         // 未追跡ファイル = 未コミットの変更。force しない remove は拒否される。
         std::fs::write(worktree.join("untracked.txt"), "wip\n").unwrap();
 
-        let outcome = remove_worktree_and_maybe_branch(&repo, &worktree, "feature/dirty", true);
+        let outcome =
+            remove_worktree_and_maybe_branch(&repo, &worktree, "feature/dirty", true, "ja");
         match outcome {
             WorktreeRemoveOutcome::Refused { message } => {
                 assert!(
@@ -283,7 +314,8 @@ mod tests {
             &worktree,
         );
 
-        let outcome = remove_worktree_and_maybe_branch(&repo, &worktree, "feature/unmerged", true);
+        let outcome =
+            remove_worktree_and_maybe_branch(&repo, &worktree, "feature/unmerged", true, "ja");
         match outcome {
             WorktreeRemoveOutcome::Removed { branch_warning } => {
                 let warning = branch_warning.expect("unmerged branch must produce a warning");

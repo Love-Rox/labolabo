@@ -32,6 +32,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use labolabo_core::{SessionDatabase, Task, TaskDatabase};
+use rust_i18n::t;
 
 /// One [`run`] call's outcome, already summarized for the banner text —
 /// see [`format_banner`].
@@ -119,9 +120,9 @@ fn run_against(
     let starting_sort_order = match db.next_sort_order() {
         Ok(n) => n,
         Err(err) => {
-            return Some(Err(format!(
-                "Swift 版からのインポートに失敗しました（並び順の取得エラー: {err}）"
-            )))
+            return Some(Err(
+                t!("swift_import.error.sort_order", err = err).to_string()
+            ))
         }
     };
 
@@ -144,9 +145,7 @@ fn run_against(
             tasks.extend(outcome.imported);
             Some(Ok(summary))
         }
-        Err(err) => Some(Err(format!(
-            "Swift 版からのインポートに失敗しました: {err}"
-        ))),
+        Err(err) => Some(Err(t!("swift_import.error.generic", err = err).to_string())),
     }
 }
 
@@ -166,17 +165,17 @@ pub fn is_notable(summary: &ImportRunSummary) -> bool {
 /// one-line sidebar banner is not the right surface for a multi-paragraph
 /// diagnostic dump.
 pub fn format_banner(summary: &ImportRunSummary) -> String {
-    let mut text = format!("Swift 版から {} 件の作業を取り込みました", summary.imported);
+    let mut text = t!("swift_import.banner.imported", count = summary.imported).to_string();
     if summary.skipped_duplicate > 0 {
-        text.push_str(&format!(
-            "（{} 件は重複のためスキップ）",
-            summary.skipped_duplicate
+        text.push_str(&t!(
+            "swift_import.banner.skipped",
+            count = summary.skipped_duplicate
         ));
     }
     if !summary.warnings.is_empty() {
-        text.push_str(&format!(
-            " / 警告 {} 件（詳細はログ参照）",
-            summary.warnings.len()
+        text.push_str(&t!(
+            "swift_import.banner.warnings",
+            count = summary.warnings.len()
         ));
     }
     text

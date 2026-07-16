@@ -81,6 +81,7 @@ use gpui::{
     div, prelude::*, px, relative, rgb, AnyElement, Context, IntoElement, MouseButton,
     MouseDownEvent, SharedString, Task as GpuiTask,
 };
+use rust_i18n::t;
 
 use labolabo_core::{
     CommitGraphRow, DiffLine, FileDiff, FileWatcher, GitEngine, GitStatus, Kind, LineKind,
@@ -116,11 +117,15 @@ pub enum FileSection {
 }
 
 impl FileSection {
-    fn label(self) -> &'static str {
+    /// Localized section heading (wave 6f) -- previously hardcoded English
+    /// ("Staged"/"Unstaged"/"Untracked") even in the otherwise-Japanese UI;
+    /// the ja locale now translates these (one of the deliberate ja-text
+    /// changes listed in the wave's PR description).
+    fn label(self) -> String {
         match self {
-            FileSection::Staged => "Staged",
-            FileSection::Unstaged => "Unstaged",
-            FileSection::Untracked => "Untracked",
+            FileSection::Staged => t!("git.status.staged").to_string(),
+            FileSection::Unstaged => t!("git.status.unstaged").to_string(),
+            FileSection::Untracked => t!("git.status.untracked").to_string(),
         }
     }
 
@@ -601,7 +606,7 @@ fn render_branch_bar(
             .clone()
             .unwrap_or_else(|| "-".to_string())
             .into(),
-        None => "loading...".to_string().into(),
+        None => t!("git.branch.loading").to_string().into(),
     };
     let ahead = state.status.as_ref().map(|s| s.ahead).unwrap_or(0);
     let behind = state.status.as_ref().map(|s| s.behind).unwrap_or(0);
@@ -656,8 +661,12 @@ fn render_branch_bar(
                 .hover(|el| el.bg(rgb(theme::surface::ACTIVE)))
                 .active(|el| el.opacity(0.8))
                 .tooltip(move |_window, cx| {
-                    cx.new(|_| crate::sidebar::IconTooltip("タイルとして開く".into()))
-                        .into()
+                    cx.new(|_| {
+                        crate::sidebar::IconTooltip(
+                            t!("git.pane.promote_tooltip").to_string().into(),
+                        )
+                    })
+                    .into()
                 })
                 .on_mouse_down(
                     MouseButton::Left,
@@ -699,7 +708,7 @@ pub(crate) fn render_file_list(
             .p_2()
             .text_size(px(11.0))
             .text_color(rgb(theme::text::MUTED))
-            .child(SharedString::from("No changes"))
+            .child(SharedString::from(t!("git.file_list.empty").to_string()))
             .into_any_element();
     }
 
@@ -816,7 +825,9 @@ pub(crate) fn render_detail(
             .p_2()
             .text_size(px(11.0))
             .text_color(rgb(theme::text::MUTED))
-            .child(SharedString::from("Select a file"))
+            .child(SharedString::from(
+                t!("git.file_list.select_file_prompt").to_string(),
+            ))
             .into_any_element();
     };
 
@@ -866,14 +877,14 @@ fn render_detail_header(
                 .child(SharedString::from(path.to_string())),
         )
         .child(render_mode_pill(
-            "Diff",
+            t!("git.detail.mode_diff").to_string(),
             state.view_mode == FileViewMode::Diff,
             cx.listener(move |this, _: &MouseDownEvent, _window, cx| {
                 this.set_git_view_mode(&diff_task_id, FileViewMode::Diff, cx);
             }),
         ))
         .child(render_mode_pill(
-            "Whole",
+            t!("git.detail.mode_whole").to_string(),
             state.view_mode == FileViewMode::Whole,
             cx.listener(move |this, _: &MouseDownEvent, _window, cx| {
                 this.set_git_view_mode(&whole_task_id, FileViewMode::Whole, cx);
@@ -882,7 +893,7 @@ fn render_detail_header(
 }
 
 fn render_mode_pill(
-    label: &'static str,
+    label: String,
     active: bool,
     on_click: impl Fn(&MouseDownEvent, &mut gpui::Window, &mut gpui::App) + 'static,
 ) -> impl IntoElement {
@@ -908,13 +919,13 @@ fn render_mode_pill(
 
 fn render_diff(diff: Option<&FileDiff>, spec: &RenderSpec) -> AnyElement {
     let Some(diff) = diff else {
-        return placeholder("No diff");
+        return placeholder(t!("git.detail.no_diff").to_string());
     };
     if diff.is_binary {
-        return placeholder("Binary file");
+        return placeholder(t!("git.detail.binary_file").to_string());
     }
     if diff.hunks.is_empty() {
-        return placeholder("No diff");
+        return placeholder(t!("git.detail.no_diff").to_string());
     }
 
     let mut col = div().flex().flex_col().overflow_hidden();
@@ -1008,10 +1019,10 @@ fn render_diff_line(line: &DiffLine, spec: &RenderSpec) -> AnyElement {
 // instead of hardcoding `"Menlo"`.
 fn render_whole_text(text: Option<&str>, spec: &RenderSpec) -> AnyElement {
     let Some(text) = text else {
-        return placeholder("Unavailable");
+        return placeholder(t!("git.detail.unavailable").to_string());
     };
     if text.is_empty() {
-        return placeholder("(empty file)");
+        return placeholder(t!("git.detail.empty_file").to_string());
     }
 
     let mut col = div().flex().flex_col().overflow_hidden();
@@ -1045,8 +1056,10 @@ fn render_whole_text(text: Option<&str>, spec: &RenderSpec) -> AnyElement {
 /// A muted, centered-in-nothing placeholder message (e.g. "No changes",
 /// "Select a file") -- `pub(crate)` so `crate::commit_pane` can show the
 /// same "nothing here yet" treatment for an empty commit list instead of
-/// hand-rolling its own.
-pub(crate) fn placeholder(text: &'static str) -> AnyElement {
+/// hand-rolling its own. Takes an owned `String` (not `&'static str`) since
+/// wave 6f's callers build the text from `t!()`, locale-dependent at call
+/// time.
+pub(crate) fn placeholder(text: String) -> AnyElement {
     div()
         .p_2()
         .text_size(px(11.0))

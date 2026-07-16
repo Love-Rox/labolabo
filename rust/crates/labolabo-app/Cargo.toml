@@ -74,6 +74,32 @@ serde_json = "1"
 # grid it's painted over.
 unicode-width = "0.2"
 
+# i18n wave (wave 6f, `crate::i18n`): compile-time-embedded ja/en locale
+# tables (`locales/{ja,en}.yml`) via the `t!()` macro (`i18n!()` invoked once
+# in `main.rs`). Chosen over a hand-rolled static table because it was the
+# task brief's own first candidate and its *runtime* footprint is what that
+# brief actually gates on ("実行時コストほぼゼロ・アイドル電力に影響しない
+# こと"): `t!()` is one atomic-string read (`rust_i18n::locale()`) plus a
+# `BTreeMap` lookup baked in at compile time via `rust_i18n::i18n!` -- no
+# polling, no background work, nothing that touches idle power. The crate's
+# *build-time* dependency graph is heavier (`rust-i18n-macro` pulls in
+# `ignore`/`ripgrep`-style directory walking to resolve `locales/` at macro-
+# expansion time), but that entire subtree lives behind a proc-macro crate
+# and is never linked into the produced binary -- only this crate's own
+# compile time is affected, not the shipped app. A self-rolled `LocaleTable`
+# would avoid that build-time cost but would mean hand-writing the exact
+# fallback/interpolation/key-flattening machinery `t!()` already provides,
+# for ~90 keys across two languages -- judged not worth reinventing here.
+rust-i18n = "4"
+
+# OS locale detection for the settings screen's "自動" language option
+# (`crate::i18n::detect_os_locale`) -- a `sys_locale::get_locale()` call at
+# startup (and again whenever the user picks "自動"), each just one syscall/
+# API call, not polled. Minimal dependency footprint (no transitive deps on
+# any platform this project targets -- macOS/Linux/Windows), matching this
+# crate's general "keep deps lean" posture.
+sys-locale = "0.3"
+
 # Swift-app importer wave (`crate::swift_import`): tests hand-author a
 # scratch "GRDB-shaped" `labolabo.db` (same technique
 # `labolabo-core`'s own `swift_import` tests use) to exercise `swift_import::
@@ -83,3 +109,11 @@ unicode-width = "0.2"
 # dependency to keep one resolved version in the workspace lockfile.
 [dev-dependencies]
 rusqlite = { version = "0.40.1", features = ["bundled"] }
+
+# i18n wave (`tests/i18n_parity.rs`): the ja/en key-parity gate parses
+# `locales/{ja,en}.yml` directly (the same files `rust_i18n::i18n!` embeds
+# at compile time -- rust-i18n exposes no public "enumerate all keys" API,
+# so the test reads the source of truth itself). Same version rust-i18n's
+# own macro crate already resolves in this lockfile, so this adds no new
+# dependency version; test-only, never linked into the shipped binary.
+serde_yaml = "0.9"

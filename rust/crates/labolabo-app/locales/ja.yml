@@ -1,0 +1,144 @@
+_version: 1
+
+menu:
+  app:
+    about: "%{app} について"
+    settings: "設定…"
+    quit: "%{app} を終了"
+  file:
+    title: "ファイル"
+    new_attached_task: "新しい作業（フォルダ直付け）…"
+    new_worktree_task: "新しい作業（worktree を作成）…"
+    import_from_swift: "Swift 版からインポート…"
+    open_selected_in_ide: "選択中の作業を IDE で開く"
+    new_tab: "新しいタブ"
+    close_tab: "タブを閉じる"
+  edit:
+    title: "編集"
+    copy: "コピー"
+    paste: "ペースト"
+  view:
+    title: "表示"
+    toggle_git_pane: "Git ペインを表示/非表示"
+    open_git_files_pane: "変更ファイルをタイルとして開く"
+    open_git_diff_pane: "Diff をタイルとして開く"
+    open_git_commits_pane: "コミット履歴をタイルとして開く"
+    split_right: "右に分割"
+    split_down: "下に分割"
+    focus_next_pane: "次のペイン"
+    focus_prev_pane: "前のペイン"
+  window:
+    title: "ウィンドウ"
+    minimize: "しまう"
+    zoom: "拡大/縮小"
+
+about:
+  version_line: "バージョン %{version}（ビルド %{build}）"
+  tagline: "LaboLabo の Rust クロスプラットフォーム版"
+
+settings:
+  title: "設定"
+  auto_resume:
+    label: "Claude セッションの自動 resume"
+    footer: "復元したタスクを開いたとき、前回のセッションを自動的に再開します。"
+  git_pane_default_visible:
+    label: "Git ペインを既定で表示"
+    footer: "新しく開くタスクの Git ペイン表示/非表示の既定値です（開いているタスクには影響しません）。"
+  scrollback:
+    label: "スクロールバック行数"
+    footer: "変更は次に開くタブから反映されます（既存のタブには影響しません）。"
+  language:
+    label: "言語"
+    footer: "変更はすぐに反映されます。"
+    auto: "自動"
+    name_ja: "日本語"
+    name_en: "English"
+
+sidebar:
+  new_attached_task_tooltip: "既存のフォルダを開く…"
+  new_worktree_task_tooltip: "新規セッション（worktree を作成）…"
+  task_menu_button_tooltip: "アーカイブ / 削除…"
+  archived_section_title: "アーカイブ済み (%{count})"
+  restore: "復元"
+  conflict_tooltip: "%{count} 件のファイルが競合: %{paths}"
+
+task:
+  menu:
+    ide_section_title: "IDE で開く"
+    reveal_in_finder: "Finder で表示"
+    archive: "アーカイブ"
+    delete: "削除…"
+    confirm:
+      title_worktree: "worktree を削除しますか？"
+      title_attached: "「%{title}」の登録を解除しますか？"
+      worktree_delete_intro: "「%{title}」の worktree を削除します:"
+      worktree_delete_warning: "未コミットの変更がある場合は削除されません（force しません）。"
+      delete_branch_checkbox: "ブランチ %{branch} も削除（マージ済みのみ）"
+      attached_delete_body: "登録を解除します。ディレクトリのファイルには触れません。"
+      deleting: "削除しています…"
+      delete_button_worktree: "削除する"
+      delete_button_attached: "登録を解除"
+      cancel: "キャンセル"
+  delete:
+    branch_delete_failed: "ブランチ %{branch} は削除できませんでした（マージ未済の可能性があります）: %{err}"
+    worktree_dirty: "未コミットの変更があるため削除できません。先にコミットするか worktree 内で確認してください。"
+    worktree_failed: "worktree を削除できませんでした: %{err}"
+    attached_unregister_failed: "登録を解除できませんでした: %{err}"
+    worktree_removed_branch_warning: "worktree は削除しました。%{warning}"
+  new:
+    error:
+      not_a_repo: "git リポジトリではありません（%{err}）"
+      worktree_add_failed: "git worktree add に失敗しました（%{err}）"
+    prompt:
+      attach_folder: "新しい作業として開くフォルダを選択"
+      worktree_repo: "新規 worktree 作業のリポジトリを選択"
+
+git:
+  status:
+    staged: "ステージ済み"
+    unstaged: "未ステージ"
+    untracked: "未追跡"
+  branch:
+    loading: "読み込み中…"
+  pane:
+    promote_tooltip: "タイルとして開く"
+  file_list:
+    empty: "変更はありません"
+    select_file_prompt: "ファイルを選択してください"
+  detail:
+    no_diff: "差分がありません"
+    binary_file: "バイナリファイル"
+    unavailable: "取得できませんでした"
+    empty_file: "（空のファイル）"
+    mode_diff: "Diff"
+    mode_whole: "全文"
+  tile_button:
+    files_tooltip: "Git: 変更ファイルを開く"
+    diff_tooltip: "Git: Diff を開く"
+    commits_tooltip: "Git: コミット履歴を開く"
+  commits:
+    empty: "コミットがありません"
+
+pane:
+  default_title:
+    terminal: "端末"
+    files: "変更ファイル"
+    diff: "Diff"
+    commits: "履歴"
+
+swift_import:
+  error:
+    sort_order: "Swift 版からのインポートに失敗しました（並び順の取得エラー: %{err}）"
+    generic: "Swift 版からのインポートに失敗しました: %{err}"
+  banner:
+    imported: "Swift 版から %{count} 件の作業を取り込みました"
+    skipped: "（%{count} 件は重複のためスキップ）"
+    warnings: " / 警告 %{count} 件（詳細はログ参照）"
+
+app:
+  loading_task: "タスクを読み込み中…"
+  no_task_selected: "タスクが選択されていません。左上の + アイコンからフォルダまたは worktree で開始してください。"
+  swift_import_db_not_found: "Swift 版のデータベースが見つかりませんでした。"
+
+common:
+  close: "閉じる"
