@@ -27,14 +27,37 @@ use futures::StreamExt;
 use gpui::{Context, Task as GpuiTask, WindowHandle};
 
 use labolabo_core::control::ControlServer;
-use labolabo_core::{control_socket_path_from_uuid, ControlResponse};
+#[cfg(windows)]
+use labolabo_core::control_pipe_name_from_uuid;
+#[cfg(not(windows))]
+use labolabo_core::control_socket_path_from_uuid;
+use labolabo_core::ControlResponse;
 
 use crate::app::LaboLaboApp;
 
-/// Base directory for the app's control socket -- shared with the hooks
-/// socket's base dir (docs/control-protocol.md §3), distinguished by the
-/// `control-` filename prefix `control_socket_path_from_uuid` applies.
+/// Base directory for the app's control socket on unix -- shared with the
+/// hooks socket's base dir (docs/control-protocol.md §3), distinguished by
+/// the `control-` filename prefix `control_socket_path_from_uuid` applies.
+/// **Unix-only**, same reasoning as `hooks::SOCKET_BASE_DIR` -- see
+/// [`mint_socket_path`] below for the Windows counterpart.
+#[cfg(not(windows))]
 const SOCKET_BASE_DIR: &str = "/tmp/labolabo";
+
+/// Mints this process's control socket identity, platform-appropriate --
+/// mirrors `hooks::mint_socket_path`'s AF_UNIX-path-vs-Named-Pipe-name split
+/// (docs/control-protocol.md §9 for the Windows transport), just for the
+/// control socket's own `control_pipe_name_from_uuid`/
+/// `control_socket_path_from_uuid` pair instead of the hooks socket's.
+fn mint_socket_path(uuid: &str) -> String {
+    #[cfg(windows)]
+    {
+        control_pipe_name_from_uuid(uuid)
+    }
+    #[cfg(not(windows))]
+    {
+        control_socket_path_from_uuid(uuid, SOCKET_BASE_DIR)
+    }
+}
 
 /// How long the control server's accept-loop thread waits for the gpui main
 /// thread's reply before giving up and answering the client with a timeout
@@ -68,7 +91,7 @@ pub struct ControlRuntime {
 impl ControlRuntime {
     pub fn new() -> (Self, mpsc::UnboundedReceiver<ControlEnvelope>) {
         let socket_uuid = uuid::Uuid::new_v4().to_string();
-        Self::new_at(control_socket_path_from_uuid(&socket_uuid, SOCKET_BASE_DIR))
+        Self::new_at(mint_socket_path(&socket_uuid))
     }
 
     /// [`ControlRuntime::new`]'s whole construction, parameterized on the
@@ -141,11 +164,27 @@ mod tests {
     use std::thread;
     use std::time::Duration as StdDuration;
 
+    /// A fresh, unique socket identity for a test to bind a real
+    /// [`ControlServer`] to -- an AF_UNIX path under the OS temp dir on
+    /// unix (never the production `SOCKET_BASE_DIR`, so `cargo test` runs
+    /// don't collide with/litter a real running app's `/tmp/labolabo`), or
+    /// a `\\.\pipe\...` Named Pipe name on Windows (`label` only feeds the
+    /// unix path's filename -- Windows pipe names come from
+    /// `control_pipe_name_from_uuid`'s own uuid-derived token instead, so a
+    /// distinguishing `label` isn't needed there).
     fn temp_socket_path(label: &str) -> String {
-        std::env::temp_dir()
-            .join(format!("lb-ctlrt-{label}-{}.sock", std::process::id()))
-            .to_string_lossy()
-            .into_owned()
+        #[cfg(windows)]
+        {
+            let _ = label;
+            control_pipe_name_from_uuid(&uuid::Uuid::new_v4().to_string())
+        }
+        #[cfg(not(windows))]
+        {
+            std::env::temp_dir()
+                .join(format!("lb-ctlrt-{label}-{}.sock", std::process::id()))
+                .to_string_lossy()
+                .into_owned()
+        }
     }
 
     fn send_with_retry(path: &str, request: &ControlRequest) -> Vec<u8> {

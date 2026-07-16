@@ -1462,9 +1462,14 @@ mod tests {
 
     // `#[cfg(unix)]` because it spawns the real `git` binary through
     // `GitEngine`, which resolves it via `labolabo_core::ToolLocator` --
-    // `#[cfg(not(unix))]` there is an `unimplemented!()` stub (see
-    // `labolabo-core`'s `git_engine.rs` test module doc comment for the
-    // same gate on the same grounds).
+    // as of the Windows core wave, `ToolLocator` has a real `#[cfg(windows)]`
+    // implementation too (a PATHEXT-aware `PATH` scan, no longer an
+    // `unimplemented!()` stub), but this test itself hasn't been exercised
+    // against a real `git.exe` on Windows yet -- widening it is a separate,
+    // not-yet-attempted follow-up (same "unverified on Windows" caveat as
+    // the rest of this crate's real-subprocess integration tests -- see
+    // `labolabo-app/README.md`'s "Windows" section), not something this
+    // gate's rationale rules out going forward.
     #[cfg(unix)]
     fn scratch_repo() -> PathBuf {
         use std::sync::atomic::{AtomicU64, Ordering};
