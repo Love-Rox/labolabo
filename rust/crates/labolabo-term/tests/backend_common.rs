@@ -673,6 +673,91 @@ fn alternate_scroll_defaults_on_and_toggles_via_decset_1007() {
     );
 }
 
+/// OSC `2` (set window title), BEL-terminated -- the common case emitted by
+/// Claude Code and most shells' `\e]0;...\a` prompt hooks. `title()` is
+/// `None` before the child ever sends it, then reflects the set value.
+#[test]
+fn title_reflects_osc_2_bel_terminated() {
+    let term = Terminal::spawn_with_command(
+        80,
+        24,
+        Some(r#"printf '\033]2;Hello Title\007'; sleep 0.3"#),
+        &[],
+    )
+    .expect("spawn");
+    assert_eq!(
+        term.title(),
+        None,
+        "no title should be set before the child runs"
+    );
+    assert!(
+        wait_for_title(&term, TIMEOUT, |t| t.as_deref() == Some("Hello Title")),
+        "expected title 'Hello Title' after OSC 2, got {:?}",
+        term.title()
+    );
+}
+
+/// OSC `0` (set icon name + window title), ST-terminated (`ESC \` rather
+/// than BEL) -- the other legal terminator real programs use.
+#[test]
+fn title_reflects_osc_0_st_terminated() {
+    let term = Terminal::spawn_with_command(
+        80,
+        24,
+        Some("printf '\\033]0;ST Title\\033\\\\'; sleep 0.3"),
+        &[],
+    )
+    .expect("spawn");
+    assert!(
+        wait_for_title(&term, TIMEOUT, |t| t.as_deref() == Some("ST Title")),
+        "expected title 'ST Title' after OSC 0 (ST-terminated), got {:?}",
+        term.title()
+    );
+}
+
+/// The OSC sequence arrives split across two separate PTY writes (a `sleep`
+/// between two `printf`s all but guarantees two distinct `read()`s on the
+/// reader thread -- see `session.rs`'s reader/worker split) -- exercises
+/// that both backends' VT parsers (not a bespoke state machine in this
+/// crate) correctly resume mid-sequence rather than losing/mangling it.
+#[test]
+fn title_reflects_osc_sequence_split_across_writes() {
+    let term = Terminal::spawn_with_command(
+        80,
+        24,
+        Some(r#"printf '\033]2;Spl'; sleep 0.2; printf 'it Title\007'; sleep 0.3"#),
+        &[],
+    )
+    .expect("spawn");
+    assert!(
+        wait_for_title(&term, TIMEOUT, |t| t.as_deref() == Some("Split Title")),
+        "expected title 'Split Title' after a split OSC write, got {:?}",
+        term.title()
+    );
+}
+
+/// A second OSC title sequence replaces the first (not appended/ignored).
+#[test]
+fn title_updates_on_second_osc_sequence() {
+    let term = Terminal::spawn_with_command(
+        80,
+        24,
+        Some(r#"printf '\033]2;First\007'; sleep 0.3; printf '\033]2;Second\007'; sleep 0.3"#),
+        &[],
+    )
+    .expect("spawn");
+    assert!(
+        wait_for_title(&term, TIMEOUT, |t| t.as_deref() == Some("First")),
+        "expected title 'First' after the first OSC 2, got {:?}",
+        term.title()
+    );
+    assert!(
+        wait_for_title(&term, TIMEOUT, |t| t.as_deref() == Some("Second")),
+        "expected title 'Second' after the second OSC 2, got {:?}",
+        term.title()
+    );
+}
+
 /// Find the first cell whose text matches `needle` (a single grapheme, as
 /// printed by the tests above -- there's no ambiguity to resolve).
 fn find_cell<'a>(
@@ -746,6 +831,32 @@ fn wait_for_alternate_scroll(term: &Terminal, timeout: Duration, expected: bool)
         };
         if term.recv_event(remaining.min(Duration::from_millis(50))) == Some(TermEvent::Exit) {
             return term.alternate_scroll_active() == expected;
+        }
+    }
+}
+
+/// Poll `term.title()` until `pred` holds or `timeout` elapses -- same shape
+/// as [`wait_for_bracketed_paste`]/[`wait_for_alt_screen`] (no dedicated
+/// event of its own; a plain flag refreshed alongside snapshot publishing).
+/// Takes a predicate rather than a fixed expected value (unlike the other
+/// `wait_for_*` helpers here) since callers need to distinguish "unset" from
+/// "set to a particular string" cleanly via `Option<&str>` matching.
+fn wait_for_title(
+    term: &Terminal,
+    timeout: Duration,
+    pred: impl Fn(&Option<String>) -> bool,
+) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let title = term.title();
+        if pred(&title) {
+            return true;
+        }
+        let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else {
+            return pred(&term.title());
+        };
+        if term.recv_event(remaining.min(Duration::from_millis(50))) == Some(TermEvent::Exit) {
+            return pred(&term.title());
         }
     }
 }

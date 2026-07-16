@@ -204,6 +204,63 @@ fn format_compact_count(n: i64) -> String {
     }
 }
 
+/// The title actually shown on a tab chip, before elision (see
+/// [`elide_tab_title`]): the terminal's own **live** title (OSC `0`/`2`,
+/// `labolabo_term::TermSession::title()`) when one has been observed, or
+/// `pane_title` (the persisted `PaneItem::title`, defaulting to "端末 N" --
+/// `crate::i18n::default_pane_title`) otherwise.
+///
+/// This is the whole point of the feature (第11波): every mainstream
+/// terminal emulator reflects a program's own OSC title on its window/tab,
+/// and Claude Code sets one to the conversation's own title -- so a tab
+/// showing "端末 1" the entire time a real conversation is running under it
+/// is the gap being closed here. Deliberately **not persisted**: `live_title`
+/// is read fresh from the still-running session every render, and
+/// `PaneItem::title` itself is never overwritten with it -- a live title is
+/// volatile, exactly like a real terminal's window title, so it reverts to
+/// the persisted default on the next launch (a respawned shell/Claude simply
+/// sets its own title again once it starts, same as before this feature
+/// existed).
+///
+/// `live_title` is treated as absent for `Some("")` too (a defensive
+/// belt-and-braces check -- `TermSession::title()`'s own contract already
+/// promises `None` rather than an empty string, but this function's
+/// correctness shouldn't depend on every future caller upholding that).
+pub(crate) fn tab_display_title<'a>(pane_title: &'a str, live_title: Option<&'a str>) -> &'a str {
+    match live_title {
+        Some(t) if !t.is_empty() => t,
+        _ => pane_title,
+    }
+}
+
+/// Max characters (not bytes) a tab chip's title shows before eliding with a
+/// trailing "…". Tab chips have no fixed/max width of their own (they grow
+/// to fit their content, `render_pane_tab_bar`), so an unusually long live
+/// title -- an elaborate shell prompt's `\e]0;...\a`, or a Claude Code
+/// conversation title -- would otherwise stretch the whole tab bar and crowd
+/// out neighboring tabs. 24 keeps a chip roughly in line with the "端末 N"/
+/// short-name chips this feature's default already produces, while still
+/// showing enough of a live title to be useful before the tooltip (full
+/// title) is needed.
+pub(crate) const MAX_TAB_TITLE_CHARS: usize = 24;
+
+/// Elide `title` to at most [`MAX_TAB_TITLE_CHARS`] characters, tail-
+/// truncated with a trailing "…" -- deliberately **not**
+/// `crate::path_abbrev::abbreviate_path`'s middle-elision: a path's most
+/// identifying part is its tail (the leaf), but a terminal title's most
+/// identifying part is usually its start (e.g. Claude Code's own "✳ <first
+/// words of the conversation>" convention, or a shell prompt's `user@host:
+/// ~/project`), so keeping the prefix and dropping the tail is the more
+/// useful cut here. Returns `title` unchanged (no allocation-shape surprise)
+/// when it's already short enough.
+pub(crate) fn elide_tab_title(title: &str) -> String {
+    if title.chars().count() <= MAX_TAB_TITLE_CHARS {
+        return title.to_string();
+    }
+    let truncated: String = title.chars().take(MAX_TAB_TITLE_CHARS).collect();
+    format!("{truncated}\u{2026}")
+}
+
 /// What the per-pane bridge thread forwards to its gpui-side task.
 enum BridgeMsg {
     Wakeup,
@@ -1202,7 +1259,18 @@ fn render_pane_tab_bar(
         .children(node.panes.iter().map(|pane| {
             let selected = anchor == Some(pane.id);
             let pane_id = pane.id;
-            let title: SharedString = pane.title.clone().into();
+            // 第11波: タブチップのタイトルはライブタイトル(端末が OSC 0/2
+            // で設定した会話タイトル等、`labolabo_term::TermSession::
+            // title()`)優先、無ければ永続化された `PaneItem::title`
+            // (既定「端末 N」) -- `tab_display_title`。長ければ末尾省略
+            // (`elide_tab_title`)し、省略したときだけツールチップで
+            // フルタイトルを補う(`sidebar.rs` のパス省略と同じ流儀)。
+            let live_title = runtimes.get(&pane_id).and_then(|r| r.session.title());
+            let full_title = tab_display_title(&pane.title, live_title.as_deref());
+            let display_title: SharedString = elide_tab_title(full_title).into();
+            let title_elided = display_title.as_ref() != full_title;
+            let full_title_tooltip: SharedString = full_title.to_string().into();
+            let title = display_title;
             let select_task_id = task_id.to_string();
             let close_task_id = task_id.to_string();
             let status = pane_status.get(&pane_id).copied();
@@ -1295,8 +1363,13 @@ fn render_pane_tab_bar(
                         cx.new(|_cx| TabDragPreview(preview_title.clone()))
                     },
                 )
-                .child(
-                    div()
+                .child({
+                    // `.tooltip` (below) is only available on `Stateful<Div>`
+                    // -- `.id(..)` promotes it, same as `chip_id` above.
+                    let mut label = div()
+                        .id(SharedString::from(format!(
+                            "tab-title-{task_id}-{pane_id:?}"
+                        )))
                         .px_1()
                         .text_size(px(theme::font_size::LABEL))
                         .on_mouse_down(
@@ -1305,8 +1378,17 @@ fn render_pane_tab_bar(
                                 this.select_pane(&select_task_id, pane_id, window, cx);
                             }),
                         )
-                        .child(title),
-                )
+                        .child(title);
+                    // フルタイトルは省略したときだけツールチップで補う --
+                    // `sidebar.rs` のリポジトリ見出し省略と同じ契約。
+                    if title_elided {
+                        label = label.tooltip(move |_window, cx| {
+                            cx.new(|_| crate::sidebar::IconTooltip(full_title_tooltip.clone()))
+                                .into()
+                        });
+                    }
+                    label
+                })
                 .child(
                     div()
                         .id(SharedString::from(format!(
@@ -1421,6 +1503,56 @@ fn render_open_git_tile_buttons(task_id: &str, cx: &mut Context<LaboLaboApp>) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // MARK: - tab_display_title / elide_tab_title (第11波: live tab titles)
+
+    #[test]
+    fn no_live_title_falls_back_to_pane_title() {
+        assert_eq!(tab_display_title("端末 1", None), "端末 1");
+    }
+
+    #[test]
+    fn empty_live_title_falls_back_to_pane_title() {
+        // Defensive: `TermSession::title()` should never actually hand back
+        // `Some("")`, but this function's own contract doesn't lean on that.
+        assert_eq!(tab_display_title("端末 1", Some("")), "端末 1");
+    }
+
+    #[test]
+    fn non_empty_live_title_wins_over_pane_title() {
+        assert_eq!(
+            tab_display_title("端末 1", Some("\u{2733} My conversation")),
+            "\u{2733} My conversation"
+        );
+    }
+
+    #[test]
+    fn short_title_is_unchanged() {
+        assert_eq!(elide_tab_title("hello"), "hello");
+    }
+
+    #[test]
+    fn title_at_exactly_the_limit_is_unchanged() {
+        let title = "a".repeat(MAX_TAB_TITLE_CHARS);
+        assert_eq!(elide_tab_title(&title), title);
+    }
+
+    #[test]
+    fn title_over_the_limit_is_tail_truncated_with_ellipsis() {
+        let title = "a".repeat(MAX_TAB_TITLE_CHARS + 10);
+        let elided = elide_tab_title(&title);
+        assert_eq!(elided.chars().count(), MAX_TAB_TITLE_CHARS + 1); // + "…"
+        assert!(elided.starts_with(&"a".repeat(MAX_TAB_TITLE_CHARS)));
+        assert!(elided.ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn elision_counts_chars_not_bytes() {
+        // Multi-byte (Japanese) characters: a title well within the char
+        // limit must not be truncated just because it's byte-heavy.
+        let title = "\u{7aef}\u{672b}".repeat(5); // 10 chars, 30 bytes
+        assert_eq!(elide_tab_title(&title), title);
+    }
 
     // MARK: - format_usage_compact / format_compact_count (tab-chip label)
 

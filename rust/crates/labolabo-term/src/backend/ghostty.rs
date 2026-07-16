@@ -357,6 +357,20 @@ impl VtBackend for GhosttyBackend {
         let sgr = self.terminal.mode(Mode::SGR_MOUSE).unwrap_or(false);
         MouseMode { tracking, sgr }
     }
+
+    fn title(&self) -> Option<String> {
+        // `Terminal::title()` tracks OSC 0/2 natively and returns an empty
+        // string for "never set" (its own doc comment) -- normalized to
+        // `None` here so `VtBackend::title`'s contract ("never an empty
+        // string") holds regardless of which backend is active. A query
+        // error (e.g. transient FFI failure) is treated the same as
+        // "nothing set yet" rather than surfaced -- this is a best-effort
+        // display flag, not something worth tearing a session down over.
+        match self.terminal.title() {
+            Ok(t) if !t.is_empty() => Some(t.to_string()),
+            _ => None,
+        }
+    }
 }
 
 fn rgb(c: RgbColor) -> Rgb {
