@@ -48,7 +48,7 @@ const MENU_WIDTH: f32 = 240.0;
 const MENU_ROW_HEIGHT: f32 = 26.0;
 /// 確認モーダルの幅（settings.rs の PANEL_WIDTH と同じ）。
 const CONFIRM_WIDTH: f32 = 420.0;
-const OVERLAY_BG: u32 = theme::with_alpha(0x000000, 0xb3);
+const OVERLAY_BG: u32 = theme::OVERLAY_SCRIM;
 
 /// worktree 型タスクの削除に必要な git 情報（メニューを開いた時点で
 /// スナップショット -- 削除完了後もタスク本体を引き直さずに表示できる）。
@@ -253,10 +253,11 @@ fn render_menu_popover(
         .flex_col()
         .py_1()
         .w(px(MENU_WIDTH))
-        .rounded_md()
+        .rounded(px(theme::radius::OVERLAY))
         .bg(rgb(theme::surface::RAISED))
         .border_1()
         .border_color(rgb(theme::surface::STROKE))
+        .shadow(theme::shadow::overlay())
         // パネル内クリックはバックドロップの「閉じる」まで届かせない
         // （module doc コメントのクリック伝播設計）。
         .on_mouse_down(MouseButton::Left, |_event, _window, cx: &mut App| {
@@ -334,21 +335,18 @@ fn render_menu_popover(
         window.viewport_size(),
     );
 
-    let panel = div()
-        .absolute()
-        .left(origin.x)
-        .top(origin.y)
-        .child(panel)
-        .with_animation(
-            "task-menu-enter",
-            Animation::new(motion::OVERLAY_ENTER).with_easing(motion::ease_out_strong()),
-            |el, t| el.opacity(t),
-        );
+    let panel = div().absolute().left(origin.x).top(origin.y).child(panel);
 
-    // 透明バックドロップ: メニュー外クリックで閉じる。
+    // `plans` 第8波a §5: 「…」メニューも設定/確認モーダルと同じ暗幕へ
+    // 統一する(以前は透明でメニュー外クリックのみで閉じていた)。暗幕と
+    // ポップオーバーを同じ 1 段のフェードで一緒に表示する(`settings.rs`
+    // の `render_settings_overlay` と同じ、親 1 箇所だけに opacity
+    // アニメーションを掛ける理由 -- 親子両方に掛けると `t * t` で合成され
+    // 背景に遅れて見えてしまう)。
     div()
         .absolute()
         .inset_0()
+        .bg(rgba(OVERLAY_BG))
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(|this, _: &MouseDownEvent, _window, cx| {
@@ -356,6 +354,11 @@ fn render_menu_popover(
             }),
         )
         .child(panel)
+        .with_animation(
+            "task-menu-backdrop-enter",
+            Animation::new(motion::OVERLAY_ENTER).with_easing(motion::ease_out_strong()),
+            |el, t| el.opacity(t),
+        )
         .into_any_element()
 }
 
@@ -380,10 +383,11 @@ fn render_confirm_modal(
         .gap_3()
         .w(px(CONFIRM_WIDTH))
         .p_4()
-        .rounded_md()
+        .rounded(px(theme::radius::OVERLAY))
         .bg(rgb(theme::surface::ROOT))
         .border_1()
         .border_color(rgb(theme::surface::STROKE))
+        .shadow(theme::shadow::overlay())
         .on_mouse_down(MouseButton::Left, |_event, _window, cx: &mut App| {
             cx.stop_propagation();
         })
@@ -522,10 +526,11 @@ fn render_notice_modal(message: &str, cx: &mut Context<LaboLaboApp>) -> AnyEleme
         .gap_3()
         .w(px(CONFIRM_WIDTH))
         .p_4()
-        .rounded_md()
+        .rounded(px(theme::radius::OVERLAY))
         .bg(rgb(theme::surface::ROOT))
         .border_1()
         .border_color(rgb(theme::surface::STROKE))
+        .shadow(theme::shadow::overlay())
         .on_mouse_down(MouseButton::Left, |_event, _window, cx: &mut App| {
             cx.stop_propagation();
         })

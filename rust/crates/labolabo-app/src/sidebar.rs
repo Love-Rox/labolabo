@@ -203,9 +203,15 @@ pub fn render(
 
     let mut list = div().flex().flex_col().gap_2().flex_1();
     for group in groups {
+        // `plans` 第8波a §3: リポジトリ見出しを「小見出し」スタイルに --
+        // 11px(`font_size::CAPTION`)・MUTED(`SECONDARY` より一段沈んだ
+        // 明度)。字間を広めにする指示もあるが、gpui 0.2 の `TextStyle` に
+        // letter-spacing 相当のフィールドが無い(`style.rs`の`TextStyle`
+        // 確認済み)ため、疑似的な空白差し込みのような hack はせずここでは
+        // 見送っている -- 未実装の既知の逸脱として明記。
         let mut group_el = div().flex().flex_col().gap_1().child(
             div()
-                .text_color(rgb(theme::text::SECONDARY))
+                .text_color(rgb(theme::text::MUTED))
                 .text_size(px(theme::font_size::CAPTION))
                 .px_2()
                 .child(SharedString::from(group.repo_name.to_string())),
@@ -285,6 +291,11 @@ pub fn render(
                     }),
                 )
                 .child("\u{22EF}"); // ⋯
+
+            // `plans` 第8波a §3: タスク行は高さ 30px・角丸 6px・選択時は
+            // ACTIVE 背景 + 左 2px ACCENT バー。バーは非選択時も同じ 2px
+            // 幅を透明色で確保しておく(選択時だけ幅を足すと行の横幅が
+            // 1px 分ガタつくため)。
             let row = div()
                 .id(row_id)
                 .group(row_group)
@@ -292,9 +303,15 @@ pub fn render(
                 .flex_row()
                 .items_center()
                 .gap_1()
+                .h(px(30.0))
                 .px_2()
-                .py_1()
-                .rounded_sm()
+                .rounded(px(theme::radius::ROW))
+                .border_l_2()
+                .border_color(rgb(if is_selected {
+                    theme::ACCENT
+                } else {
+                    theme::surface::SUNKEN
+                }))
                 .when(is_selected, |el| el.bg(rgb(theme::surface::ACTIVE)))
                 // Hover feedback (`plans/014` M5, scoped down -- see that
                 // plan's doc comment for why this is an instant `.hover()`
@@ -307,8 +324,25 @@ pub fn render(
                 .text_color(rgb(theme::text::PRIMARY))
                 .text_size(px(theme::font_size::LABEL))
                 .child(kind_marker(&task.kind))
-                .child(SharedString::from(task.title.clone()))
-                .children(dot_el)
+                .child(
+                    div()
+                        .flex_1()
+                        .overflow_hidden()
+                        .child(SharedString::from(task.title.clone())),
+                )
+                // 状態ドットは 8px 固定の枠に中央揃えしてから置く(ドット
+                // 自体の描画径は `motion::STATUS_DOT_SIZE`=6px のまま --
+                // タブチップ側と共用の定数なのでここでは変えず、行内の
+                // 割り付けだけ 8px 分確保して複数行の並びを揃える)。
+                .children(dot_el.map(|el| {
+                    div()
+                        .w(px(8.0))
+                        .h(px(8.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(el)
+                }))
                 .when(has_conflict, move |el| {
                     el.child(
                         div()
@@ -321,7 +355,6 @@ pub fn render(
                             .child("\u{26A0}"),
                     )
                 })
-                .child(div().flex_1())
                 .child(menu_button)
                 .on_mouse_down(
                     MouseButton::Left,
@@ -406,6 +439,11 @@ pub fn render(
         .bg(rgb(theme::surface::SUNKEN))
         .border_1()
         .border_color(rgb(theme::surface::STROKE))
+        // `plans` 第8波a §1: 「深度の階層」-- ウィンドウ左端に接する側は
+        // 直角のまま、ワークスペースに面した右側だけ丸めて「浮いている
+        // カード」を演出する。控えめな 1 段シャドウを右向きに落とす。
+        .rounded_r(px(theme::radius::PANEL))
+        .shadow(theme::shadow::panel(2.0, 0.0))
         // OS folder drop -> new attached Task (`plans/012` §3): any
         // `ExternalPaths` dropped anywhere on the sidebar (including on
         // top of a Task row -- rows have no `on_drop::<ExternalPaths>` of
@@ -617,9 +655,9 @@ fn render_archived_section(
                     .flex_row()
                     .items_center()
                     .gap_1()
+                    .h(px(30.0))
                     .px_2()
-                    .py_1()
-                    .rounded_sm()
+                    .rounded(px(theme::radius::ROW))
                     .text_color(rgb(theme::text::MUTED))
                     .text_size(px(theme::font_size::LABEL))
                     .child(kind_marker(&task.kind))

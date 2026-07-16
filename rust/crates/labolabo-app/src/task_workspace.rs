@@ -974,6 +974,10 @@ fn render_leaf(
         } else {
             IDLE_BORDER_COLOR
         }))
+        // `plans` 第8波a §4: フォーカス表現の洗練 -- 非フォーカスは
+        // 1px `STROKE` の枠のみ(上の `border_1`)、フォーカス時だけ
+        // `ACCENT` の枠にごく控えめな外側グローを 1 段重ねる。
+        .when(is_focused_leaf, |el| el.shadow(theme::shadow::focus_glow()))
         .child(tab_bar)
         .child(content);
 
@@ -1188,8 +1192,13 @@ fn render_pane_tab_bar(
         } else {
             theme::surface::SUNKEN
         }))
-        .px_1()
-        .gap_1()
+        // `plans` 第8波a §1/§6: タブバーも「浮き」の階層の一員 -- 隣接タイル
+        // と隙間無しで並ぶため角丸は付けない(付けると継ぎ目に背景が覗く)
+        // が、下向きの控えめなシャドウで「端末の上に載っている」層を表現
+        // する。左右の余白も詰まりすぎ(§6)だったので 4px→8px に。
+        .shadow(theme::shadow::panel(0.0, 2.0))
+        .px_2()
+        .gap_2()
         .children(node.panes.iter().map(|pane| {
             let selected = anchor == Some(pane.id);
             let pane_id = pane.id;
@@ -1225,20 +1234,20 @@ fn render_pane_tab_bar(
                 .flex_row()
                 .items_center()
                 .gap_1()
-                .px_2()
-                .rounded_sm()
-                // `plans/013` §4: the selected tab connects to the terminal
-                // below it via an `ACCENT` top border, on top of the
-                // `ACTIVE` fill; unselected tabs are plain `RAISED`, no
-                // border -- both switches are instant (no easing), per
-                // this function's own doc comment on tab-switch being
-                // deliberately unadorned.
+                .px_3()
+                .h_full()
+                // `plans` 第8波a §2: 「箱型チップ + 上辺ボーダー」を
+                // 「下線インジケータ + テキスト強弱」へ -- 非選択は背景
+                // 無し・`SECONDARY` 文字、選択は `PRIMARY` 文字 + 2px の
+                // `ACCENT` 下線 + ごく薄い `ACTIVE` 背景(タブ切替そのもの
+                // は引き続き無演出 -- 上のモジュール doc コメント参照)。
                 .when(selected, |el| {
-                    el.bg(rgb(theme::surface::ACTIVE))
-                        .border_t(px(2.0))
+                    el.bg(rgba(theme::with_alpha(theme::surface::ACTIVE, 0x90)))
+                        .border_b(px(2.0))
                         .border_color(rgb(theme::ACCENT))
+                        .text_color(rgb(theme::text::PRIMARY))
                 })
-                .when(!selected, |el| el.bg(rgb(theme::surface::RAISED)))
+                .when(!selected, |el| el.text_color(rgb(theme::text::SECONDARY)))
                 .children(dot_el)
                 .when_some(usage_label, |el, label| {
                     el.child(
@@ -1260,7 +1269,6 @@ fn render_pane_tab_bar(
                 .child(
                     div()
                         .px_1()
-                        .text_color(rgb(theme::text::PRIMARY))
                         .text_size(px(theme::font_size::LABEL))
                         .on_mouse_down(
                             MouseButton::Left,
@@ -1279,7 +1287,7 @@ fn render_pane_tab_bar(
                         .rounded_sm()
                         .text_color(rgb(theme::text::SECONDARY))
                         .hover(|el| el.bg(rgb(theme::surface::ACTIVE)))
-                        .active(|el| el.opacity(0.7))
+                        .active(|el| el.opacity(0.8))
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, _: &MouseDownEvent, window, cx| {

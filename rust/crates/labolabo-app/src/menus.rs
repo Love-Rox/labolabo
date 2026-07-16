@@ -230,7 +230,7 @@ fn file_menu_items(locale: &str) -> Vec<MenuItem> {
 // 閉じるのは明示的な「閉じる」ボタンのみ（同 module のクリック外閉じ非対応
 // と同じ判断）。
 
-const OVERLAY_BG: u32 = theme::with_alpha(0x000000, 0xb3);
+const OVERLAY_BG: u32 = theme::OVERLAY_SCRIM;
 const PANEL_WIDTH: f32 = 320.0;
 
 /// About パネル（`app.about_open()` のときだけ `Some`）。呼び出し側
@@ -275,10 +275,11 @@ pub fn render_about_overlay(
         .gap_2()
         .w(px(PANEL_WIDTH))
         .p_4()
-        .rounded_md()
+        .rounded(px(theme::radius::OVERLAY))
         .bg(rgb(theme::surface::ROOT))
         .border_1()
         .border_color(rgb(theme::surface::STROKE))
+        .shadow(theme::shadow::overlay())
         .child(
             div()
                 .text_size(px(16.0))
