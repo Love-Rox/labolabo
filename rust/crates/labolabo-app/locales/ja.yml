@@ -75,6 +75,15 @@ task:
   menu:
     ide_section_title: "IDE で開く"
     reveal_in_finder: "Finder で表示"
+    # 第10波 (サイドバーのパーソナライズ): 名前変更 / 色設定のメニュー
+    # 項目。トップレベル `task:` の重複は YAML として不正になるため、
+    # ファイル末尾追記ではなく既存ブロック内へ挿入している。
+    rename: "名前を変更…"
+    set_color: "色を設定…"
+    rename_title: "「%{title}」の名前を変更"
+    rename_placeholder: "新しい名前"
+    rename_confirm: "変更"
+    set_color_title: "「%{title}」の色"
     archive: "アーカイブ"
     delete: "削除…"
     confirm:
@@ -167,3 +176,13 @@ import_prompt:
   once_notice: "この確認は今回限りです。"
   accept: "取り込む"
   decline: "取り込まない"
+
+# 第10波 (サイドバーのパーソナライズ): 色ピッカー共通の文言
+# (`crate::color_picker` -- タスクの色設定とタブの色ポップオーバーで共用)。
+# 第8波d ブロックと同じ理由でファイル末尾へ追記。
+color:
+  none: "なし"
+  custom_label: "カスタム (#rrggbb)"
+  custom_apply: "適用"
+  invalid_hex: "#rrggbb 形式で入力してください"
+  tab_menu_title: "タブの色"

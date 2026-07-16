@@ -1221,6 +1221,14 @@ fn render_pane_tab_bar(
                 .get(&pane_id)
                 .and_then(format_usage_compact)
                 .map(SharedString::from);
+            // 第10波: タブのカスタム色 (`PaneItem::color`、右クリックの
+            // 色ポップオーバーで設定) -- サイドバーのタスク行と同じ 6px
+            // 色ドットで表現。状態ドット(エージェント状態)とは別物。
+            let tab_color = pane
+                .color
+                .as_deref()
+                .and_then(crate::color_picker::parse_hex_rgb);
+            let color_menu_task_id = task_id.to_string();
             // `.id(..)` promotes this chip to `Stateful<Div>`, the only
             // element kind `.on_drag` (`StatefulInteractiveElement`) is
             // available on -- mirrors Swift's `PaneTabChip.onDrag`, one drag
@@ -1248,6 +1256,27 @@ fn render_pane_tab_bar(
                         .text_color(rgb(theme::text::PRIMARY))
                 })
                 .when(!selected, |el| el.text_color(rgb(theme::text::SECONDARY)))
+                // 右クリックで色ポップオーバー (第10波、
+                // `crate::color_picker::render_tab_color_overlay`)。端末
+                // canvas の右クリック(SGR mouse report)とは別領域なので
+                // 衝突しない。
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                        cx.stop_propagation();
+                        this.open_tab_color_menu(&color_menu_task_id, pane_id, event.position, cx);
+                    }),
+                )
+                .when_some(tab_color, |el, color| {
+                    el.child(
+                        div()
+                            .w(px(6.0))
+                            .h(px(6.0))
+                            .rounded_full()
+                            .flex_shrink_0()
+                            .bg(rgb(color)),
+                    )
+                })
                 .children(dot_el)
                 .when_some(usage_label, |el, label| {
                     el.child(

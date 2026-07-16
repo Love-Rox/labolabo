@@ -107,8 +107,8 @@ pub struct Task {
     pub kind: TaskKind,
     /// Display title — defaults to the branch name (worktree) or the
     /// directory's last path component (attached) at creation time; free-
-    /// form after that (manual rename is out of this wave's scope, but the
-    /// field itself is already plain, renamable `String`).
+    /// form after that (the sidebar's 「名前を変更…」 flow, 第10波
+    /// パーソナライズ, updates it in place and re-upserts).
     pub title: String,
     pub layout: TileLayout,
     pub status: TaskStatus,
@@ -127,6 +127,15 @@ pub struct Task {
     /// agent_session_id`/`agent_transcript_path`); see
     /// `crate::store::agent_bindings`'s module doc comment for why.
     pub agent_bindings: Option<String>,
+    /// User-assigned display color for the sidebar row (第10波
+    /// パーソナライズ): a lowercase `#rrggbb` string, or `None` for the
+    /// default (no custom color). Stored verbatim in the `task.color`
+    /// column (migration `0002_task_color`); the *writer* (the app's color
+    /// picker) is responsible for normalizing to `#rrggbb` before setting
+    /// this -- the store round-trips the raw text, and a reader that can't
+    /// parse it simply renders no color (this crate's usual
+    /// "unknown/invalid persisted data degrades gracefully" posture).
+    pub color: Option<String>,
 }
 
 impl Task {
@@ -213,6 +222,7 @@ impl Task {
             last_active_at: now,
             sort_order,
             agent_bindings: None,
+            color: None,
         }
     }
 
@@ -268,6 +278,17 @@ mod tests {
         let a = Task::new_attached("k", "r", "n", "/tmp/a", TileLayout::default(), 0);
         let b = Task::new_attached("k", "r", "n", "/tmp/b", TileLayout::default(), 0);
         assert_ne!(a.id, b.id);
+    }
+
+    /// 第10波: both constructors start with no custom color -- a fresh Task
+    /// always renders with the default (no) color until the user picks one.
+    #[test]
+    fn new_tasks_have_no_custom_color() {
+        let worktree =
+            Task::new_worktree("k", "r", "n", "b", "main", "/p", TileLayout::default(), 0);
+        assert_eq!(worktree.color, None);
+        let attached = Task::new_attached("k", "r", "n", "/tmp/a", TileLayout::default(), 0);
+        assert_eq!(attached.color, None);
     }
 
     #[test]
