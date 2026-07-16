@@ -83,6 +83,15 @@ pub struct TaskMenuState {
     /// `Some` = worktree 型。`None` = attached 型（実ディレクトリには
     /// 絶対に触れない削除フローになる）。
     pub worktree: Option<WorktreeInfo>,
+    /// メニューを開いた時点で作業ディレクトリが見つからなかったか
+    /// （`LaboLaboApp::is_task_missing` のスナップショット、第8波c）。
+    /// worktree 型の削除確認文言を分岐させる（[`render_confirm_modal`]）のと、
+    /// `execute_delete_task` が `crate::task_lifecycle::
+    /// remove_worktree_and_maybe_branch`（通常の `git worktree remove`）
+    /// ではなく `prune_missing_worktree_and_maybe_branch`（ディレクトリが
+    /// 無い前提で `git worktree prune` から始める経路）を選ぶのに使う。
+    /// attached 型はどちらにせよ実ディレクトリに触れないため無関係。
+    pub missing: bool,
     /// 「…」ボタンのクリック位置（ウィンドウ座標）。ポップオーバーの
     /// アンカー。
     pub anchor: Point<Pixels>,
@@ -90,7 +99,7 @@ pub struct TaskMenuState {
 }
 
 impl TaskMenuState {
-    pub fn new(task: &Task, anchor: Point<Pixels>) -> Self {
+    pub fn new(task: &Task, anchor: Point<Pixels>, missing: bool) -> Self {
         let worktree = match &task.kind {
             TaskKind::Worktree { branch, path, .. } => Some(WorktreeInfo {
                 branch: branch.clone(),
@@ -103,6 +112,7 @@ impl TaskMenuState {
             task_id: task.id.clone(),
             title: task.title.clone(),
             worktree,
+            missing,
             anchor,
             phase: TaskMenuPhase::Menu,
         }
@@ -400,26 +410,35 @@ fn render_confirm_modal(
 
     match &state.worktree {
         Some(info) => {
-            panel = panel
-                .child(body_text(
-                    t!(
-                        "task.menu.confirm.worktree_delete_intro",
-                        title = state.title
-                    )
-                    .to_string()
-                    .into(),
-                ))
-                .child(
-                    div()
-                        .text_size(px(theme::font_size::CAPTION))
-                        .text_color(rgb(theme::text::SECONDARY))
-                        .child(SharedString::from(info.path.clone())),
+            // 第8波c: ディレクトリが既に見つからない worktree は「未コミット
+            // 変更があれば拒否」の安全弁自体が働かない（中身を見られない
+            // ので force しない remove の意味が無い -- module doc コメント
+            // 参照）。通常の削除文言（intro + 中身確認の警告）ではなく、
+            // 「ディレクトリは既に存在しません。登録を解除します」に分岐
+            // する -- 警告文（未コミット変更のくだり）はここでは出さない
+            // （そもそもチェックしていないので誤解を招く）。
+            let intro = if state.missing {
+                t!("task.menu.confirm.worktree_delete_missing_intro").to_string()
+            } else {
+                t!(
+                    "task.menu.confirm.worktree_delete_intro",
+                    title = state.title
                 )
-                .child(body_text(
+                .to_string()
+            };
+            panel = panel.child(body_text(intro.into())).child(
+                div()
+                    .text_size(px(theme::font_size::CAPTION))
+                    .text_color(rgb(theme::text::SECONDARY))
+                    .child(SharedString::from(info.path.clone())),
+            );
+            if !state.missing {
+                panel = panel.child(body_text(
                     t!("task.menu.confirm.worktree_delete_warning")
                         .to_string()
                         .into(),
                 ));
+            }
             // 「ブランチも削除」チェックボックス（既定 off、実行中は不変）。
             let checkbox_label: SharedString = t!(
                 "task.menu.confirm.delete_branch_checkbox",
@@ -585,7 +604,10 @@ fn menu_row(
         .child(label)
 }
 
-fn dialog_button(
+/// `pub(crate)` so `crate::app`'s missing-directory workspace placeholder
+/// (第8波c) can reuse the same button chrome for its "再確認"/「この作業を
+/// 削除…」actions instead of redefining it.
+pub(crate) fn dialog_button(
     id: &'static str,
     label: SharedString,
     destructive: bool,
@@ -667,7 +689,7 @@ mod tests {
     }
 
     fn state(task: &Task) -> TaskMenuState {
-        TaskMenuState::new(task, point(px(10.0), px(10.0)))
+        TaskMenuState::new(task, point(px(10.0), px(10.0)), false)
     }
 
     // MARK: - 相遷移の状態機械
@@ -688,6 +710,19 @@ mod tests {
 
     fn state_from_attached() -> TaskMenuState {
         state(&attached_task())
+    }
+
+    /// 第8波c: `missing` はコンストラクタの引数どおりそのままスナップ
+    /// ショットされる（開いた後にディレクトリの状態が変わっても、この
+    /// メニュー/確認モーダルの文言は開いた瞬間の判定のまま -- 途中で
+    /// 変わるとチェックボックス操作中に文言が変わる不安定な UI になる）。
+    #[test]
+    fn missing_flag_is_snapshotted_at_construction() {
+        let task = worktree_task();
+        let not_missing = TaskMenuState::new(&task, point(px(0.0), px(0.0)), false);
+        assert!(!not_missing.missing);
+        let missing = TaskMenuState::new(&task, point(px(0.0), px(0.0)), true);
+        assert!(missing.missing);
     }
 
     #[test]

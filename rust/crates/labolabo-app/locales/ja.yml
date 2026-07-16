@@ -69,6 +69,8 @@ sidebar:
   archived_section_title: "アーカイブ済み (%{count})"
   restore: "復元"
   conflict_tooltip: "%{count} 件のファイルが競合: %{paths}"
+  missing_task_tooltip: "ディレクトリが見つかりません: %{path}"
+  missing_tasks_banner: "%{count} 件の作業のディレクトリが見つかりません"
 
 task:
   menu:
@@ -80,6 +82,7 @@ task:
       title_worktree: "worktree を削除しますか？"
       title_attached: "「%{title}」の登録を解除しますか？"
       worktree_delete_intro: "「%{title}」の worktree を削除します:"
+      worktree_delete_missing_intro: "ディレクトリは既に存在しません。登録を解除します:"
       worktree_delete_warning: "未コミットの変更がある場合は削除されません（force しません）。"
       delete_branch_checkbox: "ブランチ %{branch} も削除（マージ済みのみ）"
       attached_delete_body: "登録を解除します。ディレクトリのファイルには触れません。"
@@ -147,6 +150,10 @@ app:
   loading_task: "タスクを読み込み中…"
   no_task_selected: "タスクが選択されていません。左上の + アイコンからフォルダまたは worktree で開始してください。"
   swift_import_db_not_found: "Swift 版のデータベースが見つかりませんでした。"
+  missing_task:
+    title: "作業ディレクトリが見つかりません"
+    recheck: "再確認"
+    delete: "この作業を削除…"
 
 common:
   close: "閉じる"

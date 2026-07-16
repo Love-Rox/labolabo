@@ -249,6 +249,17 @@ pub fn render(
             .to_string()
             .into();
             let conflict_badge_id: SharedString = format!("conflict-badge-{}", task.id).into();
+            // 見つからないワークツリー (第8波c): 作業ディレクトリが最後の
+            // 確認時点で存在しなかったタスク行は減光 + 専用の警告アイコン
+            // （既存の ⚠ = 競合バッジと区別するため別のグリフ ∅ を使う）。
+            let missing = app.is_task_missing(&task.id);
+            let missing_tooltip: SharedString = t!(
+                "sidebar.missing_task_tooltip",
+                path = task.working_directory()
+            )
+            .to_string()
+            .into();
+            let missing_badge_id: SharedString = format!("missing-badge-{}", task.id).into();
             let row_id: SharedString = format!("task-row-{}", task.id).into();
             // 行ホバーで「…」メニューボタンを出すための group (wave 6c §2)。
             // gpui 0.2 に visible/invisible ヘルパは無いので、opacity 0 で
@@ -321,7 +332,14 @@ pub fn render(
                 .when(!is_selected, |el| {
                     el.hover(|el| el.bg(rgb(theme::surface::RAISED)))
                 })
-                .text_color(rgb(theme::text::PRIMARY))
+                // 見つからないタスクは行全体を減光 (`text::MUTED`) する --
+                // タイトルだけでなくアイコン (`kind_marker`) も含めて全体
+                // が「今は使えない」と読めるように。
+                .text_color(rgb(if missing {
+                    theme::text::MUTED
+                } else {
+                    theme::text::PRIMARY
+                }))
                 .text_size(px(theme::font_size::LABEL))
                 .child(kind_marker(&task.kind))
                 .child(
@@ -330,6 +348,18 @@ pub fn render(
                         .overflow_hidden()
                         .child(SharedString::from(task.title.clone())),
                 )
+                .when(missing, move |el| {
+                    el.child(
+                        div()
+                            .id(missing_badge_id)
+                            .text_size(px(theme::font_size::CAPTION))
+                            .text_color(rgb(theme::status::CONFLICT))
+                            .tooltip(move |_window, cx| {
+                                cx.new(|_| IconTooltip(missing_tooltip.clone())).into()
+                            })
+                            .child("\u{2205}"),
+                    )
+                })
                 // 状態ドットは 8px 固定の枠に中央揃えしてから置く(ドット
                 // 自体の描画径は `motion::STATUS_DOT_SIZE`=6px のまま --
                 // タブチップ側と共用の定数なのでここでは変えず、行内の
@@ -430,6 +460,11 @@ pub fn render(
     // 本体の構築より先に評価する。
     let update_banner = render_update_banner(app, cx);
     let import_banner = render_import_banner(app, cx);
+    // 見つからないワークツリーの気づきバナー (第8波c §5): 他の 2 つより
+    // 後（サイドバー最上部から見て 3 番目）に出す -- アップデート/
+    // インポートは「アプリからのお知らせ」、こちらは「ユーザーの環境側の
+    // 状態」で性質が異なるため、既存 2 つの並び順を崩さず一番下に足す。
+    let missing_tasks_banner = render_missing_tasks_banner(app, cx);
 
     let mut sidebar = div()
         .flex()
@@ -457,6 +492,7 @@ pub fn render(
         }))
         .children(update_banner)
         .children(import_banner)
+        .children(missing_tasks_banner)
         .child(new_task_row)
         .child(list);
 
@@ -592,6 +628,71 @@ fn render_import_banner(
                         MouseButton::Left,
                         cx.listener(|this, _: &MouseDownEvent, _window, cx| {
                             this.dismiss_import_banner(cx);
+                        }),
+                    )
+                    .child("×"),
+            ),
+    )
+}
+
+/// 見つからないワークツリーの気づきバナー (第8波c §5)。
+/// `app.missing_task_count()` が 0、あるいは既に閉じられている
+/// (`missing_banner_dismissed`) なら `None`（見出しごと出さない）。本文の
+/// クリックでサイドバー順で最初の該当タスクへジャンプし
+/// (`jump_to_first_missing_task`)、"×" は `dismiss_missing_tasks_banner`。
+/// 自動一括削除はしない -- あくまで気づかせるだけ（設計方針、モジュール
+/// 冒頭のタスク doc コメント参照）。
+fn render_missing_tasks_banner(
+    app: &LaboLaboApp,
+    cx: &mut Context<LaboLaboApp>,
+) -> Option<impl IntoElement> {
+    if app.missing_banner_dismissed() {
+        return None;
+    }
+    let count = app.missing_task_count();
+    if count == 0 {
+        return None;
+    }
+    let text = t!("sidebar.missing_tasks_banner", count = count).to_string();
+    Some(
+        div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .px_2()
+            .py_1()
+            .bg(rgb(theme::surface::RAISED))
+            .border_b_1()
+            .border_color(rgb(theme::surface::STROKE))
+            .child(
+                div()
+                    .id("missing-tasks-banner-text")
+                    .flex_1()
+                    .rounded_sm()
+                    .text_color(rgb(theme::text::SECONDARY))
+                    .text_size(px(theme::font_size::CAPTION))
+                    .hover(|el| el.bg(rgb(theme::surface::ACTIVE)))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                            this.jump_to_first_missing_task(window, cx);
+                        }),
+                    )
+                    .child(SharedString::from(text)),
+            )
+            .child(
+                div()
+                    .id("missing-tasks-banner-dismiss")
+                    .px_1()
+                    .rounded_sm()
+                    .text_color(rgb(theme::text::MUTED))
+                    .text_size(px(theme::font_size::CAPTION))
+                    .hover(|el| el.bg(rgb(theme::surface::ACTIVE)))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _: &MouseDownEvent, _window, cx| {
+                            this.dismiss_missing_tasks_banner(cx);
                         }),
                     )
                     .child("×"),
