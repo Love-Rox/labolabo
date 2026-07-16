@@ -1,23 +1,20 @@
 <!--
   .github/workflows/rust-release.yml が `{{VERSION}}`/`{{TAG}}` を実際の値に
-  置換して draft pre-release の本文として使うテンプレート。手動編集する際は
+  置換して draft リリースの本文として使うテンプレート。手動編集する際は
   プレースホルダの綴りを変えないこと（ワークフローの sed が文字列一致で
   置換するため）。
 
-  LaboLabo-rs（Rust 版）はまだ 1.0 未満の内部バージョン（各 crate の
-  Cargo.toml）を抱えたまま、配布物としては 1.0.0 系のマーケティング
-  バージョンで RC を切っている過渡期 -- rust/README.md の「RC リリース
-  手順」節、および rust/scripts/bundle-macos.sh の Version セクションの
-  doc コメントを参照。
+  pre-release フラグはワークフロー側がバージョンの `-` サフィックス
+  （例 1.1.0-rc.1）の有無で自動判定する。本文はどちらでも通用する表現に
+  してあるので、RC を切るときもこのテンプレートをそのまま使える。
 -->
 
 # LaboLabo-rs {{VERSION}}
 
 Claude Code などの AI コーディングエージェントを複数の git worktree で並列に走らせ、
-端末とライブな Git 差分を横に並べて確認するアプリの **Rust / クロスプラットフォーム版**（macOS / Linux / Windows）
-のプレリリースです。
+端末とライブな Git 差分を横に並べて確認するアプリの **Rust / クロスプラットフォーム版**（macOS / Linux / Windows）です。
 
-> **これはリリース候補（RC）です。** 本番用途での利用は自己責任でお願いします。
+> macOS で最も長く検証されています。Windows / Linux は比較的新しい対応です。
 > 既知の制限は下記「既知の制限」を必ずお読みください。
 
 ## 主な機能
