@@ -87,6 +87,16 @@ pub const APP_VERSION: &str = env!("LABOLABO_RS_VERSION");
 /// 同じ規約）。git の外でビルドされた場合は "0"。
 pub const BUILD_NUMBER: &str = env!("LABOLABO_BUILD_NUMBER");
 
+/// この実行ファイルがどちらの VT バックエンドでビルドされたか
+/// （"libghostty-vt" / "alacritty"）。`labolabo_term::ACTIVE_BACKEND_NAME`
+/// をそのまま再エクスポートするだけ（cfg 判定をこの crate 側で再実装
+/// しない -- 両者が食い違う余地をなくす）。配布物は既定で ghostty-vt
+/// （`rust/scripts/bundle-macos.sh`/`package-linux.sh`）、`cargo build`
+/// 単体の既定は alacritty（`rust/README.md`「配布 vs 開発の既定
+/// バックエンド」参照）なので、About にこの表記があることでどちらの
+/// ビルドかサポート時に判別できる（第12波）。
+pub const VT_BACKEND: &str = labolabo_term::ACTIVE_BACKEND_NAME;
+
 /// メニューバー全体の構成。`main.rs` が起動時に一度、`LaboLaboApp::
 /// set_locale` が言語切替のたびに `cx.set_menus(app_menus(locale))` する
 /// (`locale`: `"ja"`/`"en"` -- `rust_i18n::locale()`/`crate::i18n::
@@ -243,6 +253,9 @@ pub fn render_about_overlay(
     )
     .to_string()
     .into();
+    let backend_line: SharedString = t!("about.backend_line", backend = VT_BACKEND)
+        .to_string()
+        .into();
 
     let close_button = div()
         .id("about-close")
@@ -284,6 +297,12 @@ pub fn render_about_overlay(
                 .text_size(px(theme::font_size::LABEL))
                 .text_color(rgb(theme::text::SECONDARY))
                 .child(version_line),
+        )
+        .child(
+            div()
+                .text_size(px(theme::font_size::CAPTION))
+                .text_color(rgb(theme::text::MUTED))
+                .child(backend_line),
         )
         .child(
             div()
@@ -478,5 +497,24 @@ mod tests {
         // build.rs 注入値: 数字のみ（git 外ビルドのフォールバック "0" を含む）。
         assert!(BUILD_NUMBER.chars().all(|c| c.is_ascii_digit()));
         assert!(!BUILD_NUMBER.is_empty());
+    }
+
+    /// `VT_BACKEND` (第12波) は `labolabo_term::ACTIVE_BACKEND_NAME` の
+    /// 単純な再エクスポート -- このテスト自体はどちらの feature でビルド
+    /// されても走る（`cargo test -p labolabo-app` は既定 = alacritty、
+    /// `--features backend-ghostty-vt` を付けても通る）ので、値のハード
+    /// コードはせず、既知の2値のどちらかであることだけ確認する。
+    #[test]
+    fn vt_backend_is_one_of_the_known_backends() {
+        assert!(matches!(VT_BACKEND, "libghostty-vt" | "alacritty"));
+    }
+
+    /// About オーバーレイの `t!("about.backend_line", ...)` 呼び出しが
+    /// 未定義キーで panic しない（i18n_parity テストの「使用キー存在」
+    /// ゲートと合わせて、locales/{ja,en}.yml 側の追加漏れを二重に防ぐ）。
+    #[test]
+    fn backend_line_translation_key_resolves() {
+        let rendered = t!("about.backend_line", backend = VT_BACKEND).to_string();
+        assert!(rendered.contains(VT_BACKEND));
     }
 }

@@ -893,3 +893,65 @@ Rust 版アプリは起動時に一度だけ、バックグラウンドで GitHu
 `ignoredUpdateVersion` へ永続化）。設定画面の「アップデートを自動確認」
 トグル（既定 on）と、スモークテスト/CI 向けの `LABOLABO_NO_UPDATE_CHECK=1`
 環境変数の両方で独立に無効化できる。
+
+## Wave 12（ghostty-vt を配布物の既定バックエンドに）
+
+### 配布 vs 開発の既定バックエンド
+
+VT コアは最初から選択式（`backend-alacritty`/`backend-ghostty-vt`、
+`crates/labolabo-term/Cargo.toml`）だったが、これまで**開発・配布の両方**
+で既定は alacritty のままだった。プロジェクトの大前提は「VT コアは
+libghostty-vt が本命」（Ghostty アイデンティティそのもの）なので、この波
+から二層に分ける:
+
+- **開発既定は alacritty のまま（変更なし）**: `cargo build`/`cargo test`
+  や CI の `rust`/`rust-app*` ジョブは今まで通り crates.io だけで完結する。
+  Zig トールチェインを要求しない、という制約自体は変えない（Windows 開発
+  の都合・`cargo test` の敷居を上げない判断 —
+  `crates/labolabo-term/Cargo.toml`/`crates/labolabo-term/README.md`
+  「Backends」節参照）。
+- **配布既定は ghostty-vt**: `rust/scripts/bundle-macos.sh`（macOS）と
+  `package-linux.sh`（Linux）はこの波から既定でこちらを選ぶ。ツールチェイン
+  （Zig 0.16 + `GHOSTTY_SOURCE_DIR`）が見つからない場合はセットアップ手順
+  つきのエラーで即停止する（`cargo`のビルドエラーへ丸投げしない）。
+  `LABOLABO_VT_BACKEND=alacritty` 環境変数で、従来どおりの alacritty ビルド
+  へ明示的に戻せる（緊急ハッチ）。
+  ```sh
+  ./scripts/bundle-macos.sh          # 既定: ghostty-vt（toolchain 必須）
+  LABOLABO_VT_BACKEND=alacritty ./scripts/bundle-macos.sh   # 従来どおり alacritty
+  ```
+- **Windows は alacritty のまま**: libghostty の Windows ビルドは未検証
+  （この開発ラインに Windows 実機がない）ため、`scripts/package-windows.ps1`
+  にバックエンド切替は入れていない（`cargo build`の既定 = alacritty のまま
+  呼ぶだけ）。
+- **CI**: `.github/workflows/rust-release.yml`（`bundle-macos`/
+  `package-linux` ジョブ）と `rust-app-bundle.yml`（`bundle`/
+  `package-linux` ジョブ）の両方に、既存の `.github/workflows/ci.yml`
+  `rust-term-ghostty` ジョブと**全く同じ**ツールチェイン段取り（vancluever/
+  ghostty の固定 SHA チェックアウト + `mlugg/setup-zig@v2` で Zig 0.16）を
+  追加した。同じ `GHOSTTY_REF` が3ファイルに重複しているので、fork の
+  ピンを更新する際は3つとも揃えること。`rust-term-ghostty` 自体は
+  `continue-on-error: true`（実験的な継続実証用）のままだが、配布ジョブの
+  ほうは通常どおり失敗すればワークフロー全体が失敗する（ghostty-vt の
+  ビルド失敗を握りつぶさない）。
+
+ローカルでの ghostty-vt ビルド検証は `crates/labolabo-term/README.md`の
+「Building the ghostty-vt backend」節と同じ前提（Zig 0.16 + Zig-0.16
+対応 Ghostty フォークの `GHOSTTY_SOURCE_DIR`）:
+
+```sh
+export GHOSTTY_SOURCE_DIR=/path/to/vancluever-ghostty-checkout   # zig-0.16 ブランチ。pin SHA は ci.yml の rust-term-ghostty ジョブ参照
+export PATH="/path/to/zig-0.16.0/bin:$PATH"
+cd rust
+cargo test -p labolabo-term --no-default-features --features backend-ghostty-vt
+./scripts/bundle-macos.sh   # macOS のみ -- .app バンドルも ghostty-vt でビルドされる
+```
+
+### About 表記
+
+`labolabo-app` の About オーバーレイ（`crates/labolabo-app/src/menus.rs`
+`render_about_overlay`）は、ビルド時の feature に応じて「VT: libghostty-vt」
+または「VT: alacritty」を表示する（`VT_BACKEND` 定数 — `labolabo_term::
+ACTIVE_BACKEND_NAME` の再エクスポートで、cfg 判定を crate 境界をまたいで
+二重実装しない設計）。サポート対応時にどちらのビルドが動いているか
+判別できる。

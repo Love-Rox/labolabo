@@ -23,16 +23,38 @@ on:
   workflow_dispatch:
 
 jobs:
+  # macOS/Linux は既定で ghostty-vt バックエンド（配布物の本命 --
+  # rust/README.md「配布 vs 開発の既定バックエンド」参照）でビルドする。
+  # `ci.yml`の `rust-term-ghostty` ジョブと**全く同じ**段取り（同じ fork ピン
+  # SHA・同じ Zig バージョン） -- 詳しい理由は `rust-release.yml`の同名
+  # ジョブのコメント参照（この workflow は手動ビルド用の姉妹ワークフロー、
+  # ロジックは重複させず要点だけここに書く）。GHOSTTY_REF を更新する際は
+  # ci.yml/rust-release.yml もあわせて揃えること。
   bundle:
     name: bundle (macos-15)
     runs-on: macos-15
+    env:
+      GHOSTTY_REF: 4c729855e1ad03689d94af3e0a173b81ca423eb8
+      GHOSTTY_SOURCE_DIR: ${{ github.workspace }}/ghostty-src
+      LIBGHOSTTY_VT_SYS_OPTIMIZE: ReleaseFast
     defaults:
       run:
         working-directory: rust
     steps:
       - uses: actions/checkout@v4
 
+      - name: Checkout vancluever/ghostty (pinned)
+        uses: actions/checkout@v4
+        with:
+          repository: vancluever/ghostty
+          ref: ${{ env.GHOSTTY_REF }}
+          path: ghostty-src
+
       - uses: dtolnay/rust-toolchain@stable
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -51,11 +73,22 @@ jobs:
   package-linux:
     name: package (ubuntu-latest)
     runs-on: ubuntu-latest
+    env:
+      GHOSTTY_REF: 4c729855e1ad03689d94af3e0a173b81ca423eb8
+      GHOSTTY_SOURCE_DIR: ${{ github.workspace }}/ghostty-src
+      LIBGHOSTTY_VT_SYS_OPTIMIZE: ReleaseFast
     defaults:
       run:
         working-directory: rust
     steps:
       - uses: actions/checkout@v4
+
+      - name: Checkout vancluever/ghostty (pinned)
+        uses: actions/checkout@v4
+        with:
+          repository: vancluever/ghostty
+          ref: ${{ env.GHOSTTY_REF }}
+          path: ghostty-src
 
       # ci.yml の rust-app-linux ジョブと同じリンク時依存（コメントもそちらを参照）。
       - name: Install system dependencies (gpui link-time deps)
@@ -66,6 +99,10 @@ jobs:
             libfreetype-dev
 
       - uses: dtolnay/rust-toolchain@stable
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -81,6 +118,10 @@ jobs:
           path: rust/target/package/*.tar.gz
           if-no-files-found: error
 
+  # Windows は alacritty のまま（未検証な libghostty の Windows ビルドを
+  # 要求しない -- rust-release.yml の同名ジョブのコメント参照）。
+  # `scripts/package-windows.ps1` はバックエンド選択の概念自体を持たず、
+  # 何も変えていない。
   package-windows:
     name: package (windows-latest)
     runs-on: windows-latest
