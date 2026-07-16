@@ -27,7 +27,7 @@ jobs:
     runs-on: macos-15
     env:
       # 未設定なら Cask 自動更新ステップをスキップする（step の if で参照するため job レベルに置く）。
-      TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
     steps:
       - name: Resolve tag
         id: tag
