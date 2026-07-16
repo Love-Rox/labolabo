@@ -1,8 +1,9 @@
 # LaboLabo hooks ワイヤプロトコル仕様
 
-- **Status**: v1（2026-07-14。実装済みの挙動を仕様として固定したもの）
+- **Status**: v1.1（2026-07-16。v1 = 2026-07-14 に実装済みの挙動を仕様として固定。v1.1 で §4.2 の Windows Named Pipe トランスポートを「予約」から実仕様へ昇格）
 - **目的**: Claude Code の hooks を使ったエージェント状態検出・セッション対応付けの配線を、**実装言語・OS に依存しない形**で再実装可能にする。Rust 版（クロスプラットフォーム化）はこの文書を正として実装する。
 - **実装の現在地（Swift 版）**: 解釈層 = `AgentEventParser`、トランスポート契約 = `AgentEventTransport`、AF_UNIX 実装 = `UnixSocketEventTransport`（いずれも `Sources/LaboLaboEngine/Agent/`）。フォワーダ = `app/Sources/HookForwarder.swift`。hooks 注入 = `app/Sources/AgentSessionModel.swift`。
+- **実装の現在地（Rust 版）**: 解釈層 = `agent_event_parser`、トランスポート契約 = `hooks::AgentEventTransport`、AF_UNIX 実装 = `hooks::UnixSocketEventTransport`、Named Pipe 実装（§4.2）= `hooks::NamedPipeEventTransport`、フォワーダ = `labolabo-hook` bin + `hooks::forward_hook`（いずれも `rust/crates/labolabo-core/`）。
 
 ## 1. 全体像
 
@@ -43,13 +44,30 @@ LaboLabo 本体（セッションごとのソケットサーバ）
 
 ## 4. トランスポート（受信側）
 
-- **チャネル**: セッションごとに 1 本の AF_UNIX ソケット（SOCK_STREAM）。
-- **socketPath**: `/tmp/labolabo/<セッション UUID の先頭 10 文字（ハイフン除去・小文字）>.sock`
+OS 別に 2 実装（§4.1 / §4.2）。共通の契約:
+
+- **フレーミング**: **1 接続 = 1 イベント**。受信側は accept 後 EOF（相当）まで読み、その全体を 1 メッセージとして扱う。長さプレフィクスや区切り文字は使わない。
+- **チャネル名**: セッション UUID から導出した先頭 10 文字（ハイフン除去・小文字。以下「10hex」）を含む、セッションごとに 1 本のチャネル。§2 の `<socketPath>` にはこのチャネル名がそのまま入る（フォワーダはどの OS でも「渡された文字列へ connect する」だけで、パスとパイプ名を区別しない）。
+- **注意（既知のレース）**: アプリ再起動直後、旧プロセス由来の遅延イベント（死んだ claude の SessionEnd 等）が再 bind 済みの同一チャネル名へ届くことがある。消費側はこれを前提に防御する（§6）。
+
+### 4.1 AF_UNIX（macOS / Linux）
+
+- **チャネル**: AF_UNIX ソケット（SOCK_STREAM）。
+- **socketPath**: `/tmp/labolabo/<10hex>.sock`（Rust: `hook_settings::socket_path_from_uuid`）
   - ディレクトリ `/tmp/labolabo` は 0700 で作成。ソケットは bind 後に **0600** へ chmod（同一ユーザーのみ）。
   - 同一パスはアプリ再起動を跨いで再利用される（起動時に残骸を unlink してから bind）。
-- **フレーミング**: **1 接続 = 1 イベント**。受信側は accept 後 EOF まで読み、その全体を 1 メッセージとして扱う。長さプレフィクスや区切り文字は使わない。
-- **注意（既知のレース）**: アプリ再起動直後、旧プロセス由来の遅延イベント（死んだ claude の SessionEnd 等）が再 bind 済みの同一パスへ届くことがある。消費側はこれを前提に防御する（§6）。
-- **Windows 代替（未実装・Spike 3 で選定）**: AF_UNIX（Windows 10 1803+、SOCK_STREAM のみ）/ Named Pipe / loopback TCP。フレーミング「1 接続 = 1 イベント」の意味論を保てばトランスポートは差し替え可能。
+- **EOF**: クライアントの close（または書き込み側 shutdown）がそのまま EOF。
+
+### 4.2 Named Pipe（Windows）
+
+Rust 版で実装済み（`hooks::NamedPipeEventTransport`）。v1 で挙げた候補（AF_UNIX for Windows / loopback TCP）ではなく Named Pipe を採用した — 追加のポート管理・ファイアウォール考慮が不要で、DACL による同一ユーザー制限が第一級でできるため。
+
+- **チャネル**: セッションごとに 1 本の Named Pipe。**byte mode**・**inbound**（サーバ=受信専用、クライアント=送信専用）。
+- **パイプ名**: `\\.\pipe\labolabo-<10hex>`（Rust: `hook_settings::hook_pipe_name_from_uuid`）。§2 の `<socketPath>` にはこのパイプ名が入る。
+- **アクセス制御**: パイプ作成時に DACL = 「現在ユーザー + SYSTEM に GENERIC_ALL、その他は拒否（protected）」を明示指定する（0600 + 0700 相当。§8）。既定 DACL は Everyone に read を許すため使わない。DACL を構築できない場合は**バインドせず失敗する**（fail closed）。
+- **EOF 相当**: クライアントは全バイトを write → **FlushFileBuffers**（未 flush のまま CloseHandle するとパイプの残バイトが破棄されうるため）→ CloseHandle。サーバ側はこの切断（`ERROR_BROKEN_PIPE` / `ERROR_PIPE_NOT_CONNECTED`）を **EOF として扱い**、それまでに読めた全体を 1 イベントとする — §4.1 の「EOF まで読む」と観測上同一。
+- **残骸処理**: パイプ名は最終ハンドルの close と同時に消滅するため、§4.1 の「起動時に unlink」に相当する手順は不要（同名パイプの再利用はアプリ再起動でそのまま成立する）。
+- **§2 のコマンド文字列**: `'<binary>' --hook '<socketPath>'` のシングルクォート形は POSIX sh 前提。Windows でネイティブに hooks を注入する際のクォート規則（cmd / PowerShell）は Rust アプリ側 Windows 対応波で確定する（本書の予約事項）。バイナリが argv で `--hook <パイプ名>` を受け取る契約自体は同一。
 
 ## 5. イベント JSON
 
@@ -95,7 +113,7 @@ LaboLabo 本体（セッションごとのソケットサーバ）
 
 ## 8. セキュリティ
 
-- ソケット/パイプは**同一ユーザーのみ**アクセス可能にする（AF_UNIX: 0600 + 親ディレクトリ 0700）。
+- ソケット/パイプは**同一ユーザーのみ**アクセス可能にする（AF_UNIX: 0600 + 親ディレクトリ 0700 / Named Pipe: 現在ユーザー + SYSTEM のみの protected DACL — §4.2）。
 - フォワーダ→本体の方向にのみデータが流れる（本体からの応答なし）。イベントは状態表示と resume 対応付けにのみ使い、受信データからのコマンド実行は行わない。
 - socketPath はセッション UUID 由来で予測可能だが、書き込めるのは同一ユーザーのみであり、不正イベントの影響は表示の誤り（最悪でも誤った resume 候補の記録）に限定される。
 
