@@ -199,16 +199,28 @@ fn map_exit_status(status: std::process::ExitStatus) -> i32 {
 }
 
 /// Sends `SIGTERM` (via `/bin/kill`'s default signal, same as the Swift
-/// `Process.terminate()` escalation step). No-op on non-Unix targets --
-/// `run_with_timeout`'s only production caller today
-/// (`tool_locator::locate_via_login_shell`) is macOS-only; see
-/// `rust/README.md`'s known-scope-limits section for the Windows story.
+/// `Process.terminate()` escalation step).
 #[cfg(unix)]
 fn terminate(pid: u32) {
     let _ = Command::new("/bin/kill").arg(pid.to_string()).status();
 }
 
-#[cfg(not(unix))]
+/// Windows analog of the graceful `SIGTERM` step: `taskkill /PID <pid>`
+/// (no `/F`), which posts `WM_CLOSE`/console close to the target. Console
+/// children with no window (the usual case here) often reject this with
+/// "can only be terminated forcefully" -- that is fine: `run_with_timeout`'s
+/// escalation then applies [`kill_forcefully`] one second later, the same
+/// two-step shape as the unix arm.
+#[cfg(windows)]
+fn terminate(pid: u32) {
+    let _ = Command::new("taskkill")
+        .args(["/PID", &pid.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+#[cfg(not(any(unix, windows)))]
 fn terminate(_pid: u32) {}
 
 /// Sends `SIGKILL` (`kill -9`), matching `Process.terminate()` -> `SIGKILL`
@@ -220,7 +232,18 @@ fn kill_forcefully(pid: u32) {
         .status();
 }
 
-#[cfg(not(unix))]
+/// Windows analog of `SIGKILL`: `taskkill /F /PID <pid>`
+/// (`TerminateProcess`, not refusable by the target).
+#[cfg(windows)]
+fn kill_forcefully(pid: u32) {
+    let _ = Command::new("taskkill")
+        .args(["/F", "/PID", &pid.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+#[cfg(not(any(unix, windows)))]
 fn kill_forcefully(_pid: u32) {}
 
 #[cfg(test)]
@@ -232,12 +255,11 @@ mod tests {
     // `runSync`) collapse into `run` / `run_with_timeout` here -- see the
     // module doc comment.
     //
-    // Every test below except `missing_executable_*` spawns `/bin/echo` or
-    // `/bin/sh`, which don't exist on Windows -- gated `#[cfg(unix)]` rather
-    // than reimplemented against `cmd.exe`/PowerShell (out of scope for this
-    // wave; see rust/README.md's known-scope-limits section). The
-    // `missing_executable_*` tests only assert that spawning a nonexistent
-    // path errors, which holds on every platform, so they stay
+    // Most tests below spawn `/bin/echo` or `/bin/sh`, which don't exist on
+    // Windows -- those are gated `#[cfg(unix)]`, with `cmd /C` counterparts
+    // in `windows_tests` below (run for real on the `rust (windows-latest)`
+    // CI job). The `missing_executable_*` tests only assert that spawning a
+    // nonexistent path errors, which holds on every platform, so they stay
     // cross-platform.
 
     #[cfg(unix)]
@@ -400,5 +422,126 @@ mod tests {
     fn missing_executable_run_with_timeout_errors() {
         let missing = Path::new("/nonexistent/definitely/not/here-labolabo-process-test-2");
         assert!(run_with_timeout(missing, &[], None, None, Duration::from_secs(1)).is_err());
+    }
+}
+
+// `cmd /C` counterparts of the unix-gated tests above (the contract under
+// test -- status/stdout/stderr capture, env/cwd handling, timeout kill --
+// is platform-independent `std::process` code; only the spawned commands
+// differ). The signal-death and both-pipes-flooded cases stay unix-only:
+// Windows has no signal-exit status to map, and the concurrent pipe
+// draining they prove is the same code path already exercised there.
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::time::Duration;
+
+    /// `%ComSpec%` (practically always `C:\Windows\system32\cmd.exe`), with
+    /// the well-known path as fallback.
+    fn cmd() -> PathBuf {
+        std::env::var_os("ComSpec")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"C:\Windows\System32\cmd.exe"))
+    }
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn echo_captures_stdout_and_zero_status() {
+        let out = run(&cmd(), &args(&["/C", "echo hello"]), None, None).unwrap();
+        assert_eq!(out.status, 0);
+        assert_eq!(out.stdout, "hello\r\n");
+        assert!(out.stderr.is_empty());
+    }
+
+    #[test]
+    fn non_zero_exit_and_stderr_are_propagated() {
+        let out = run(&cmd(), &args(&["/C", "echo bad 1>&2 & exit 3"]), None, None).unwrap();
+        assert_eq!(out.status, 3);
+        assert!(out.stdout.is_empty());
+        assert_eq!(out.stderr.trim(), "bad");
+    }
+
+    #[test]
+    fn empty_output_completes() {
+        let out = run(&cmd(), &args(&["/C", "exit 0"]), None, None).unwrap();
+        assert_eq!(out.status, 0);
+        assert!(out.stdout.is_empty());
+        assert!(out.stderr.is_empty());
+    }
+
+    #[test]
+    fn runs_in_specified_directory() {
+        let base = std::env::temp_dir().join(format!(
+            "labolabo-process-cwd-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+
+        // `cd` with no argument prints the current directory.
+        let out = run(&cmd(), &args(&["/C", "cd"]), Some(&base), None).unwrap();
+        assert_eq!(out.status, 0);
+        let reported = std::fs::canonicalize(Path::new(out.stdout.trim())).unwrap();
+        let expected = std::fs::canonicalize(&base).unwrap();
+        assert_eq!(reported, expected);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn environment_is_passed_through() {
+        // `environment: Some(..)` replaces the child's whole environment;
+        // seed it with the parent's (cmd.exe needs SystemRoot etc. to run)
+        // plus the probe variable -- exercising the same env-replacement
+        // path the unix test does.
+        let mut env: HashMap<String, String> = std::env::vars().collect();
+        env.insert("LABO_TEST_VAR".to_string(), "wired".to_string());
+        let out = run(
+            &cmd(),
+            &args(&["/C", "echo %LABO_TEST_VAR%"]),
+            None,
+            Some(&env),
+        )
+        .unwrap();
+        assert_eq!(out.status, 0);
+        assert_eq!(out.stdout.trim(), "wired");
+    }
+
+    #[test]
+    fn timeout_returns_none_when_command_outlives_deadline() {
+        // `ping -n 6 127.0.0.1` ~= `sleep 5` (no `timeout /t` here: that
+        // command needs an interactive console and fails under a redirected
+        // stdin). The taskkill escalation in `run_with_timeout` reaps it.
+        let out = run_with_timeout(
+            &cmd(),
+            &args(&["/C", "ping -n 6 127.0.0.1 > NUL"]),
+            None,
+            None,
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert!(out.is_none());
+    }
+
+    #[test]
+    fn fast_command_completes_within_timeout() {
+        let out = run_with_timeout(
+            &cmd(),
+            &args(&["/C", "exit 0"]),
+            None,
+            None,
+            Duration::from_secs(5),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(out.status, 0);
     }
 }
