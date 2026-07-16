@@ -575,6 +575,10 @@ pub fn render_git_pane(
         .bg(rgb(PANEL_BG))
         .border_l_1()
         .border_color(rgb(BORDER_COLOR))
+        // `plans` 第8波a §1: サイドバーと対称に、ワークスペースに面した
+        // 左側だけ丸めて浮かせ、控えめなシャドウを左向きに落とす。
+        .rounded_l(px(theme::radius::PANEL))
+        .shadow(theme::shadow::panel(-2.0, 0.0))
         .child(render_branch_bar(task_id, state, cx))
         .child(
             div()
@@ -619,8 +623,8 @@ fn render_branch_bar(
         .flex()
         .flex_row()
         .items_center()
-        .gap_2()
-        .px_2()
+        .gap_3()
+        .px_3()
         .h(px(30.0))
         .flex_shrink_0()
         .bg(rgb(HEADER_BG))
@@ -728,8 +732,8 @@ pub(crate) fn render_file_list(
         }
         list = list.child(
             div()
-                .px_2()
-                .pt_1()
+                .px_3()
+                .pt_2()
                 .text_size(px(theme::font_size::CAPTION))
                 .text_color(rgb(section.badge_color()))
                 .child(SharedString::from(format!(
@@ -767,8 +771,8 @@ fn render_file_row(
         .flex_row()
         .items_center()
         .gap_1()
-        .px_2()
-        .py_0p5()
+        .px_3()
+        .py_1()
         .text_size(px(11.0))
         .when(is_selected, |el| el.bg(rgb(SELECTED_ROW_BG)))
         .text_color(rgb(theme::text::PRIMARY))
@@ -863,9 +867,9 @@ fn render_detail_header(
         .flex()
         .flex_row()
         .items_center()
-        .gap_2()
-        .px_2()
-        .h(px(26.0))
+        .gap_3()
+        .px_3()
+        .h(px(28.0))
         .flex_shrink_0()
         .bg(rgb(HEADER_BG))
         .text_size(px(11.0))

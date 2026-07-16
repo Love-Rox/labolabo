@@ -97,6 +97,80 @@ pub const fn with_alpha(rgb: u32, alpha: u8) -> u32 {
     (rgb << 8) | alpha as u32
 }
 
+/// パネル/オーバーレイの角丸半径 (`plans` 第8波a §1/§3/§5: 「クロームの
+/// 見た目を一段引き上げる」磨きの波)。`f32`(px 値)で持ち、呼び出し側が
+/// `.rounded(px(RADIUS))`/`.rounded_r(px(RADIUS))` 等へそのまま渡す --
+/// gpui 0.2 のプリセット(`rounded_lg`=8px 等)と値としては一致する場合も
+/// あるが、「このアプリの意味付けとしてのパネル角丸」を一箇所で管理する
+/// ため、プリセット名への暗黙の依存はしない。
+pub mod radius {
+    /// 固定パネル(サイドバー/Git ペイン)の、ワークスペースに面した側だけ
+    /// 丸める角丸。ウィンドウ端に接する側は直角のまま -- 「ウィンドウ
+    /// 全体は端まで surface::ROOT、パネルはその上に載るカードに」の実装。
+    pub const PANEL: f32 = 8.0;
+    /// サイドバーのタスク行/アーカイブ行の角丸。
+    pub const ROW: f32 = 6.0;
+    /// オーバーレイ(設定・確認・「…」メニュー・About)パネルの角丸 --
+    /// `PANEL` よりわずかに大きい(画面全体の上に浮くモーダルなので、
+    /// 固定パネルより一段強い丸みで「最前面」を印象づける)。
+    pub const OVERLAY: f32 = 10.0;
+}
+
+/// オーバーレイ(設定・確認・「…」メニュー・About)背景の暗幕、黒 40%。
+/// 全オーバーレイで統一 -- 従来は設定/確認/About がそれぞれ個別に
+/// `0xb3`(≈70%)を定義し、タスク「…」メニューのポップオーバーは暗幕
+/// 無し(クリックアウトで閉じるだけ)と、オーバーレイごとにバラバラ
+/// だったものをここへ集約した。
+pub const OVERLAY_SCRIM: u32 = with_alpha(0x000000, 0x66);
+
+/// ごく控えめな box-shadow のプリセット(`plans` 第8波a §1/§4: 「浮き」の
+/// 階層とフォーカスの外側グロー)。電力原則により、繰り返しアニメーション
+/// には一切乗せない(常に静的な style として描画されるだけ -- `motion.rs`
+/// の「単発 ≤250ms か、Running の呼吸だけ」原則の対象外: そもそも
+/// アニメーションしない)。ぼかし半径も控えめに抑えている(重い blur は
+/// 見た目の主張が強すぎてこのアプリの「端末が主役」トーンと合わない、
+/// という意味も込め)。
+pub mod shadow {
+    use gpui::{point, px, rgba, BoxShadow};
+
+    /// 固定パネル(サイドバー/Git ペイン/各タイルのタブバー)の「浮き」を
+    /// 示す、1 段だけのシャドウ。`offset_x`/`offset_y` は呼び出し側が
+    /// パネルがどちら向きに「浮いて」見えるべきかを渡す(サイドバーなら
+    /// 右へ、Git ペインなら左へ、タブバーなら下へ)。
+    pub fn panel(offset_x: f32, offset_y: f32) -> Vec<BoxShadow> {
+        vec![BoxShadow {
+            color: rgba(super::with_alpha(0x000000, 0x38)).into(),
+            offset: point(px(offset_x), px(offset_y)),
+            blur_radius: px(8.0),
+            spread_radius: px(0.0),
+        }]
+    }
+
+    /// オーバーレイ(設定・確認・「…」メニュー・About)パネル用 -- 画面
+    /// 全体の上に浮くモーダルなので [`panel`] よりわずかに強い。
+    pub fn overlay() -> Vec<BoxShadow> {
+        vec![BoxShadow {
+            color: rgba(super::with_alpha(0x000000, 0x40)).into(),
+            offset: point(px(0.0), px(4.0)),
+            blur_radius: px(14.0),
+            spread_radius: px(0.0),
+        }]
+    }
+
+    /// フォーカスされたタイルの外側グロー(`plans` 第8波a §4: 「1px
+    /// ACCENT の枠 + ほんのり ACCENT の外側グロー 1 段」)。オフセット
+    /// 無し・低アルファの [`super::ACCENT`] を小さく広げるだけの、枠線を
+    /// 縁取る程度のごく控えめなグロー。
+    pub fn focus_glow() -> Vec<BoxShadow> {
+        vec![BoxShadow {
+            color: rgba(super::with_alpha(super::ACCENT, 0x40)).into(),
+            offset: point(px(0.0), px(0.0)),
+            blur_radius: px(6.0),
+            spread_radius: px(1.0),
+        }]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -167,7 +167,7 @@ pub fn adjust_scrollback_lines(current: usize, delta: i64) -> usize {
     next.clamp(MIN_SCROLLBACK_LINES as i64, MAX_SCROLLBACK_LINES as i64) as usize
 }
 
-const OVERLAY_BG: u32 = theme::with_alpha(0x000000, 0xb3); // ~70% black backdrop
+const OVERLAY_BG: u32 = theme::OVERLAY_SCRIM;
 const PANEL_BG: u32 = theme::surface::ROOT;
 const BORDER_COLOR: u32 = theme::surface::STROKE;
 const BUTTON_BG: u32 = theme::surface::RAISED;
@@ -243,10 +243,11 @@ pub fn render_settings_overlay(
         .gap_3()
         .w(px(PANEL_WIDTH))
         .p_4()
-        .rounded_md()
+        .rounded(px(theme::radius::OVERLAY))
         .bg(rgb(PANEL_BG))
         .border_1()
         .border_color(rgb(BORDER_COLOR))
+        .shadow(theme::shadow::overlay())
         .child(
             div()
                 .flex()
