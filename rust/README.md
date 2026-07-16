@@ -662,12 +662,15 @@ the Rust port) is new product surface. The `labolabo-core` pieces:
   app-state, with its own ordered-migration ledger (`schemaMigrations`
   table). **No GRDB compatibility constraint**, and deliberately a separate
   database *file* from the Swift app's: `TaskDatabase::default_path()` is
-  `<data dir>/LaboLabo-rs/tasks.db` (`store::rust_app_data_dir`), never the
-  Swift `LaboLabo/labolabo.db` — two live apps must never write the same
-  SQLite file, and this schema shares nothing with the GRDB one (which
-  stays untouched for future Swift-data import). A Task's `layout` column
-  stores `TileLayout::to_json` verbatim, so the tile tree's existing
-  byte-compatibility contract carries over unchanged.
+  `<data dir>/LaboLabo/tasks.db` (`store::rust_app_data_dir`; before the
+  1.1.0 rename this was a separate `LaboLabo-rs/` directory — a one-time
+  startup migration, `store::migrate_legacy_rust_data_dir`, moves an old
+  `tasks.db` across), never the Swift `LaboLabo/labolabo.db` — two live
+  apps must never write the same SQLite *file* (sharing the directory with
+  different filenames is fine), and this schema shares nothing with the
+  GRDB one (which stays untouched for Swift-data import). A Task's
+  `layout` column stores `TileLayout::to_json` verbatim, so the tile
+  tree's existing byte-compatibility contract carries over unchanged.
 - `branch_naming.rs` — pure `generate_branch_name(prefix, date, existing)`
   (`labolabo/<YYYYMMDD>-<n>`, collision-skipping) for the "new worktree
   Task" flow; kept in core (not `labolabo-app`) so the future control CLI
@@ -684,13 +687,15 @@ and malformed-value error surfacing. The UI driving all of this lives in
 `scripts/bundle-macos.sh` packages the three built binaries
 (`labolabo-app`, the gpui GUI; `labolabo`, the control CLI; `labolabo-hook`,
 the Claude Code hooks forwarder — see "Wave 4b" above) into a distributable
-`LaboLabo-rs.app`, mirroring the Swift app's own release packaging
+`LaboLabo.app` (named `LaboLabo-rs.app` before the 1.1.0 rename — see
+"1.1.0 の正式名改名" under the RC リリース手順 section below), mirroring
+the Swift app's own release packaging
 (`.github/workflows/release-build.yml`):
 
 ```sh
 rust/scripts/bundle-macos.sh
-# -> rust/target/bundle/LaboLabo-rs.app
-# -> rust/target/bundle/LaboLabo-rs-<version>.zip
+# -> rust/target/bundle/LaboLabo.app
+# -> rust/target/bundle/LaboLabo-<version>.zip
 ```
 
 It runs `cargo build --release -p labolabo-app -p labolabo-core`, then
@@ -708,12 +713,12 @@ A few design decisions worth calling out:
   (agent status dots, session memory, resume-at-restore) work inside the
   bundle at all — no code change was needed, the existing sibling-directory
   resolution already fits an app bundle's flat `MacOS/` directory.
-- **Bundle identifier**: `com.love-rox.labolabo-rs` — the same
-  `com.love-rox` prefix as the Swift app (`app/project.yml`'s
-  `bundleIdPrefix`), with an `-rs` suffix so the two apps never collide
-  (separate `LSApplicationCategoryType`/data dirs/preferences; the Rust
-  port's own on-disk data directory, `store::rust_app_data_dir`, is
-  similarly named `LaboLabo-rs`, not `LaboLabo` — see "Wave 5b-3" above).
+- **Bundle identifier**: `com.love-rox.labolabo` as of the 1.1.0 rename —
+  the Swift app's own bundle ID, inherited deliberately now that the Swift
+  app is retired (before 1.1.0 this was `com.love-rox.labolabo-rs`, an
+  `-rs` suffix chosen so the two then-coexisting apps never collided; the
+  on-disk data directory made the same move, `LaboLabo-rs` → `LaboLabo` —
+  see "Wave 5b-3" above for the migration).
 - **Version**: `CFBundleShortVersionString` is *not* the workspace crates'
   own `Cargo.toml` `version` (still `0.1.0` — this port is pre-1.0
   internally) — per explicit product direction, this bundle is versioned as
@@ -747,7 +752,7 @@ that integration is a separate future decision.
 
 Wave 7a added the Linux counterpart: `scripts/package-linux.sh` packages
 the same three binaries into a portable
-`LaboLabo-rs-linux-<version>-<arch>.tar.gz` (flat `bin/` + freedesktop.org
+`LaboLabo-linux-<version>-<arch>.tar.gz` (flat `bin/` + freedesktop.org
 `.desktop` launcher + per-user `install.sh` + PNG icon reused from the
 Swift app's artwork + README), and `rust-app-bundle.yml`'s `package-linux`
 job runs it on `ubuntu-latest` under the same `workflow_dispatch`-only
@@ -812,6 +817,31 @@ x86_64-pc-windows-gnu` (mingw-w64), including a full link of the
 `labolabo` CLI bin.
 
 ## RC リリース手順（RC release wave）
+
+### 1.1.0 の正式名改名（LaboLabo-rs → LaboLabo）
+
+Swift（macOS ネイティブ）版の引退決定に伴い、1.1.0 から Rust 版が正式名
+**LaboLabo** を引き継いだ。対応表:
+
+- 配布物: `LaboLabo.app` / `LaboLabo-<version>.zip`（macOS）、
+  `LaboLabo-linux-<version>-<arch>.tar.gz`、
+  `LaboLabo-windows-<version>-<arch>.zip`。リリースタイトルも
+  `LaboLabo <version>`。
+- Bundle ID: `com.love-rox.labolabo`（Swift 版の ID を継承）。
+- データディレクトリ: `<data dir>/LaboLabo/tasks.db`（旧
+  `LaboLabo-rs/tasks.db` は初回起動時に自動で rename 移動 —
+  `store::migrate_legacy_rust_data_dir`。失敗時は旧パスをそのまま使い
+  続けるフォールバックあり）。
+- **変えないもの**: タグ体系は `rs-v*` のまま（Swift 版の `v*` タグと
+  過去分も含めて分離し続けるため）。3 実行ファイル名
+  （`labolabo-app`/`labolabo`/`labolabo-hook`）も不変（hooks の隣接
+  バイナリ解決を壊さない）。環境変数 `LABOLABO_RS_DATA_DIR` /
+  `LABOLABO_RS_VERSION` / `LABOLABO_RS_INSTALL_DIR` も互換のため
+  旧名のまま。
+- Homebrew: `rs-v*` リリースの publish 時に `.github/workflows/
+  rust-cask-bump.yml` が tap の **`Casks/labolabo.rb`** を bump する
+  （labolabo cask が Rust 版の正式 cask。旧 labolabo-rs cask の廃止は
+  tap 側の作業）。
 
 `.github/workflows/rust-release.yml` は、Rust 版 labolabo-app を Mac/
 Linux/Windows 3 アーティファクト付きの GitHub **pre-release**（draft）
