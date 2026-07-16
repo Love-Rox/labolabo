@@ -1,0 +1,219 @@
+name: Rust release (RC)
+
+# Rust 版 labolabo-app の RC（release candidate）を GitHub の **pre-release**
+# として draft で用意する配管。**手動実行のみ**（`workflow_dispatch`）--
+# release-please（Swift 版、`release-please.yml`）や既存の
+# `rust-app-bundle.yml`（Rust 版の素の workflow_dispatch ビルド、正式リリース
+# 導線ではない）とは完全に独立させ、互いのトリガに一切反応しない。
+#
+# ## タグ体系: `rs-v*`（Swift 版の `v*` と衝突しない）
+#
+# release-please は `v*` タグ（例 `v0.7.0`）を Swift 版の正式リリースとして
+# 管理している。この workflow の `tag` 入力は必ず **`rs-v` プレフィクス**
+# （例 `rs-v1.0.0-rc.1`）を要求し、`resolve-version` ジョブで検証する。
+# 両タグ体系は同じリポジトリ上で混在するが、実害はない: Swift 版の
+# `UpdateChecker`（`app/Sources/UpdateChecker.swift`）は `releases/latest`
+# しか見ないので `rs-v*` の pre-release が割り込む余地はなく、Rust 版の
+# `crate::update_check`（`crates/labolabo-app/src/update_check.rs`）は逆に
+# `rs-v*` だけを見て `v*` を無視する（同モジュールの doc コメント参照）。
+# それでもタグ体系そのものは分離しておく、という判断。
+#
+# ## `--draft` は必須 -- このジョブ自体は pre-release を「発行」しない
+#
+# `gh release create --prerelease --draft` で作る **draft** リリースは、
+# タグがまだリポジトリに存在しない場合、**publish されるまで実際にはタグを
+# 打たない**（GitHub の仕様）。つまりこの workflow が実行されても、ユーザー
+# が GitHub の Releases 画面で内容を確認して "Publish release" を押すまでは
+# 何も公開されない・タグも切られない -- 「pre-release の実発行・タグ付けは
+# 絶対にしない」という制約をこの `--draft` フラグ一つで満たしている。この
+# フラグを外すことは絶対にしないこと。
+#
+# ## 既存ガードとの関係
+#
+# - `pr-target-guard.yml`（`enforce-dev-only`）は `pull_request: branches:
+#   [main]` トリガのみで、`workflow_dispatch` には一切反応しない -- 干渉なし。
+# - `release-please.yml`/`release-build.yml`（Swift 版）は `push: [main]`/
+#   `release: [published]` トリガで、この workflow の作る draft
+#   pre-release は `published` イベントを発火させない（draft のままなので）
+#   -- 干渉なし。
+# - `rust-app-bundle.yml`（既存の Rust 手動ビルド、artifact のみ・リリース
+#   化しない）とはジョブ内容が重複するが、別ファイルのまま独立させる
+#   （統合は将来の判断 -- 過剰な工事はしない）。
+#
+# ## バージョンの単一ソース
+#
+# `tag` 入力（`rs-v1.0.0-rc.1`）から `rs-v` を剥がした残り
+# （`1.0.0-rc.1`）を「バージョン」として 3 つのパッケージングジョブすべてに
+# 明示的に渡す（`LABOLABO_RS_VERSION` env / スクリプト引数）。各スクリプトは
+# それを `cargo build` にも同じ env で伝播するので、パッケージ名（zip/
+# tar.gz のファイル名）と、コンパイルされたバイナリ自身の About パネル表示
+# （`crates/labolabo-app/src/menus.rs` `APP_VERSION`、`build.rs` 経由）が
+# 常に一致する -- リポジトリにコミットされた `rust/VERSION` ファイルの中身
+# を書き換える必要はない（`build.rs`/各スクリプトの doc コメント参照）。
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "リリースタグ（rs-v プレフィクス必須。例: rs-v1.0.0-rc.1）"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  resolve-version:
+    name: resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Validate tag prefix and derive version
+        id: version
+        run: |
+          set -euo pipefail
+          TAG="${{ github.event.inputs.tag }}"
+          if [[ "$TAG" != rs-v* ]]; then
+            echo "::error::tag は rs-v で始まる必要があります（Swift 版 release-please の v* タグと衝突させないため）。入力: $TAG"
+            exit 1
+          fi
+          VERSION="${TAG#rs-v}"
+          if [ -z "$VERSION" ]; then
+            echo "::error::rs-v の後にバージョン文字列がありません: $TAG"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "::notice title=Resolved version::tag=$TAG -> version=$VERSION"
+
+  bundle-macos:
+    name: bundle (macos-15)
+    needs: resolve-version
+    runs-on: macos-15
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: Bundle (build + package + ad-hoc sign)
+        run: ./scripts/bundle-macos.sh "${{ needs.resolve-version.outputs.version }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LaboLabo-rs-macos
+          path: rust/target/bundle/*.zip
+          if-no-files-found: error
+
+  package-linux:
+    name: package (ubuntu-latest)
+    needs: resolve-version
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-app-bundle.yml の package-linux ジョブ / ci.yml の rust-app-linux
+      # ジョブと同じリンク時依存（コメントもそちらを参照）。
+      - name: Install system dependencies (gpui link-time deps)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libfreetype-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: Package (release build + tar.gz)
+        run: ./scripts/package-linux.sh "${{ needs.resolve-version.outputs.version }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LaboLabo-rs-linux
+          path: rust/target/package/*.tar.gz
+          if-no-files-found: error
+
+  package-windows:
+    name: package (windows-latest)
+    needs: resolve-version
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: Package (release build + zip)
+        shell: pwsh
+        run: ./scripts/package-windows.ps1 -Version "${{ needs.resolve-version.outputs.version }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LaboLabo-rs-windows
+          path: rust/target/package/*.zip
+          if-no-files-found: error
+
+  create-release:
+    name: create draft pre-release
+    needs: [resolve-version, bundle-macos, package-linux, package-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all platform artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: List downloaded artifacts
+        run: find artifacts -type f | sort
+
+      - name: Render release notes from template
+        env:
+          VERSION: ${{ needs.resolve-version.outputs.version }}
+          TAG: ${{ github.event.inputs.tag }}
+        run: |
+          set -euo pipefail
+          sed -e "s/{{VERSION}}/$VERSION/g" -e "s/{{TAG}}/$TAG/g" \
+            rust/RELEASE_NOTES_TEMPLATE.md > /tmp/release-notes.md
+
+      # `--draft` は絶対に外さないこと -- このワークフロー自体のトップの
+      # コメント「`--draft` は必須」参照。draft のタグはユーザーが GitHub 上
+      # で "Publish release" するまでリポジトリに実際には作られない。
+      - name: Create draft pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag }}
+          VERSION: ${{ needs.resolve-version.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" \
+            artifacts/LaboLabo-rs-macos/*.zip \
+            artifacts/LaboLabo-rs-linux/*.tar.gz \
+            artifacts/LaboLabo-rs-windows/*.zip \
+            --prerelease \
+            --draft \
+            --title "LaboLabo-rs $VERSION" \
+            --notes-file /tmp/release-notes.md
+          echo "::notice title=Draft pre-release created::tag=$TAG -- 内容を GitHub の Releases 画面で確認してから Publish してください（このワークフローはタグを打ちません）。"

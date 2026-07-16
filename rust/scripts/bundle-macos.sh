@@ -7,14 +7,22 @@
 # notarization, by explicit decision -- see rust/README.md's bundling
 # section).
 #
-# Usage: rust/scripts/bundle-macos.sh
+# Usage: rust/scripts/bundle-macos.sh [version]
+#   version: optional, e.g. "1.0.0-rc.2" -- overrides both this bundle's
+#            CFBundleShortVersionString/zip name AND the compiled binary's
+#            own About-panel version (via LABOLABO_RS_VERSION, see below).
+#            Falls back to $LABOLABO_RS_VERSION if unset, then to
+#            rust/VERSION's contents (this script's "current value" -- see
+#            rust-release.yml's module comment for why CI always passes
+#            this explicitly).
 # Output: rust/target/bundle/LaboLabo-rs.app and .../LaboLabo-rs-<version>.zip
 set -euo pipefail
 
 # Resolve paths relative to this script, not the caller's cwd, so it works
 # whether invoked as `./scripts/bundle-macos.sh` (cwd = rust/) or
 # `rust/scripts/bundle-macos.sh` (cwd = repo root) -- both are documented
-# entry points (this file and the `rust-app-bundle.yml` CI job).
+# entry points (this file and the `rust-app-bundle.yml`/`rust-release.yml`
+# CI jobs).
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUST_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$RUST_DIR/.." && pwd)"
@@ -24,7 +32,39 @@ APP_NAME="LaboLabo-rs"
 APP_BUNDLE="$BUNDLE_DIR/$APP_NAME.app"
 BUNDLE_ID="com.love-rox.labolabo-rs"
 
-echo "==> cargo build --release (labolabo-app, labolabo, labolabo-hook)"
+# --- Version -----------------------------------------------------------
+#
+# CFBundleShortVersionString: **not** the workspace crates' own Cargo.toml
+# `version` (still 0.1.0 -- this Rust port is pre-1.0 internally). Per
+# explicit product direction, this bundle is versioned as a **major bump
+# from the current Swift app's release line** (`Config/Version.xcconfig`'s
+# `MARKETING_VERSION`) rather than continuing that 0.x line or reusing the
+# crates' 0.1.0 -- i.e. a 1.0.0-series version, not a continuation of
+# either. This is a marketing/distribution version, deliberately decoupled
+# from both the Swift app's version counter and the Cargo crates' own
+# (unbumped) version fields.
+#
+# Resolution order: CLI arg ($1) > $LABOLABO_RS_VERSION env > rust/VERSION
+# file's contents > a hardcoded last-resort literal (only reached if the
+# VERSION file itself is missing). `rust-release.yml` always passes $1
+# explicitly (derived from its `tag` input); a plain local/manual run (or
+# `rust-app-bundle.yml`'s workflow_dispatch, which predates the RC wave and
+# still calls this script with no argument) falls through to the checked-in
+# `rust/VERSION` file, which is this repo's single source of truth for "the
+# current default version" -- see that file and `build.rs`'s doc comment.
+#
+# **Exported** as LABOLABO_RS_VERSION before `cargo build` below so the
+# compiled binary's own About panel (`crates/labolabo-app/src/menus.rs`
+# `APP_VERSION`, injected by `build.rs`) always matches this bundle's
+# CFBundleShortVersionString -- no manual sync needed, unlike before this
+# wave.
+VERSION="${1:-${LABOLABO_RS_VERSION:-$(cat "$RUST_DIR/VERSION" 2>/dev/null | tr -d '[:space:]')}}"
+if [ -z "$VERSION" ]; then
+    VERSION="1.0.0-rc.1"
+fi
+export LABOLABO_RS_VERSION="$VERSION"
+
+echo "==> cargo build --release (labolabo-app, labolabo, labolabo-hook), version $VERSION"
 # `-p labolabo-app` builds this package's two bin targets (labolabo-app,
 # the gpui GUI; labolabo, the control CLI, see its Cargo.toml). `-p
 # labolabo-core` additionally builds its own `src/bin/labolabo-hook.rs` bin
@@ -41,22 +81,6 @@ for bin in labolabo-app labolabo labolabo-hook; do
         exit 1
     fi
 done
-
-# --- Version -----------------------------------------------------------
-#
-# CFBundleShortVersionString: **not** the workspace crates' own Cargo.toml
-# `version` (still 0.1.0 -- this Rust port is pre-1.0 internally). Per
-# explicit user direction, this bundle is versioned as a **major bump from
-# the current Swift app's release line** (`Config/Version.xcconfig`'s
-# `MARKETING_VERSION`, 0.7.x as of this script's authoring) rather than
-# continuing that 0.x line or reusing the crates' 0.1.0 -- i.e. 1.0.0, not
-# 0.7.x+1 or 0.1.0. This is a marketing/distribution version, deliberately
-# decoupled from both the Swift app's version counter and the Cargo crates'
-# own (unbumped) version fields.
-#
-# Keep in sync with the in-app About panel's version:
-# crates/labolabo-app/src/menus.rs `APP_VERSION` (wave 6c).
-VERSION="1.0.0"
 
 # CFBundleVersion (build number): same convention as the Swift app
 # (`app/project.yml`'s postBuildScripts) -- the monotonic git commit count,
