@@ -36,7 +36,7 @@ pub use record::SessionRecord;
 mod task_database;
 mod task_record;
 
-pub use data_dir::rust_app_data_dir;
+pub use data_dir::{migrate_legacy_rust_data_dir, rust_app_data_dir};
 pub use task_database::TaskDatabase;
 pub use task_record::{Task, TaskKind, TaskStatus};
 
