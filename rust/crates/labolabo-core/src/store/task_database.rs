@@ -455,6 +455,47 @@ impl TaskDatabase {
         self.set_app_state(version, Self::KEY_IGNORED_UPDATE_VERSION)
     }
 
+    // MARK: - App state (Swift-import confirmation prompt, 第8波d)
+    //
+    // One `appState` key backing `labolabo-app::import_prompt`'s first-launch
+    // "Swift 版のデータを取り込みますか？" confirmation -- whichever button
+    // the user clicks (取り込む/取り込まない), the caller persists `true`
+    // here immediately, so the prompt is a true one-shot: it never asks
+    // again on any later launch, even if a Swift `labolabo.db` is still
+    // present. Unlike `KEY_UPDATE_CHECK_ENABLED`/`KEY_IGNORED_UPDATE_VERSION`
+    // above (which distinguish "never set" from "explicitly false" via
+    // `Option<bool>`), this flag has no meaningful three-state default: the
+    // one and only default before any answer is "unanswered", so the getter
+    // collapses that directly to `false` rather than making every caller
+    // re-derive it from `None`.
+
+    /// `appState` key backing the Swift-import confirmation prompt's
+    /// one-shot "already answered" flag.
+    const KEY_SWIFT_IMPORT_PROMPT_ANSWERED: &'static str = "swiftImportPromptAnswered";
+
+    /// `false` if the prompt has never been answered (a fresh database, or
+    /// one from before this wave) -- the only case in which
+    /// `import_prompt::should_show_import_prompt` may return `true`.
+    pub fn swift_import_prompt_answered(&self) -> StoreResult<bool> {
+        Ok(self
+            .app_state(Self::KEY_SWIFT_IMPORT_PROMPT_ANSWERED)?
+            .map(|v| v != "0")
+            .unwrap_or(false))
+    }
+
+    /// Persists the one-shot answer. Both prompt buttons (取り込む/
+    /// 取り込まない) call this with `true` -- there is no path that ever
+    /// writes `false` back once `true` (an already-answered prompt has no
+    /// "un-answer" affordance in the UI; see `rust/README.md`'s documented
+    /// escape hatches -- delete `tasks.db`, or `LABOLABO_FORCE_IMPORT_
+    /// PROMPT=1` -- for how a user/developer can still see it again).
+    pub fn set_swift_import_prompt_answered(&self, answered: bool) -> StoreResult<()> {
+        self.set_app_state(
+            Some(bool_flag(answered)),
+            Self::KEY_SWIFT_IMPORT_PROMPT_ANSWERED,
+        )
+    }
+
     fn set_app_state(&self, value: Option<&str>, key: &str) -> StoreResult<()> {
         self.conn.execute(
             "INSERT INTO appState(key, value) VALUES(?1, ?2) \
@@ -770,6 +811,16 @@ mod tests {
         );
         db.set_ignored_update_version(None).unwrap();
         assert_eq!(db.ignored_update_version().unwrap(), None);
+    }
+
+    // MARK: - App state (Swift-import confirmation prompt, 第8波d)
+
+    #[test]
+    fn swift_import_prompt_answered_defaults_to_false_until_set() {
+        let db = TaskDatabase::open_in_memory().unwrap();
+        assert!(!db.swift_import_prompt_answered().unwrap());
+        db.set_swift_import_prompt_answered(true).unwrap();
+        assert!(db.swift_import_prompt_answered().unwrap());
     }
 
     #[test]
