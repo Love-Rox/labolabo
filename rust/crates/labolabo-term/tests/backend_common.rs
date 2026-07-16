@@ -18,6 +18,35 @@
 //! path is future work (Windows PTY spawning in general is out of scope for
 //! this wave -- see rust/README.md's known-scope-limits section), not a
 //! rewrite to attempt without a Windows machine to verify it on.
+//!
+//! ## Flake hardening: gate sequential DECSET/OSC writes on `read`, not `sleep`
+//!
+//! Several tests below (`alt_screen_active_reflects_decset_1049`,
+//! `bracketed_paste_mode_reflects_decset_2004`,
+//! `mouse_mode_reflects_decset_1000_1002_1006`,
+//! `alternate_scroll_defaults_on_and_toggles_via_decset_1007`,
+//! `title_updates_on_second_osc_sequence`) drive the child through two or
+//! three sequential terminal-mode states and assert each is observable in
+//! turn. A fixed `sleep` between the writes that produce each state looks
+//! like it should be enough margin, but it isn't a real synchronization
+//! primitive: the worker thread that owns the VT core refreshes these
+//! mirrored flags per `WorkerMsg::Bytes` batch, and fires its `Wakeup`
+//! event only from a *throttled* snapshot publish (`FRAME_INTERVAL` = 16ms
+//! in `session.rs`). Under CI load the worker can fall behind far enough
+//! that two writes sent hundreds of ms apart both end up queued by the time
+//! it resumes, and it drains them back to back -- the intermediate state
+//! then exists for well under the poller's sampling granularity and can be
+//! missed entirely, no matter how long the deadline is. `alt_screen_active_
+//! reflects_decset_1049` flaked exactly this way 3x in the ubuntu
+//! `rust-term-ghostty` CI job (wave 12).
+//!
+//! The fix used throughout: have the child block on a `read` after writing
+//! the first state, and only unblock it (`Terminal::write_input(b"\n")`)
+//! from the test *after* that state was actually observed via the existing
+//! `wait_for_*` deadline-polling helpers. This makes the hand-off a real
+//! happens-before relationship instead of a clock-based guess, so the next
+//! write is structurally unable to land in the same worker batch as the
+//! previous one. Production code is unchanged -- this is a test-only fix.
 #![cfg(unix)]
 
 use std::time::Duration;
@@ -344,12 +373,17 @@ fn cwd_none_matches_spawn_with_options() {
 /// disables it. This is the mode-query API `labolabo-app`'s Cmd+V paste
 /// handler uses to decide whether to wrap pasted text in
 /// `ESC[200~...ESC[201~`.
+///
+/// The child blocks on `read` between the two DECSET writes instead of a
+/// fixed `sleep` -- see [`wait_for_alt_screen`]'s doc comment (the same
+/// technique, applied here) for why a clock-based gap alone can't
+/// guarantee the transient ON state survives being observed under CI load.
 #[test]
 fn bracketed_paste_mode_reflects_decset_2004() {
     let term = Terminal::spawn_with_command(
         80,
         24,
-        Some(r#"printf '\033[?2004h'; sleep 0.3; printf '\033[?2004l'; sleep 0.3"#),
+        Some(r#"printf '\033[?2004h'; read _sync; printf '\033[?2004l'; sleep 0.2"#),
         &[],
     )
     .expect("spawn");
@@ -361,6 +395,10 @@ fn bracketed_paste_mode_reflects_decset_2004() {
         wait_for_bracketed_paste(&term, TIMEOUT, true),
         "expected bracketed paste to turn on after DECSET 2004h"
     );
+    // Only unblock the child's second `printf` (DECSET 2004l) once the ON
+    // state was actually observed, so the OFF write can never land in the
+    // same worker batch as the ON one -- see the doc comment above.
+    term.write_input(b"\n");
     assert!(
         wait_for_bracketed_paste(&term, TIMEOUT, false),
         "expected bracketed paste to turn back off after DECSET 2004l"
@@ -375,15 +413,20 @@ fn bracketed_paste_mode_reflects_decset_2004() {
 /// decide whether a click/drag/scroll should be SGR-encoded and forwarded
 /// to the child instead of driving this crate's own text-selection/
 /// scrollback UI (W5j #1).
+///
+/// Same "block on `read` between writes" hardening as [`wait_for_alt_screen`]
+/// -- three distinct states in sequence means two hand-off points, each
+/// gated so the next DECSET write can't reach the VT parser before the
+/// previous state was actually observed.
 #[test]
 fn mouse_mode_reflects_decset_1000_1002_1006() {
     let term = Terminal::spawn_with_command(
         80,
         24,
         Some(
-            r#"printf '\033[?1000h'; sleep 0.3; \
-               printf '\033[?1000l\033[?1002h\033[?1006h'; sleep 0.3; \
-               printf '\033[?1002l\033[?1006l'; sleep 0.3"#,
+            r#"printf '\033[?1000h'; read _sync1; \
+               printf '\033[?1000l\033[?1002h\033[?1006h'; read _sync2; \
+               printf '\033[?1002l\033[?1006l'; sleep 0.2"#,
         ),
         &[],
     )
@@ -404,6 +447,7 @@ fn mouse_mode_reflects_decset_1000_1002_1006() {
         ),
         "expected normal tracking (no SGR) after DECSET 1000h"
     );
+    term.write_input(b"\n");
     assert!(
         wait_for_mouse_mode(
             &term,
@@ -415,6 +459,7 @@ fn mouse_mode_reflects_decset_1000_1002_1006() {
         ),
         "expected button-event tracking with SGR after DECSET 1000l 1002h 1006h"
     );
+    term.write_input(b"\n");
     assert!(
         wait_for_mouse_mode(&term, TIMEOUT, MouseMode::OFF),
         "expected mouse mode to turn back off after DECSET 1002l 1006l"
@@ -620,12 +665,32 @@ fn spawn_with_scrollback_options_caps_history_length() {
 /// visible via `Terminal::alt_screen_active()`, and leaving it clears the
 /// flag again -- the signal `labolabo-app`'s wheel handler uses to decide
 /// whether to scroll this crate's own viewport or send cursor keys instead.
+///
+/// Flaked 3x in the ubuntu `rust-term-ghostty` CI job (wave 12) even though
+/// this test already polls with a deadline (`wait_for_alt_screen`, below) --
+/// the actual race isn't "read immediately after write", it's that the
+/// worker thread refreshes `alt_screen_active()`'s mirrored flag per
+/// `WorkerMsg::Bytes` batch (`session.rs`'s `run_worker`) but only fires a
+/// `TermEvent::Wakeup` from its *throttled* snapshot publish
+/// (`FRAME_INTERVAL` = 16ms). Under CI load the worker thread can fall far
+/// enough behind that both the ON (`1049h`) and OFF (`1049l`) writes are
+/// already queued by the time it resumes, and it processes them back to
+/// back inside that same throttle window -- the flag genuinely passes
+/// through `true` for well under the poller's 50ms sampling granularity, so
+/// polling harder or waiting longer doesn't help; the ON state can be
+/// skipped entirely from the observer's point of view. Fixed by having the
+/// child block on `read` after the first write, so the test only unblocks
+/// the second (OFF) write *after* it has already observed the first (ON)
+/// one -- a real happens-before relationship instead of a clock-based gap,
+/// which makes the two writes structurally unable to land in the same
+/// worker batch. Production code is unchanged; this is a test-only fix
+/// (see this file's module doc comment).
 #[test]
 fn alt_screen_active_reflects_decset_1049() {
     let term = Terminal::spawn_with_command(
         40,
         10,
-        Some(r#"printf '\033[?1049h'; sleep 0.3; printf '\033[?1049l'; sleep 0.3"#),
+        Some(r#"printf '\033[?1049h'; read _sync; printf '\033[?1049l'; sleep 0.2"#),
         &[],
     )
     .expect("spawn");
@@ -637,6 +702,9 @@ fn alt_screen_active_reflects_decset_1049() {
         wait_for_alt_screen(&term, TIMEOUT, true),
         "expected alt screen to turn on after DECSET 1049h"
     );
+    // Only unblock the child's second `printf` (DECSET 1049l) once the ON
+    // state was actually observed -- see the doc comment above.
+    term.write_input(b"\n");
     assert!(
         wait_for_alt_screen(&term, TIMEOUT, false),
         "expected alt screen to turn back off after DECSET 1049l"
@@ -650,12 +718,16 @@ fn alt_screen_active_reflects_decset_1049() {
 /// query `labolabo-app`'s wheel handler uses to decide whether an
 /// alt-screen scroll gesture (when mouse reporting is off) should convert
 /// to cursor-key sequences at all.
+///
+/// Same "block on `read` between writes" hardening as [`wait_for_alt_screen`]
+/// -- without it, a worker thread that falls behind could process the OFF
+/// and back-ON writes together and never expose the intermediate `false`.
 #[test]
 fn alternate_scroll_defaults_on_and_toggles_via_decset_1007() {
     let term = Terminal::spawn_with_command(
         80,
         24,
-        Some(r#"sleep 0.3; printf '\033[?1007l'; sleep 0.3; printf '\033[?1007h'; sleep 0.3"#),
+        Some(r#"printf '\033[?1007l'; read _sync; printf '\033[?1007h'; sleep 0.2"#),
         &[],
     )
     .expect("spawn");
@@ -667,6 +739,7 @@ fn alternate_scroll_defaults_on_and_toggles_via_decset_1007() {
         wait_for_alternate_scroll(&term, TIMEOUT, false),
         "expected alternate scroll to turn off after DECSET 1007l"
     );
+    term.write_input(b"\n");
     assert!(
         wait_for_alternate_scroll(&term, TIMEOUT, true),
         "expected alternate scroll to turn back on after DECSET 1007h"
@@ -737,12 +810,17 @@ fn title_reflects_osc_sequence_split_across_writes() {
 }
 
 /// A second OSC title sequence replaces the first (not appended/ignored).
+///
+/// Same "block on `read` between writes" hardening as [`wait_for_alt_screen`]
+/// -- without it, a worker thread that falls behind could process both OSC
+/// writes together and the mirrored title would jump straight from `None`
+/// to `"Second"`, so `wait_for_title(.., "First")` would never observe it.
 #[test]
 fn title_updates_on_second_osc_sequence() {
     let term = Terminal::spawn_with_command(
         80,
         24,
-        Some(r#"printf '\033]2;First\007'; sleep 0.3; printf '\033]2;Second\007'; sleep 0.3"#),
+        Some(r#"printf '\033]2;First\007'; read _sync; printf '\033]2;Second\007'; sleep 0.2"#),
         &[],
     )
     .expect("spawn");
@@ -751,6 +829,7 @@ fn title_updates_on_second_osc_sequence() {
         "expected title 'First' after the first OSC 2, got {:?}",
         term.title()
     );
+    term.write_input(b"\n");
     assert!(
         wait_for_title(&term, TIMEOUT, |t| t.as_deref() == Some("Second")),
         "expected title 'Second' after the second OSC 2, got {:?}",
