@@ -42,14 +42,42 @@ use futures::channel::mpsc;
 use futures::StreamExt;
 use gpui::{Context, Task as GpuiTask};
 
-use labolabo_core::{hook_command, merge_hooks, socket_path_from_uuid};
+#[cfg(windows)]
+use labolabo_core::hook_pipe_name_from_uuid;
+#[cfg(not(windows))]
+use labolabo_core::socket_path_from_uuid;
+use labolabo_core::{hook_command, merge_hooks};
 use labolabo_core::{AgentStatusBus, AgentStatusEvent, PaneId};
 
 use crate::app::LaboLaboApp;
 
-/// Base directory for the app's hooks socket (docs/hooks-protocol.md §4:
-/// `/tmp/labolabo`, 0700, created by [`AgentStatusBus`] itself on `start()`).
+/// Base directory for the app's hooks socket on unix (docs/hooks-protocol.md
+/// §4: `/tmp/labolabo`, 0700, created by [`AgentStatusBus`] itself on
+/// `start()`). **Unix-only** -- Windows has no analogous "socket file on
+/// disk" concept; see [`mint_socket_path`] below.
+#[cfg(not(windows))]
 const SOCKET_BASE_DIR: &str = "/tmp/labolabo";
+
+/// Mints this process's hooks socket identity, platform-appropriate: an
+/// AF_UNIX path under [`SOCKET_BASE_DIR`] on unix, or a `\\.\pipe\...` Named
+/// Pipe name (`labolabo_core::hook_pipe_name_from_uuid`,
+/// docs/hooks-protocol.md §4.2) on Windows -- **not** a filesystem path
+/// there, since Named Pipe names live in their own kernel object namespace,
+/// not under any directory. Both are handed to `AgentStatusBus::new` through
+/// the same `socket_path` slot (`labolabo_core::hooks`'s Windows
+/// `NamedPipeEventTransport` doc comment: "the pipe name *is* the
+/// socketPath value on Windows"), so every caller of this function stays
+/// platform-agnostic past this one point.
+fn mint_socket_path(uuid: &str) -> String {
+    #[cfg(windows)]
+    {
+        hook_pipe_name_from_uuid(uuid)
+    }
+    #[cfg(not(windows))]
+    {
+        socket_path_from_uuid(uuid, SOCKET_BASE_DIR)
+    }
+}
 
 /// Where an incoming event's `labolabo_pane_id` routes to.
 #[derive(Debug, Clone)]
@@ -104,7 +132,7 @@ impl HookRuntime {
     /// function), matching `task_workspace::spawn_redraw_bridge`'s split.
     pub fn new() -> (Self, mpsc::UnboundedReceiver<AgentStatusEvent>) {
         let socket_uuid = uuid::Uuid::new_v4().to_string();
-        Self::new_at(socket_path_from_uuid(&socket_uuid, SOCKET_BASE_DIR))
+        Self::new_at(mint_socket_path(&socket_uuid))
     }
 
     /// [`HookRuntime::new`]'s whole construction, parameterized on the
@@ -291,10 +319,16 @@ impl HookRuntime {
 /// only ever ran `cargo run -p labolabo-app` without also building
 /// `labolabo-core`'s bin target will see hooks injection skipped, with the
 /// warning [`HookRuntime::new`] prints explaining why.
+///
+/// `std::env::consts::EXE_SUFFIX` (portable: `""` on unix, `".exe"` on
+/// Windows) so the candidate filename matches what `cargo build` actually
+/// produces on each platform -- without it, this always misses on Windows
+/// (`labolabo-hook` vs. the real `labolabo-hook.exe`), silently skipping
+/// hooks injection on every Windows run.
 fn resolve_hook_binary() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
-    let candidate = dir.join("labolabo-hook");
+    let candidate = dir.join(format!("labolabo-hook{}", std::env::consts::EXE_SUFFIX));
     candidate.exists().then_some(candidate)
 }
 
@@ -393,13 +427,18 @@ mod tests {
     /// porting brief's suggested reference point.
     ///
     /// Uses a socket under the OS temp dir (removed at the end) rather than
-    /// the production [`SOCKET_BASE_DIR`], so `cargo test` runs don't leave
-    /// stale socket files in the real `/tmp/labolabo` -- see `new_at`'s doc
-    /// comment. Path kept short: `sockaddr_un`'s `sun_path` is only 104
-    /// (Darwin) / 108 (Linux) bytes (same constraint `labolabo-core`'s own
-    /// socket tests document).
+    /// the production `SOCKET_BASE_DIR` (unix) / a `\\.\pipe\...` name
+    /// (Windows, `hook_pipe_name_from_uuid`'s own uuid-derived token -- no
+    /// filesystem path to keep out of a shared directory), so `cargo test`
+    /// runs don't leave stale socket files in the real `/tmp/labolabo` --
+    /// see `new_at`'s doc comment. Unix path kept short: `sockaddr_un`'s
+    /// `sun_path` is only 104 (Darwin) / 108 (Linux) bytes (same constraint
+    /// `labolabo-core`'s own socket tests document).
     #[test]
     fn hook_runtime_receives_a_real_socket_event_and_resolves_its_route() {
+        #[cfg(windows)]
+        let socket_path = hook_pipe_name_from_uuid(&uuid::Uuid::new_v4().to_string());
+        #[cfg(not(windows))]
         let socket_path = std::env::temp_dir()
             .join(format!("lb-hr-{}.sock", std::process::id()))
             .to_string_lossy()

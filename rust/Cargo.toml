@@ -3,10 +3,12 @@ resolver = "2"
 members = ["crates/labolabo-core", "crates/labolabo-term", "crates/labolabo-app"]
 # `labolabo-app` (gpui) is deliberately excluded from the default set: a
 # plain `cargo test`/`cargo build`/`cargo clippy` at the workspace root must
-# not pull in gpui (a heavy, macOS/Linux-desktop-only UI dependency), so the
-# existing `rust` CI job's runtime stays what it was before wave 5a. Build
-# labolabo-app explicitly with `-p labolabo-app` (see the `rust-app` CI job
-# and `crates/labolabo-app/README.md`).
+# not pull in gpui (a heavy desktop-UI dependency -- tri-platform as of the
+# Windows app wave, but still not something the fast/light `rust` job at the
+# workspace root should build), so the existing `rust` CI job's runtime
+# stays what it was before wave 5a. Build labolabo-app explicitly with
+# `-p labolabo-app` (see the `rust-app`/`rust-app-linux`/`rust-app-windows`
+# CI jobs and `crates/labolabo-app/README.md`).
 default-members = ["crates/labolabo-core", "crates/labolabo-term"]
 
 [workspace.package]

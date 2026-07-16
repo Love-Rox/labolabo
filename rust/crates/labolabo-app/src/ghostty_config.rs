@@ -395,6 +395,13 @@ fn is_loadable_root(path: &Path) -> bool {
 /// The default config file paths in Ghostty's load order (later files win).
 /// Pure: `home` and `xdg_config_home` are parameters, and no existence
 /// filtering happens here -- the loader skips what it can't load.
+///
+/// `#[cfg_attr(target_os = "windows", allow(dead_code))]`: only
+/// `load_user_font_config`/`load_user_color_config`'s non-Windows arm calls
+/// this (Windows uses [`windows_config_paths`] instead) -- same
+/// dead-code-avoidance idiom `ide_open.rs` uses for its macOS-only helpers,
+/// needed to keep `-D warnings` green on the `rust-app-windows` CI job.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 pub fn default_config_paths(
     home: &Path,
     xdg_config_home: Option<&Path>,
@@ -414,6 +421,31 @@ pub fn default_config_paths(
         paths.push(dir.join("config.ghostty"));
     }
     paths
+}
+
+/// The Windows counterpart of [`default_config_paths`]: `%APPDATA%\ghostty\
+/// config` then `\config.ghostty` (later wins, same two-filename convention
+/// as the unix XDG search).
+///
+/// **Best-effort, unverified against a real upstream Windows Ghostty**:
+/// Ghostty itself does not ship an official Windows build as of this
+/// writing (macOS/Linux only), so there is no documented "where does
+/// Ghostty look for its config on Windows" spec to port faithfully the way
+/// [`default_config_paths`] ports Ghostty's real `Config.loadDefaultFiles`
+/// (see the module doc comment). `%APPDATA%` (`Library/Application Support`'s
+/// Windows analog -- the per-user roaming-profile settings directory every
+/// native Windows app uses) is a reasonable, XDG-equivalent guess for where
+/// a hypothetical Windows Ghostty *would* put it, not a confirmed one; a
+/// user who manually places a config file there (e.g. anticipating a future
+/// official Windows build, or running Ghostty under WSL with a Windows-side
+/// copy) gets it picked up, but this is unproven, not "the same faithful
+/// port" claim the unix paths carry. Pure, so it's unit-tested the same way
+/// as `default_config_paths` despite the lower confidence in its target
+/// paths.
+#[cfg(target_os = "windows")]
+pub fn windows_config_paths(appdata: &Path) -> Vec<PathBuf> {
+    let dir = appdata.join("ghostty");
+    vec![dir.join("config"), dir.join("config.ghostty")]
 }
 
 /// Read one config file's bytes as (lossy) UTF-8 with any leading BOM
@@ -575,14 +607,48 @@ pub fn extract_font_config(roots: &[PathBuf], home: &Path) -> FontConfig {
 
 /// Read the real user's Ghostty font configuration: `$HOME` /
 /// `$XDG_CONFIG_HOME` discovery, macOS Application Support included on
-/// macOS. Missing config files (or no `$HOME` at all) just mean defaults.
+/// macOS, `%APPDATA%\ghostty` on Windows (see [`windows_config_paths`] --
+/// best-effort, unverified). Missing config files (or no home directory
+/// resolvable at all) just mean defaults.
 pub fn load_user_font_config() -> FontConfig {
-    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
-        return FontConfig::default();
-    };
-    let xdg = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from);
-    let roots = default_config_paths(&home, xdg.as_deref(), cfg!(target_os = "macos"));
-    extract_font_config(&roots, &home)
+    #[cfg(target_os = "windows")]
+    {
+        let Some((roots, home)) = windows_roots_and_home() else {
+            return FontConfig::default();
+        };
+        extract_font_config(&roots, &home)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+            return FontConfig::default();
+        };
+        let xdg = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from);
+        let roots = default_config_paths(&home, xdg.as_deref(), cfg!(target_os = "macos"));
+        extract_font_config(&roots, &home)
+    }
+}
+
+/// Windows-only: `%APPDATA%`-rooted config search paths plus a "home"
+/// directory for `config-file` include resolution (relative-path/`~/`
+/// handling in `extract_config`/`resolve_include_path` -- see the module
+/// doc comment's "config-file includes"). `%USERPROFILE%` is the Windows
+/// analog of unix `$HOME` for this purpose (falls back to `%APPDATA%`
+/// itself, which is always some subdirectory of the real user profile, if
+/// `USERPROFILE` is somehow unset -- keeps this a total function over "no
+/// home directory resolvable at all" rather than two independently-missing
+/// env vars each needing their own bail-out). `None` only when `%APPDATA%`
+/// itself is unset, which does not happen on a real Windows session (every
+/// interactive user has one) but could on a stripped-down CI/service
+/// context -- same "just mean defaults" fallback the unix `$HOME`-unset
+/// case already has.
+#[cfg(target_os = "windows")]
+fn windows_roots_and_home() -> Option<(Vec<PathBuf>, PathBuf)> {
+    let appdata = std::env::var_os("APPDATA").map(PathBuf::from)?;
+    let home = std::env::var_os("USERPROFILE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| appdata.clone());
+    Some((windows_config_paths(&appdata), home))
 }
 
 // --- colors: theme resolution + merge --------------------------------------
@@ -723,22 +789,35 @@ pub fn extract_color_config(
 /// `foreground`/`cursor-color`/`palette`, plus `theme` resolution): same
 /// file discovery as `load_user_font_config`, plus a best-effort macOS
 /// resources-dir guess for themes (see the module doc comment's "Theme
-/// resolution"). Missing config/theme files (or no `$HOME` at all) just
-/// mean `ColorScheme::default()` -- every backend's own built-in colors.
+/// resolution"). Missing config/theme files (or no home directory resolvable
+/// at all) just mean `ColorScheme::default()` -- every backend's own
+/// built-in colors. No bundled-themes-directory guess on Windows (no app
+/// bundle concept to guess a path inside of) -- a Windows user's `theme = `
+/// only ever resolves against their own `ghostty/themes` subdirectory.
 pub fn load_user_color_config() -> ColorScheme {
-    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
-        return ColorScheme::default();
-    };
-    let xdg = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from);
-    let roots = default_config_paths(&home, xdg.as_deref(), cfg!(target_os = "macos"));
-    let resources_themes_dir = cfg!(target_os = "macos")
-        .then(|| PathBuf::from("/Applications/Ghostty.app/Contents/Resources/ghostty/themes"));
-    extract_color_config(
-        &roots,
-        &home,
-        xdg.as_deref(),
-        resources_themes_dir.as_deref(),
-    )
+    #[cfg(target_os = "windows")]
+    {
+        let Some((roots, home)) = windows_roots_and_home() else {
+            return ColorScheme::default();
+        };
+        extract_color_config(&roots, &home, None, None)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+            return ColorScheme::default();
+        };
+        let xdg = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from);
+        let roots = default_config_paths(&home, xdg.as_deref(), cfg!(target_os = "macos"));
+        let resources_themes_dir = cfg!(target_os = "macos")
+            .then(|| PathBuf::from("/Applications/Ghostty.app/Contents/Resources/ghostty/themes"));
+        extract_color_config(
+            &roots,
+            &home,
+            xdg.as_deref(),
+            resources_themes_dir.as_deref(),
+        )
+    }
 }
 
 #[cfg(test)]
@@ -900,6 +979,21 @@ mod tests {
     fn empty_xdg_config_home_is_treated_as_unset() {
         let paths = default_config_paths(Path::new("/home/u"), Some(Path::new("")), false);
         assert_eq!(paths[0], PathBuf::from("/home/u/.config/ghostty/config"));
+    }
+
+    // --- windows_config_paths (Windows only -- see its doc comment) --------
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_paths_are_rooted_at_appdata_ghostty() {
+        let paths = windows_config_paths(Path::new(r"C:\Users\u\AppData\Roaming"));
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from(r"C:\Users\u\AppData\Roaming\ghostty\config"),
+                PathBuf::from(r"C:\Users\u\AppData\Roaming\ghostty\config.ghostty"),
+            ]
+        );
     }
 
     // --- extract_font_config on fixtures ------------------------------------

@@ -166,6 +166,46 @@ jobs:
       - name: cargo test -p labolabo-app
         run: cargo test -p labolabo-app
 
+  # labolabo-app（gpui）の Windows 版（第7波 c）。gpui 0.2 系はネイティブ tri-platform
+  # 対応（Cargo.lock に windows/windows-core/embed-resource 等が既に解決される -- rust/
+  # crates/labolabo-app/README.md の "Windows" 節参照）で、`rust-app`/`rust-app-linux` と
+  # 違いシステムライブラリの追加インストールは不要（Direct3D/DirectWrite/DirectComposition
+  # は Windows 自体に同梱、リンクはすべて windows-sys 経由）。ヘッドレスなユニット/
+  # 結合テストのみ（ウィンドウは開かない）だが、hooks/control の Named Pipe 経路と
+  # labolabo-term の cmd.exe 経由 PTY spawn は実際に OS API を叩く実結合テストなので、
+  # macOS/Linux 版の「純関数のみ」より広いカバレッジがここで初めて Windows 上で実証される。
+  rust-app-windows:
+    name: rust-app-windows (windows-latest)
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: cargo fmt --check
+        run: cargo fmt --check
+      - name: cargo build -p labolabo-app -p labolabo-core
+        # labolabo-core 側の追加で labolabo-hook.exe も一緒にビルドする -- 3 バイナリ
+        # 同居がフック解決（labolabo-app/src/hooks.rs の resolve_hook_binary）の前提
+        # なので、パッケージング（scripts/package-windows.ps1）と同じ組み合わせで
+        # ビルド成立を確認する。
+        run: cargo build -p labolabo-app -p labolabo-core
+      - name: cargo clippy -p labolabo-app
+        run: cargo clippy -p labolabo-app --all-targets -- -D warnings
+      # labolabo-term/labolabo-core（default-members）は上の `rust` ジョブの
+      # windows-latest 枠で既に別途 green -- そこに `rust/crates/labolabo-term/
+      # tests/windows_spawn.rs`（このウェーブで追加した Windows 専用 PTY spawn
+      # テスト）も含まれて実証される。ここは labolabo-app 固有（gpui バイナリ・
+      # hooks/control の Named Pipe 実結合）のみを担う。
+      - name: cargo test -p labolabo-app
+        run: cargo test -p labolabo-app
+
   # labolabo-term の ghostty-vt バックエンド（本命の VT コア＝実 libghostty-vt）を、
   # 実際に Zig 0.16 でベンダビルドしてテストするジョブ。既定バックエンド（alacritty,
   # 上の `rust` ジョブ）が crates.io だけで常に green なのに対し、こちらは外部依存が重く

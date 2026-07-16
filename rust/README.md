@@ -24,8 +24,9 @@ algorithms — from Swift to Rust.
 > **not** in `default-members` (gpui is a heavy desktop-UI dependency this
 > workspace's plain `cargo build`/`test`/`clippy` must not pull in), so build
 > and test it explicitly with `-p labolabo-app`; it has its own CI jobs
-> (`rust-app` on macOS, `rust-app-linux` on ubuntu — the latter added in
-> wave 7a; see the app README's "Linux (wave 7a)" section for system deps,
+> (`rust-app` on macOS, `rust-app-linux` on ubuntu — added in wave 7a —,
+> `rust-app-windows` on windows-latest — added in wave 7c; see the app
+> README's "Linux (wave 7a)"/"Windows (wave 7c)" sections for system deps,
 > packaging, and what is/isn't verified there). See its README for
 > design/scope/TODOs.
 
