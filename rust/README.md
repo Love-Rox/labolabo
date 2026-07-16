@@ -23,8 +23,11 @@ algorithms — from Swift to Rust.
 > keyboard input to a `TermSession`, and drives a minimal tab bar. It is
 > **not** in `default-members` (gpui is a heavy desktop-UI dependency this
 > workspace's plain `cargo build`/`test`/`clippy` must not pull in), so build
-> and test it explicitly with `-p labolabo-app`; it has its own CI job
-> (`rust-app`, macOS-only for now). See its README for design/scope/TODOs.
+> and test it explicitly with `-p labolabo-app`; it has its own CI jobs
+> (`rust-app` on macOS, `rust-app-linux` on ubuntu — the latter added in
+> wave 7a; see the app README's "Linux (wave 7a)" section for system deps,
+> packaging, and what is/isn't verified there). See its README for
+> design/scope/TODOs.
 
 As of wave 4c, "pure-logic" no longer means "no I/O": `store` (ported from
 `LaboLaboStore`) is real, fallible SQLite persistence, not a parser or an
@@ -730,3 +733,13 @@ uploads the resulting `.zip` as a workflow artifact. It's
 **`workflow_dispatch`-only** (no push/PR/release trigger) — the Rust port
 isn't part of the release-please/`release-build.yml` release flow yet;
 that integration is a separate future decision.
+
+Wave 7a added the Linux counterpart: `scripts/package-linux.sh` packages
+the same three binaries into a portable
+`LaboLabo-rs-linux-<version>-<arch>.tar.gz` (flat `bin/` + freedesktop.org
+`.desktop` launcher + per-user `install.sh` + PNG icon reused from the
+Swift app's artwork + README), and `rust-app-bundle.yml`'s `package-linux`
+job runs it on `ubuntu-latest` under the same `workflow_dispatch`-only
+policy. See `crates/labolabo-app/README.md`'s "Linux (wave 7a)" section for
+system dependencies and the verification caveats (built + headless-tested
+in CI; real-desktop GUI launch unverified).

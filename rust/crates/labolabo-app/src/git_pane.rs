@@ -585,7 +585,7 @@ pub fn render_git_pane(
                 .flex_1()
                 .min_h(px(0.0))
                 .overflow_hidden()
-                .child(render_detail(task_id, state, cx)),
+                .child(render_detail(task_id, state, spec, cx)),
         )
         .into_any_element()
 }
@@ -808,6 +808,7 @@ fn render_file_row(
 pub(crate) fn render_detail(
     task_id: &str,
     state: &GitPaneState,
+    spec: &RenderSpec,
     cx: &mut Context<LaboLaboApp>,
 ) -> AnyElement {
     let Some(path) = state.selected_path.clone() else {
@@ -831,8 +832,8 @@ pub(crate) fn render_detail(
                 .min_h(px(0.0))
                 .overflow_hidden()
                 .child(match state.view_mode {
-                    FileViewMode::Diff => render_diff(state.diff.as_ref()),
-                    FileViewMode::Whole => render_whole_text(state.whole_text.as_deref()),
+                    FileViewMode::Diff => render_diff(state.diff.as_ref(), spec),
+                    FileViewMode::Whole => render_whole_text(state.whole_text.as_deref(), spec),
                 }),
         )
         .into_any_element()
@@ -905,7 +906,7 @@ fn render_mode_pill(
         .child(SharedString::from(label))
 }
 
-fn render_diff(diff: Option<&FileDiff>) -> AnyElement {
+fn render_diff(diff: Option<&FileDiff>, spec: &RenderSpec) -> AnyElement {
     let Some(diff) = diff else {
         return placeholder("No diff");
     };
@@ -928,13 +929,23 @@ fn render_diff(diff: Option<&FileDiff>) -> AnyElement {
                 .child(SharedString::from(hunk.header.clone())),
         );
         for line in &hunk.lines {
-            col = col.child(render_diff_line(line));
+            col = col.child(render_diff_line(line, spec));
         }
     }
     col.into_any_element()
 }
 
-fn render_diff_line(line: &DiffLine) -> AnyElement {
+// `spec.font.family` (`crate::render::RenderSpec::resolve`'s already-probed
+// monospace family -- whatever the user's Ghostty `font-family` resolves
+// to, or `RenderSpec`'s own platform fallback) rather than a hardcoded
+// `"Menlo"` literal: Menlo only ships with macOS, so a Linux build with no
+// gpui-visible font named "Menlo" would otherwise silently fall through to
+// gpui's own generic fallback stack (`TextSystem::resolve_font`), which is
+// **not** guaranteed to be monospace (e.g. "Cantarell"/"Noto Sans" on a
+// GNOME/KDE desktop) -- line-number/diff-gutter columns would visibly
+// misalign. Reusing the already-resolved terminal font keeps this pane
+// visually consistent with the terminal grid on every platform.
+fn render_diff_line(line: &DiffLine, spec: &RenderSpec) -> AnyElement {
     let (bg, fg, sign) = match line.kind {
         LineKind::Addition => (Some(ADDITION_BG), ADDITION_FG, "+"),
         LineKind::Deletion => (Some(DELETION_BG), DELETION_FG, "-"),
@@ -947,7 +958,7 @@ fn render_diff_line(line: &DiffLine) -> AnyElement {
         .flex_row()
         .px_2()
         .text_size(px(11.0))
-        .font_family("Menlo");
+        .font_family(spec.font.family.clone());
     if let Some(bg) = bg {
         row = row.bg(rgb(bg));
     }
@@ -993,7 +1004,9 @@ fn render_diff_line(line: &DiffLine) -> AnyElement {
     .into_any_element()
 }
 
-fn render_whole_text(text: Option<&str>) -> AnyElement {
+// See `render_diff_line`'s doc comment for why this reuses `spec.font`
+// instead of hardcoding `"Menlo"`.
+fn render_whole_text(text: Option<&str>, spec: &RenderSpec) -> AnyElement {
     let Some(text) = text else {
         return placeholder("Unavailable");
     };
@@ -1009,7 +1022,7 @@ fn render_whole_text(text: Option<&str>) -> AnyElement {
                 .flex_row()
                 .px_2()
                 .text_size(px(11.0))
-                .font_family("Menlo")
+                .font_family(spec.font.family.clone())
                 .child(
                     div()
                         .w(px(32.0))
