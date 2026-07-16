@@ -59,8 +59,8 @@ use rust_i18n::t;
 #[cfg(target_os = "macos")]
 use crate::app::OpenSelectedInIde;
 use crate::app::{
-    About, CloseTab, Copy, FocusNextPane, FocusPrevPane, ImportFromSwift, LaboLaboApp,
-    MinimizeWindow, NewAttachedTask, NewTab, NewWorktreeTask, OpenGitCommitsPane, OpenGitDiffPane,
+    About, CloseTab, Copy, FocusNextPane, FocusPrevPane, LaboLaboApp, MinimizeWindow,
+    NewAttachedTask, NewTab, NewWorktreeTask, OpenGitCommitsPane, OpenGitDiffPane,
     OpenGitFilesPane, Paste, Quit, SplitDown, SplitRight, ToggleGitPane, ToggleSettings,
     ZoomWindow,
 };
@@ -193,14 +193,6 @@ fn file_menu_items(locale: &str) -> Vec<MenuItem> {
         MenuItem::action(
             t!("menu.file.new_worktree_task", locale = locale).to_string(),
             NewWorktreeTask,
-        ),
-        MenuItem::separator(),
-        // Swift 版インポータ (`crate::swift_import`, `plans` W6e §3 のトリ
-        // ガー②): 起動時の自動インポート(①)とは別に、いつでも手動で再実行
-        // できる入口。同じ重複スキップ規則を使う。
-        MenuItem::action(
-            t!("menu.file.import_from_swift", locale = locale).to_string(),
-            ImportFromSwift,
         ),
     ];
     #[cfg(target_os = "macos")]
@@ -396,7 +388,9 @@ mod tests {
         let names = item_names(&menus[1]);
         assert_eq!(names[0], "新しい作業（フォルダ直付け）…");
         assert_eq!(names[1], "新しい作業（worktree を作成）…");
-        assert!(names.contains(&"Swift 版からインポート…".to_string()));
+        // 第8波d: Swift 版インポートはメニューから削除 -- 起動時の確認
+        // プロンプト (`crate::import_prompt`) だけがトリガーになった。
+        assert!(!names.contains(&"Swift 版からインポート…".to_string()));
         #[cfg(target_os = "macos")]
         assert!(names.contains(&"選択中の作業を IDE で開く".to_string()));
         #[cfg(not(target_os = "macos"))]
@@ -411,7 +405,7 @@ mod tests {
         let names = item_names(&menus[1]);
         assert_eq!(names[0], "New Task (Attach Folder)…");
         assert_eq!(names[1], "New Task (Create Worktree)…");
-        assert!(names.contains(&"Import from Swift App…".to_string()));
+        assert!(!names.contains(&"Import from Swift App…".to_string()));
         #[cfg(target_os = "macos")]
         assert!(names.contains(&"Open Selected Task in IDE".to_string()));
         assert_eq!(names[names.len() - 2], "New Tab");

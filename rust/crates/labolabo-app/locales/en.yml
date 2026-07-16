@@ -9,7 +9,6 @@ menu:
     title: "File"
     new_attached_task: "New Task (Attach Folder)…"
     new_worktree_task: "New Task (Create Worktree)…"
-    import_from_swift: "Import from Swift App…"
     open_selected_in_ide: "Open Selected Task in IDE"
     new_tab: "New Tab"
     close_tab: "Close Tab"
@@ -157,3 +156,15 @@ app:
 
 common:
   close: "Close"
+
+# Wave 8d: the first-launch Swift-import confirmation prompt
+# (`crate::import_prompt`). Appended at the end of the file -- keeps the
+# merge-conflict surface small against other agents editing this file
+# concurrently (sidebar.rs/task_workspace.rs-area locale additions), rather
+# than inserting into the middle of an existing block.
+import_prompt:
+  title: "Swift app data found"
+  body: "Import its tasks and layout?"
+  once_notice: "This confirmation only appears once."
+  accept: "Import"
+  decline: "Don't Import"

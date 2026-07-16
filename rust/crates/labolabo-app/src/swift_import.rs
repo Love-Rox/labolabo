@@ -5,10 +5,23 @@
 //! `labolabo.db`, persists whatever Tasks come back (`TaskDatabase::
 //! upsert_task`), appends them to the caller's in-memory `tasks` list, and
 //! formats the one-line result banner (`plans` W6e's "結果（n 件取込/スキッ
-//! プ/警告）をサイドバー上部に一行表示（閉じられる）"). Both of `app.rs`'s
-//! two triggers — automatic on first launch (`LaboLaboApp::new`, only when
-//! `tasks`/`archived_tasks` are both empty) and the manual "ファイル >
-//! Swift 版からインポート…" menu item (`ImportFromSwift`) — call [`run`].
+//! プ/警告）をサイドバー上部に一行表示（閉じられる）").
+//!
+//! ## Trigger (第8波d: confirm-first, one-shot)
+//!
+//! W6e originally ran [`run`] automatically, with no confirmation, on a
+//! genuinely fresh install, plus offered a manual "ファイル > Swift 版から
+//! インポート…" menu item to re-run it any time. Both are gone: the sole
+//! remaining trigger is [`crate::import_prompt`]'s first-launch confirmation
+//! overlay ("Swift 版のデータが見つかりました。作業とレイアウトを取り込みま
+//! すか？") — `LaboLaboApp::accept_swift_import_prompt` calls [`run`] when
+//! the user picks 取り込む, and the prompt never asks twice
+//! (`TaskDatabase::swift_import_prompt_answered`) — see `crate::
+//! import_prompt`'s module doc comment for the full "when to ask" state
+//! machine. [`swift_db_exists`] is that gate's third input (alongside "no
+//! Tasks yet" and "never answered"); it's exposed here rather than
+//! duplicated because it must agree exactly with what [`run`] itself would
+//! find.
 //!
 //! No `#[cfg(target_os = "macos")]` gate here: `labolabo_core::
 //! SessionDatabase::default_path()` already resolves to a per-OS path Swift
@@ -70,6 +83,16 @@ pub fn run(
     existing_directories: &HashSet<String>,
 ) -> Option<Result<ImportRunSummary, String>> {
     run_against(&swift_db_path(), db, tasks, existing_directories)
+}
+
+/// Whether the Swift app's `labolabo.db` is actually present at
+/// [`swift_db_path`] -- the exact same check [`run`]/[`run_against`] make
+/// before doing anything else, exposed so `crate::import_prompt::
+/// should_show_import_prompt`'s startup gate can ask the same question
+/// without duplicating (and risking drifting from) [`run`]'s own file-
+/// existence check.
+pub fn swift_db_exists() -> bool {
+    swift_db_path().is_file()
 }
 
 /// The Swift database path [`run`] reads. `LABOLABO_SWIFT_DB_PATH` (set and
@@ -149,14 +172,6 @@ fn run_against(
     }
 }
 
-/// Whether `summary` is worth showing a banner for at all — a Swift
-/// database that exists but is simply empty (0 imported, 0 skipped, no
-/// warnings; e.g. a fresh Swift install that never opened a session) has
-/// nothing informative to say.
-pub fn is_notable(summary: &ImportRunSummary) -> bool {
-    summary.imported > 0 || summary.skipped_duplicate > 0 || !summary.warnings.is_empty()
-}
-
 /// The sidebar banner's one-line text (`plans` W6e's "n 件取込/スキップ/
 /// 警告"). Warning *counts* only, not the full text — the full messages
 /// (worktree/session ids, JSON parse errors) are logged to stderr by
@@ -179,6 +194,24 @@ pub fn format_banner(summary: &ImportRunSummary) -> String {
         ));
     }
     text
+}
+
+/// Developer escape hatch (`rust/README.md`'s "Importing from the Swift
+/// app" section): `LABOLABO_FORCE_IMPORT_PROMPT=1` makes `crate::
+/// import_prompt::should_show_import_prompt`'s caller treat the persisted
+/// `TaskDatabase::swift_import_prompt_answered` flag as unset, so the
+/// confirmation prompt can be re-tested without deleting `tasks.db`
+/// entirely (the primary, non-dev escape hatch). Does **not** bypass the
+/// other two gate conditions (no Tasks yet, a Swift database present) --
+/// this only ever ignores the "already answered" bit. Same env-reading-
+/// wrapper-around-a-pure-helper shape as `update_check::
+/// update_check_disabled`.
+pub fn force_import_prompt() -> bool {
+    force_import_prompt_from(std::env::var("LABOLABO_FORCE_IMPORT_PROMPT").ok())
+}
+
+fn force_import_prompt_from(value: Option<String>) -> bool {
+    value.as_deref() == Some("1")
 }
 
 #[cfg(test)]
@@ -322,30 +355,6 @@ mod tests {
     }
 
     #[test]
-    fn is_notable_is_false_only_for_a_fully_empty_summary() {
-        assert!(!is_notable(&ImportRunSummary {
-            imported: 0,
-            skipped_duplicate: 0,
-            warnings: Vec::new(),
-        }));
-        assert!(is_notable(&ImportRunSummary {
-            imported: 1,
-            skipped_duplicate: 0,
-            warnings: Vec::new(),
-        }));
-        assert!(is_notable(&ImportRunSummary {
-            imported: 0,
-            skipped_duplicate: 1,
-            warnings: Vec::new(),
-        }));
-        assert!(is_notable(&ImportRunSummary {
-            imported: 0,
-            skipped_duplicate: 0,
-            warnings: vec!["warn".to_string()],
-        }));
-    }
-
-    #[test]
     fn format_banner_includes_skip_and_warning_counts() {
         let text = format_banner(&ImportRunSummary {
             imported: 3,
@@ -355,5 +364,14 @@ mod tests {
         assert!(text.contains('3'));
         assert!(text.contains('2'));
         assert!(text.contains('1'));
+    }
+
+    #[test]
+    fn force_import_prompt_requires_exactly_the_string_1() {
+        assert!(force_import_prompt_from(Some("1".to_string())));
+        assert!(!force_import_prompt_from(Some("0".to_string())));
+        assert!(!force_import_prompt_from(Some("true".to_string())));
+        assert!(!force_import_prompt_from(Some(String::new())));
+        assert!(!force_import_prompt_from(None));
     }
 }

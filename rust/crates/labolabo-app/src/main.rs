@@ -30,6 +30,7 @@ mod hooks;
 mod i18n;
 mod ide_open;
 mod ime;
+mod import_prompt;
 mod keys;
 mod menus;
 mod missing_dir;

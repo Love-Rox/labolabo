@@ -78,6 +78,7 @@ use crate::hooks::{self, HookRuntime};
 use crate::i18n::LocaleSetting;
 use crate::ide_open;
 use crate::ime;
+use crate::import_prompt;
 use crate::keys::keystroke_to_bytes;
 use crate::menus;
 use crate::missing_dir;
@@ -153,11 +154,6 @@ actions!(
         OpenGitFilesPane,
         OpenGitDiffPane,
         OpenGitCommitsPane,
-        // Swift-app importer (`crate::swift_import`, `plans` W6e): manual
-        // "ファイル > Swift 版からインポート…" trigger. The automatic
-        // first-launch trigger (`LaboLaboApp::new`) has no action/menu item
-        // of its own -- it just runs inline at startup.
-        ImportFromSwift,
     ]
 );
 
@@ -264,12 +260,22 @@ pub struct LaboLaboApp {
     bounds_save_generation: u64,
     /// 直近の（まだ保存されていない）ウィンドウ bounds。
     pending_window_bounds: Option<Bounds<Pixels>>,
-    /// Swift 版インポータ (`crate::swift_import`, `plans` W6e) の直近の結果
-    /// 一行バナー -- サイドバー上部に表示し、ユーザーが閉じるまで残る
-    /// （`new_task_error` と違い、次の操作で自動クリアはしない）。起動時の
-    /// 自動インポート・「ファイル > Swift 版からインポート…」のどちらも
-    /// ここへ書く。
+    /// Swift 版インポータ (`crate::swift_import`, `crate::import_prompt`,
+    /// 第8波d で W6e から確認ダイアログ方式へ変更) の直近の結果一行バナー
+    /// -- サイドバー上部に表示し、ユーザーが閉じるまで残る（`new_task_error`
+    /// と違い、次の操作で自動クリアはしない）。起動時の確認プロンプトで
+    /// 「取り込む」を選んだときだけここへ書く（「取り込まない」はバナーを
+    /// 出さない -- 報告すべき結果が無いため）。
     import_banner: Option<String>,
+    /// 起動時の Swift 版インポート確認プロンプト (`crate::import_prompt`,
+    /// 第8波d) が開いているか -- `settings_open`/`about_open` と同じ
+    /// 「開いている間だけオーバーレイの子が存在する」純粋な UI 状態。
+    /// `LaboLaboApp::new` が [`import_prompt::should_show_import_prompt`]
+    /// の結果で初期化し、`accept_swift_import_prompt`/
+    /// `decline_swift_import_prompt` のどちらかが必ず `false` に戻す（この
+    /// フィールド自体は「一度でも答えたか」を憶えない -- それは
+    /// `TaskDatabase::swift_import_prompt_answered` の役目）。
+    import_prompt_open: bool,
     /// アップデート確認 (`crate::update_check`, RC release wave) の結果 --
     /// 起動時のバックグラウンドチェックが新しいバージョンを見つけたら
     /// `Some` になり、サイドバーにバナーを出す。`None` = 未検出/確認中/
@@ -352,26 +358,22 @@ impl LaboLaboApp {
             }
         }
 
-        // Swift-app importer (`crate::swift_import`, `plans` W6e §3's
-        // trigger ①): only on a genuinely fresh install (no Task at all,
-        // active or archived yet -- restoring an already-populated sidebar
-        // never auto-imports, matching the brief's "初回起動" scoping).
-        // Runs before `selected_task_id` below so a freshly imported Task
-        // can become the initial selection like any other restored Task.
-        let mut import_banner: Option<String> = None;
-        if tasks.is_empty() && archived_tasks.is_empty() {
-            match swift_import::run(&db, &mut tasks, &HashSet::new()) {
-                Some(Ok(summary)) if swift_import::is_notable(&summary) => {
-                    import_banner = Some(swift_import::format_banner(&summary));
-                }
-                Some(Ok(_)) => {} // Swift db existed but had nothing worth reporting.
-                Some(Err(message)) => {
-                    eprintln!("labolabo-app: {message}");
-                    import_banner = Some(message);
-                }
-                None => {} // No Swift database on this machine -- nothing to do.
-            }
-        }
+        // Swift-app importer (`crate::swift_import`, `crate::import_prompt`,
+        // 第8波d): W6e's confirmation-less auto-import is gone -- this now
+        // only decides whether to show the first-launch confirmation prompt
+        // (`import_prompt::should_show_import_prompt`'s three-gate state
+        // machine: no Task at all yet, a Swift `labolabo.db` present, and
+        // the prompt never answered before -- see that function's doc
+        // comment). Nothing runs here; `swift_import::run` only happens
+        // later, from `accept_swift_import_prompt`, if and when the user
+        // actually picks 取り込む.
+        let import_banner: Option<String> = None;
+        let import_prompt_open = import_prompt::should_show_import_prompt(
+            !tasks.is_empty() || !archived_tasks.is_empty(),
+            swift_import::swift_db_exists(),
+            db.swift_import_prompt_answered().unwrap_or(false)
+                && !swift_import::force_import_prompt(),
+        );
 
         let selected_task_id = db
             .selected_task_id()
@@ -494,6 +496,7 @@ impl LaboLaboApp {
             import_banner,
             missing_task_ids: HashSet::new(),
             missing_banner_dismissed: false,
+            import_prompt_open,
         };
 
         if let Some(id) = selected_task_id {
@@ -817,14 +820,24 @@ impl LaboLaboApp {
         .detach();
     }
 
-    /// "ファイル > Swift 版からインポート…" (`ImportFromSwift`): runs
-    /// `swift_import::run` on demand, any time (unlike the automatic
-    /// first-launch trigger in `Self::new`, which only fires once on a
-    /// genuinely empty sidebar) -- so this always builds the full
-    /// existing-directories set (active + archived Tasks) for the
-    /// duplicate-skip rule, and always leaves a banner behind (including
-    /// "no Swift database found", which the silent auto-trigger swallows).
-    pub(crate) fn import_from_swift_menu(&mut self, cx: &mut Context<Self>) {
+    /// Whether the first-launch Swift-import confirmation prompt
+    /// (`crate::import_prompt`, 第8波d) is currently open.
+    pub(crate) fn import_prompt_open(&self) -> bool {
+        self.import_prompt_open
+    }
+
+    /// 「取り込む」on the Swift-import confirmation prompt
+    /// (`crate::import_prompt::render_import_prompt_overlay`): runs
+    /// `swift_import::run` (building the full existing-directories set --
+    /// active + archived Tasks, same duplicate-skip rule W6e's manual menu
+    /// trigger used, even though the prompt only ever shows when both are
+    /// empty) and always leaves a banner behind, including "no Swift
+    /// database found" -- unreachable in practice here since the prompt
+    /// itself is gated on `swift_import::swift_db_exists()`, but kept for
+    /// symmetry with what this helper does when called from anywhere else a
+    /// database could in principle have vanished between the gate check and
+    /// the click.
+    pub(crate) fn accept_swift_import_prompt(&mut self, cx: &mut Context<Self>) {
         let existing_directories: HashSet<String> = self
             .tasks
             .iter()
@@ -838,6 +851,26 @@ impl LaboLaboApp {
                 None => t!("app.swift_import_db_not_found").to_string(),
             },
         );
+        self.finish_swift_import_prompt(cx);
+    }
+
+    /// 「取り込まない」: no import runs, no banner appears (nothing to
+    /// report) -- just records the answer so the prompt never asks again.
+    pub(crate) fn decline_swift_import_prompt(&mut self, cx: &mut Context<Self>) {
+        self.finish_swift_import_prompt(cx);
+    }
+
+    /// Shared tail of both prompt buttons: close the overlay and persist
+    /// the one-shot "answered" flag (`TaskDatabase::
+    /// set_swift_import_prompt_answered`) so
+    /// `import_prompt::should_show_import_prompt` never returns `true`
+    /// again for this database (short of the `rust/README.md`-documented
+    /// escape hatches).
+    fn finish_swift_import_prompt(&mut self, cx: &mut Context<Self>) {
+        self.import_prompt_open = false;
+        if let Err(err) = self.db.set_swift_import_prompt_answered(true) {
+            eprintln!("labolabo-app: failed to persist swiftImportPromptAnswered: {err}");
+        }
         cx.notify();
     }
 
@@ -3497,18 +3530,6 @@ impl LaboLaboApp {
         }
     }
 
-    /// 「ファイル → Swift 版からインポート…」(`ImportFromSwift`, `crate::
-    /// swift_import`) -- `Self::import_from_swift_menu` へ委譲するだけの
-    /// アクションハンドラ（他の `action_*` と同じ薄い配線パターン）。
-    fn action_import_from_swift(
-        &mut self,
-        _: &ImportFromSwift,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.import_from_swift_menu(cx);
-    }
-
     pub(crate) fn close_settings(&mut self, cx: &mut Context<Self>) {
         if !self.settings_open {
             return;
@@ -3999,6 +4020,9 @@ impl Render for LaboLaboApp {
         // オーバーレイ。
         let task_menu_el = task_menu::render_task_menu_overlay(self, window, cx);
         let about_el = menus::render_about_overlay(self, cx);
+        // 起動時の Swift 版インポート確認プロンプト (`crate::import_prompt`,
+        // 第8波d) -- 同じく「開いている間だけ子が存在する」オーバーレイ。
+        let import_prompt_el = import_prompt::render_import_prompt_overlay(self, cx);
 
         div()
             .track_focus(&self.focus_handle)
@@ -4031,7 +4055,6 @@ impl Render for LaboLaboApp {
             .on_action(cx.listener(Self::action_minimize_window))
             .on_action(cx.listener(Self::action_zoom_window))
             .on_action(cx.listener(Self::action_open_selected_in_ide))
-            .on_action(cx.listener(Self::action_import_from_swift))
             .relative()
             .flex()
             .flex_row()
@@ -4043,6 +4066,7 @@ impl Render for LaboLaboApp {
             .children(settings_el)
             .children(task_menu_el)
             .children(about_el)
+            .children(import_prompt_el)
     }
 }
 
