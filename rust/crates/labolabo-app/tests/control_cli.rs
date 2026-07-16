@@ -2,11 +2,12 @@
 //! (`src/bin/labolabo.rs`): spawns the real compiled binary as a
 //! subprocess -- feeding it argv/env exactly as a human or an agent would
 //! (docs/control-protocol.md §4/§8) -- against a real
-//! `labolabo_core::control::ControlServer` bound to a real AF_UNIX socket,
-//! with a stub handler standing in for `LaboLaboApp::dispatch_control`
-//! (parses the request with the real `control_protocol` pure logic and
-//! replies with a canned `ControlResponse`, but performs no gpui/Task
-//! mutation).
+//! `labolabo_core::control::ControlServer` bound to a real AF_UNIX socket
+//! (a real Named Pipe on Windows -- docs/control-protocol.md §9; same
+//! per-OS transport split every `ControlServer` user has), with a stub
+//! handler standing in for `LaboLaboApp::dispatch_control` (parses the
+//! request with the real `control_protocol` pure logic and replies with a
+//! canned `ControlResponse`, but performs no gpui/Task mutation).
 //!
 //! Mirrors `labolabo-core`'s `tests/labolabo_hook_bin.rs`: that is the wave
 //! 4b/5c precedent for "run the actual compiled binary as a subprocess,
@@ -24,13 +25,28 @@ use std::sync::mpsc;
 use labolabo_core::control::ControlServer;
 use labolabo_core::{parse_request, ControlCommand, ControlRequest, ControlResponse};
 
+/// A fresh, unique socket identity for one test's [`ControlServer`] --
+/// platform-appropriate, the same split `labolabo-app`'s production
+/// `control::mint_socket_path` makes: an AF_UNIX path under the OS temp dir
+/// on unix, a `\\.\pipe\...` Named Pipe *name* on Windows (pipe names live
+/// in their own kernel namespace, not the filesystem -- a temp-dir path
+/// here would make the Windows `ControlServer` fail to bind at all, which
+/// is exactly what happened when the `rust-app-windows` CI job first ran
+/// this file).
 fn temp_socket_path(label: &str) -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir()
-        .join(format!("lb-cli-{label}-{}-{n}.sock", std::process::id()))
-        .to_string_lossy()
-        .into_owned()
+    #[cfg(windows)]
+    {
+        format!(r"\\.\pipe\lb-cli-{label}-{}-{n}", std::process::id())
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::temp_dir()
+            .join(format!("lb-cli-{label}-{}-{n}.sock", std::process::id()))
+            .to_string_lossy()
+            .into_owned()
+    }
 }
 
 /// Starts a real `ControlServer` on a scratch socket whose handler parses
@@ -40,6 +56,21 @@ fn temp_socket_path(label: &str) -> String {
 /// included), and replies with whatever `respond` computes for that
 /// request. Returns the socket path and the server (kept alive for the
 /// caller to `stop()` when done).
+///
+/// **Blocks until the server is actually reachable** before returning:
+/// `ControlServer::start()` only spawns the accept-loop thread -- the bind
+/// happens asynchronously on that thread, and the CLI subprocess these
+/// tests spawn does a single connect with no retry (a deliberate CLI
+/// design: a human's `labolabo tab open` should fail fast, not hang
+/// retrying -- docs/control-protocol.md §6). Without this wait there is a
+/// real race the `rust-app-linux` CI job lost once (the CLI's connect
+/// beat the thread's `bind(2)`, ENOENT, exit code 2). Same
+/// wait-for-the-accept-thread reasoning as `src/control.rs`'s own
+/// `send_with_retry` test helper; the probe here is a real
+/// `send_control_request` (the exact transport the CLI itself uses, on
+/// both platforms) with a deliberately-non-JSON payload, which the stub
+/// handler rejects in `parse_request` *before* the `report_tx.send` -- so
+/// a probe never pollutes the test's own received-request channel.
 fn start_stub_server(
     label: &str,
     respond: impl Fn(&ControlRequest, &ControlCommand) -> ControlResponse + Send + Sync + 'static,
@@ -61,6 +92,21 @@ fn start_stub_server(
         response.to_bytes()
     }));
     server.start();
+
+    let mut ready = false;
+    for _ in 0..150 {
+        if labolabo_core::send_control_request(&socket_path, b"readiness probe (not JSON)").is_ok()
+        {
+            ready = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(
+        ready,
+        "the stub ControlServer at {socket_path} never became reachable"
+    );
+
     (socket_path, server)
 }
 
