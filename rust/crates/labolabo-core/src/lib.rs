@@ -211,6 +211,14 @@ pub use hook_settings::{
 // `tiling.rs`'s module doc comment).
 pub use store::AgentBindings;
 
+// Rust wave 6e: the Swift-app-to-Rust-port session importer
+// (`store::swift_import`) -- converts the Swift app's persisted sessions
+// (`SessionDatabase`/`labolabo.db`) into this port's own `Task`s so
+// upgrading from the Swift app restores the same open directories/
+// worktrees, tab layout, and per-tab Claude `--resume` state. Strictly
+// read-only against the Swift database -- see that module's doc comment.
+pub use store::{import_from_swift, ImportOutcome};
+
 // Control CLI wave (`plans/012-task-model-and-control-cli.md` §2,
 // `docs/control-protocol.md`): the bidirectional CLI/agent-to-app RPC
 // channel that lets `labolabo tab open`/`task list`/`tab list`/`focus`

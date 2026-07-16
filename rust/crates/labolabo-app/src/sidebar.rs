@@ -385,6 +385,11 @@ pub fn render(
             }),
         ));
 
+    // Swift 版インポータのバナー (`render_import_banner`): "+" 行より上、
+    // サイドバー最上部に出す。`app`/`cx` の再借用を避けるため `sidebar`
+    // 本体の構築より先に評価する。
+    let import_banner = render_import_banner(app, cx);
+
     let mut sidebar = div()
         .flex()
         .flex_col()
@@ -404,6 +409,7 @@ pub fn render(
         .on_drop::<ExternalPaths>(cx.listener(|this, paths: &ExternalPaths, _window, cx| {
             this.handle_sidebar_folder_drop(paths, cx);
         }))
+        .children(import_banner)
         .child(new_task_row)
         .child(list);
 
@@ -426,6 +432,53 @@ pub fn render(
     }
 
     sidebar
+}
+
+/// Swift 版インポータ (`crate::swift_import`, `plans` W6e) の結果一行バナー
+/// -- サイドバー最上部（新規作業の "+" 行より上）に出す。`new_task_error`
+/// と違い、閉じる（"×"）ボタンで明示的に消すまで残る（`LaboLaboApp::
+/// dismiss_import_banner`）。`app.import_banner()` が `None` なら何も描画
+/// しない。
+fn render_import_banner(
+    app: &LaboLaboApp,
+    cx: &mut Context<LaboLaboApp>,
+) -> Option<impl IntoElement> {
+    let text = app.import_banner()?.to_string();
+    Some(
+        div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .px_2()
+            .py_1()
+            .bg(rgb(theme::surface::RAISED))
+            .border_b_1()
+            .border_color(rgb(theme::surface::STROKE))
+            .child(
+                div()
+                    .flex_1()
+                    .text_color(rgb(theme::text::SECONDARY))
+                    .text_size(px(theme::font_size::CAPTION))
+                    .child(SharedString::from(text)),
+            )
+            .child(
+                div()
+                    .id("import-banner-dismiss")
+                    .px_1()
+                    .rounded_sm()
+                    .text_color(rgb(theme::text::MUTED))
+                    .text_size(px(theme::font_size::CAPTION))
+                    .hover(|el| el.bg(rgb(theme::surface::ACTIVE)))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _: &MouseDownEvent, _window, cx| {
+                            this.dismiss_import_banner(cx);
+                        }),
+                    )
+                    .child("×"),
+            ),
+    )
 }
 
 /// 「アーカイブ済み (n)」セクション。アーカイブが 1 件も無ければ `None`
