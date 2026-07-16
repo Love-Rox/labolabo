@@ -53,6 +53,9 @@ done
 # 0.7.x+1 or 0.1.0. This is a marketing/distribution version, deliberately
 # decoupled from both the Swift app's version counter and the Cargo crates'
 # own (unbumped) version fields.
+#
+# Keep in sync with the in-app About panel's version:
+# crates/labolabo-app/src/menus.rs `APP_VERSION` (wave 6c).
 VERSION="1.0.0"
 
 # CFBundleVersion (build number): same convention as the Swift app

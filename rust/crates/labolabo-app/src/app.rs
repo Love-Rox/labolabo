@@ -74,8 +74,10 @@ use crate::ghostty_config::FontConfig;
 use crate::git_pane::{self, FileViewMode, GitSnapshot};
 use crate::grid;
 use crate::hooks::{self, HookRuntime};
+use crate::ide_open;
 use crate::ime;
 use crate::keys::keystroke_to_bytes;
+use crate::menus;
 use crate::motion::DotAnimState;
 use crate::mouse_report::{self, MouseAction, MouseButtonKind, MouseMods};
 use crate::new_task;
@@ -84,8 +86,11 @@ use crate::render::RenderSpec;
 use crate::selection::{self, CellPos};
 use crate::settings::{self, AppSettings};
 use crate::sidebar;
+use crate::task_lifecycle::{self, WorktreeRemoveOutcome};
+use crate::task_menu::{self, TaskMenuState};
 use crate::task_workspace::{self, PaneDragHover, PaneRuntime, TabDragPayload, TaskWorkspace};
 use crate::theme;
+use crate::window_bounds;
 
 /// Initial grid size for a pane created after startup with no viewport to
 /// measure yet (new tab / split within an already-rendered Task, or the
@@ -99,6 +104,10 @@ use crate::theme;
 /// uses this default instead.
 const DEFAULT_PANE_COLS: u16 = 80;
 const DEFAULT_PANE_ROWS: u16 = 24;
+
+/// ウィンドウ bounds 保存 (wave 6c §3) のデバウンス幅 -- ドラッグ中の
+/// 連続イベントを 1 回の SQLite 書き込みへ集約する。
+const WINDOW_BOUNDS_SAVE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(500);
 
 actions!(
     labolabo_app,
@@ -122,6 +131,16 @@ actions!(
         SelectTab9,
         ToggleGitPane,
         ToggleSettings,
+        // メニューバー (wave 6c §1, `crate::menus`)。`Quit` だけはウィンドウ
+        // 非依存なので `main.rs` がグローバル `cx.on_action` で処理し、他は
+        // 従来どおりルート要素の `.on_action`（`Render` 参照）。
+        About,
+        Quit,
+        NewAttachedTask,
+        NewWorktreeTask,
+        MinimizeWindow,
+        ZoomWindow,
+        OpenSelectedInIde,
     ]
 );
 
@@ -202,6 +221,32 @@ pub struct LaboLaboApp {
     /// pane's canvas can suppress `Terminal::resize` while a drag is live
     /// -- see `render_leaf`'s `prepaint` closure for why.
     divider_drag_active: bool,
+    /// アーカイブ済み (`TaskStatus::Archived`) タスク -- サイドバー下部の
+    /// 折りたたみセクション（既定折りたたみ）の内容 (wave 6c §2)。`tasks`
+    /// と違い workspace は持たない（アーカイブ時に shutdown 済み）。復元で
+    /// `tasks` へ戻る。
+    archived_tasks: Vec<Task>,
+    /// サイドバー「アーカイブ済み (n)」セクションの開閉 -- 純粋な UI 状態
+    /// （非永続、起動時は常に折りたたみ）。
+    archived_expanded: bool,
+    /// タスク行「…」メニュー / 削除確認オーバーレイの状態 (wave 6c §2、
+    /// `crate::task_menu`)。`None` = 閉じている。
+    task_menu: Option<TaskMenuState>,
+    /// About オーバーレイ (`crate::menus::render_about_overlay`) の開閉 --
+    /// `settings_open` と同じく純粋な UI 状態。
+    about_open: bool,
+    /// 「IDE で開く」のインストール済みエディタ検出結果 (wave 6c 追加要望、
+    /// `crate::ide_open`)。起動時にバックグラウンドで一度だけ Spotlight
+    /// (`mdfind`) 検出を走らせてキャッシュする。`None` = 検出未完了
+    /// （メニューにはまだエディタを出さない -- 「Finder で表示」は常に
+    /// 出る）。
+    installed_editors: Option<Vec<ide_open::EditorCandidate>>,
+    /// ウィンドウ bounds 保存 (wave 6c §3) のデバウンス世代カウンタ --
+    /// bounds 変化のたびに進め、~500ms 後にまだ最新世代だったものだけが
+    /// 保存を実行する（`schedule_window_bounds_save`）。
+    bounds_save_generation: u64,
+    /// 直近の（まだ保存されていない）ウィンドウ bounds。
+    pending_window_bounds: Option<Bounds<Pixels>>,
 }
 
 /// The focused pane's in-progress IME composition, tracked by
@@ -247,17 +292,23 @@ impl LaboLaboApp {
             );
             TaskDatabase::open_in_memory().expect("in-memory sqlite must always succeed")
         });
-        let tasks: Vec<Task> = db
-            .all_tasks()
-            .unwrap_or_else(|err| {
-                eprintln!(
-                    "labolabo-app: failed to load tasks ({err}); starting with an empty list"
-                );
-                Vec::new()
-            })
-            .into_iter()
-            .filter(|t| t.status == TaskStatus::Active)
-            .collect();
+        let all_tasks: Vec<Task> = db.all_tasks().unwrap_or_else(|err| {
+            eprintln!("labolabo-app: failed to load tasks ({err}); starting with an empty list");
+            Vec::new()
+        });
+        let mut tasks: Vec<Task> = Vec::new();
+        let mut archived_tasks: Vec<Task> = Vec::new();
+        for task in all_tasks {
+            match task.status {
+                TaskStatus::Active => tasks.push(task),
+                // アーカイブ済みはサイドバー下部の折りたたみセクションへ
+                // (wave 6c §2)。workspace は復元しない（復元操作で戻す）。
+                TaskStatus::Archived => archived_tasks.push(task),
+                // `Done` は W5b-3 のスキーマ予約のみで、遷移させる UI は
+                // まだ無い -- 読み飛ばす（DB には残る）。
+                TaskStatus::Done => {}
+            }
+        }
 
         let selected_task_id = db
             .selected_task_id()
@@ -306,6 +357,22 @@ impl LaboLaboApp {
         })
         .detach();
 
+        // 「IDE で開く」のエディタ検出 (wave 6c、`crate::ide_open`):
+        // Spotlight (`mdfind`) を候補ごとに 1 回ずつ叩くブロッキング処理
+        // なので、起動時に一度だけバックグラウンドで走らせて結果を
+        // キャッシュする。完了までは `installed_editors == None`（メニュー
+        // にエディタが出ないだけで、他は全て動く）。
+        cx.spawn(async move |this, cx| {
+            let editors = cx
+                .background_spawn(async move { ide_open::detect_installed_editors() })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                app.installed_editors = Some(editors);
+                cx.notify();
+            });
+        })
+        .detach();
+
         let mut this = Self {
             db,
             tasks,
@@ -324,6 +391,13 @@ impl LaboLaboApp {
             settings_open: false,
             changed_files_cache: HashMap::new(),
             divider_drag_active: false,
+            archived_tasks,
+            archived_expanded: false,
+            task_menu: None,
+            about_open: false,
+            installed_editors: None,
+            bounds_save_generation: 0,
+            pending_window_bounds: None,
         };
 
         if let Some(id) = selected_task_id {
@@ -334,12 +408,46 @@ impl LaboLaboApp {
 
         this.dev_force_running_if_requested(cx);
 
-        cx.observe_window_bounds(window, |_this, _window, cx| {
+        // ウィンドウ移動/リサイズの追従: 再描画に加えて、bounds を ~500ms
+        // デバウンスで appState (`windowBounds`) へ保存する (wave 6c §3、
+        // `crate::window_bounds`)。
+        cx.observe_window_bounds(window, |this, window, cx| {
+            this.schedule_window_bounds_save(window, cx);
             cx.notify();
         })
         .detach();
 
         this
+    }
+
+    /// ウィンドウ bounds の保存をデバウンス付きで予約する。イベントごとに
+    /// 世代カウンタを進めて 500ms 待つ小さなタスクを積み、満了時にまだ
+    /// 最新世代だったタスクだけが実際に保存する（ドラッグ中の連続イベント
+    /// では古い世代が全て捨てられ、手を離して 500ms 後に 1 回だけ書く）。
+    /// フルスクリーン/最大化中は `WindowBounds::get_bounds()` が返す
+    /// restore サイズを保存し、復元は常に通常ウィンドウ（README 参照）。
+    fn schedule_window_bounds_save(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let bounds = window.window_bounds().get_bounds();
+        self.pending_window_bounds = Some(bounds);
+        self.bounds_save_generation = self.bounds_save_generation.wrapping_add(1);
+        let generation = self.bounds_save_generation;
+        cx.spawn(async move |this, cx| {
+            gpui::Timer::after(WINDOW_BOUNDS_SAVE_DEBOUNCE).await;
+            let _ = this.update(cx, |app, _cx| {
+                if app.bounds_save_generation != generation {
+                    return; // 新しい bounds 変化に置き換えられた
+                }
+                let Some(bounds) = app.pending_window_bounds.take() else {
+                    return;
+                };
+                let json =
+                    window_bounds::encode(window_bounds::SavedWindowBounds::from_bounds(bounds));
+                if let Err(err) = app.db.set_window_bounds(&json) {
+                    eprintln!("labolabo-app: failed to persist window bounds: {err}");
+                }
+            });
+        })
+        .detach();
     }
 
     /// Development-only hook for `plans/014`'s M2 power verification
@@ -422,6 +530,316 @@ impl LaboLaboApp {
 
     pub(crate) fn settings_open(&self) -> bool {
         self.settings_open
+    }
+
+    pub(crate) fn about_open(&self) -> bool {
+        self.about_open
+    }
+
+    pub(crate) fn close_about(&mut self, cx: &mut Context<Self>) {
+        if self.about_open {
+            self.about_open = false;
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn archived_tasks(&self) -> &[Task] {
+        &self.archived_tasks
+    }
+
+    pub(crate) fn archived_expanded(&self) -> bool {
+        self.archived_expanded
+    }
+
+    pub(crate) fn toggle_archived_section(&mut self, cx: &mut Context<Self>) {
+        self.archived_expanded = !self.archived_expanded;
+        cx.notify();
+    }
+
+    pub(crate) fn task_menu(&self) -> Option<&TaskMenuState> {
+        self.task_menu.as_ref()
+    }
+
+    /// 検出済みのインストール済みエディタ（検出未完了なら空）。
+    pub(crate) fn installed_editors(&self) -> &[ide_open::EditorCandidate] {
+        self.installed_editors.as_deref().unwrap_or(&[])
+    }
+
+    // MARK: - タスク行「…」メニュー / アーカイブ / 削除 (wave 6c §2)
+
+    /// サイドバー行の「…」ボタンから開く（`anchor` はクリック位置 =
+    /// ウィンドウ座標）。
+    pub(crate) fn open_task_menu(
+        &mut self,
+        task_id: &str,
+        anchor: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(task) = self.tasks.iter().find(|t| t.id == task_id) else {
+            return;
+        };
+        self.task_menu = Some(TaskMenuState::new(task, anchor));
+        cx.notify();
+    }
+
+    /// メニュー/確認オーバーレイを閉じる（git 実行中は閉じない --
+    /// `TaskMenuState::can_dismiss`）。
+    pub(crate) fn close_task_menu(&mut self, cx: &mut Context<Self>) {
+        if let Some(menu) = &self.task_menu {
+            if !menu.can_dismiss() {
+                return;
+            }
+        }
+        if self.task_menu.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// タスクの作業ディレクトリを指定エディタで開く（`crate::ide_open`、
+    /// macOS のみメニューに出る）。`open` の起動はバックグラウンド。
+    pub(crate) fn open_task_in_editor(
+        &mut self,
+        task_id: &str,
+        bundle_id: &'static str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(task) = self.tasks.iter().find(|t| t.id == task_id) else {
+            return;
+        };
+        let dir = PathBuf::from(task.working_directory());
+        cx.background_spawn(async move {
+            if let Err(err) = ide_open::open_in_editor(bundle_id, &dir) {
+                eprintln!("labolabo-app: failed to open editor: {err}");
+            }
+        })
+        .detach();
+        self.task_menu = None;
+        cx.notify();
+    }
+
+    /// タスクの作業ディレクトリを Finder で表示（macOS のみメニューに出る）。
+    pub(crate) fn reveal_task_in_finder(&mut self, task_id: &str, cx: &mut Context<Self>) {
+        let Some(task) = self.tasks.iter().find(|t| t.id == task_id) else {
+            return;
+        };
+        let dir = PathBuf::from(task.working_directory());
+        cx.background_spawn(async move {
+            if let Err(err) = ide_open::reveal_in_finder(&dir) {
+                eprintln!("labolabo-app: failed to reveal in Finder: {err}");
+            }
+        })
+        .detach();
+        self.task_menu = None;
+        cx.notify();
+    }
+
+    /// タスクのセッションを shutdown して workspace を破棄する（アーカイブ
+    /// /削除の前段）。pty へ SIGHUP 相当を送り、hooks のルーティング表から
+    /// も外す。workspace は `workspaces` から取り除くので、後で同じタスクを
+    /// 再選択/復元すれば `ensure_workspace_loaded` が新しいシェルを張り直す
+    /// （自己修復 -- worktree 削除が git に拒否された後もタスクは使える）。
+    fn shutdown_workspace(&mut self, task_id: &str) {
+        self.deactivate_git_pane(task_id);
+        if let Some(workspace) = self.workspaces.remove(task_id) {
+            for runtime in workspace.runtimes.into_values() {
+                self.hooks.unregister_pane(&runtime.pane_uuid);
+                runtime.session.shutdown();
+            }
+        }
+        self.changed_files_cache.remove(task_id);
+    }
+
+    /// `task_id` を `tasks` から外し、それが選択中だったら選択を隣の
+    /// active タスクへ移す（無ければ空状態）。外した `Task` を返す。
+    /// 次の選択は `task_lifecycle::next_selected_id`（純ロジック）で決める。
+    fn remove_active_task_entry(
+        &mut self,
+        task_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Task> {
+        let index = self.tasks.iter().position(|t| t.id == task_id)?;
+        let was_selected = self.selected_task_id.as_deref() == Some(task_id);
+        let ids: Vec<&str> = self.tasks.iter().map(|t| t.id.as_str()).collect();
+        let next = task_lifecycle::next_selected_id(&ids, task_id);
+        let task = self.tasks.remove(index);
+        if was_selected {
+            self.selected_task_id = None;
+            match next {
+                Some(next_id) => self.select_task(next_id, window, cx),
+                None => {
+                    if let Err(err) = self.db.set_selected_task_id(None) {
+                        eprintln!("labolabo-app: failed to persist selected task: {err}");
+                    }
+                }
+            }
+        }
+        Some(task)
+    }
+
+    /// アーカイブ: セッションを shutdown し、`status = archived` で保存して
+    /// サイドバー下部の「アーカイブ済み」セクションへ移す。選択中だったら
+    /// 他の active タスクへ選択を移す（無ければ空状態）。
+    pub(crate) fn archive_task(
+        &mut self,
+        task_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.tasks.iter().any(|t| t.id == task_id) {
+            return;
+        }
+        self.task_menu = None;
+        self.shutdown_workspace(task_id);
+        if let Some(mut task) = self.remove_active_task_entry(task_id, window, cx) {
+            task.status = TaskStatus::Archived;
+            if let Err(err) = self.db.upsert_task(&task) {
+                eprintln!("labolabo-app: failed to archive task {task_id}: {err}");
+            }
+            self.archived_tasks.push(task);
+        }
+        cx.notify();
+    }
+
+    /// 復元: `status = active` へ戻して末尾に並べ（`sort_order` は採番し
+    /// 直し）、選択する。workspace は `select_task` 経由の
+    /// `ensure_workspace_loaded` が新しく張る。
+    pub(crate) fn restore_task(
+        &mut self,
+        task_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(index) = self.archived_tasks.iter().position(|t| t.id == task_id) else {
+            return;
+        };
+        let mut task = self.archived_tasks.remove(index);
+        task.status = TaskStatus::Active;
+        task.sort_order = self.next_sort_order();
+        task.last_active_at = chrono::Utc::now();
+        if let Err(err) = self.db.upsert_task(&task) {
+            eprintln!("labolabo-app: failed to restore task {task_id}: {err}");
+        }
+        let id = task.id.clone();
+        self.tasks.push(task);
+        self.select_task(id, window, cx);
+        cx.notify();
+    }
+
+    /// メニューの「削除…」: 確認相へ（実削除はしない）。
+    pub(crate) fn request_delete_task(&mut self, cx: &mut Context<Self>) {
+        if let Some(menu) = &mut self.task_menu {
+            menu.request_delete();
+            cx.notify();
+        }
+    }
+
+    /// 確認モーダルの「ブランチも削除」トグル。
+    pub(crate) fn toggle_delete_branch(&mut self, cx: &mut Context<Self>) {
+        if let Some(menu) = &mut self.task_menu {
+            menu.toggle_delete_branch();
+            cx.notify();
+        }
+    }
+
+    /// 確認モーダルの実行ボタン。attached 型は DB からの登録解除のみ
+    /// （**実ディレクトリには絶対に触れない**）。worktree 型はセッション
+    /// shutdown → バックグラウンドで `git worktree remove`（force しない）
+    /// → 成功時のみ（チェック時）`git branch -d` → DB から削除
+    /// （`crate::task_lifecycle`）。失敗（未コミット変更による拒否等）は
+    /// 確認モーダル内に表示して中断し、DB からも消さない。
+    pub(crate) fn execute_delete_task(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (task_id, worktree, delete_branch) = {
+            let Some(menu) = &mut self.task_menu else {
+                return;
+            };
+            if !menu.begin_execution() {
+                return;
+            }
+            (
+                menu.task_id.clone(),
+                menu.worktree.clone(),
+                menu.delete_branch_requested(),
+            )
+        };
+        cx.notify();
+
+        match worktree {
+            None => {
+                // attached 型: 登録解除のみ。ファイルには触れない。
+                self.shutdown_workspace(&task_id);
+                if let Err(err) = self.db.delete_task(&task_id) {
+                    if let Some(menu) = &mut self.task_menu {
+                        menu.fail(format!("登録を解除できませんでした: {err}"));
+                    }
+                    cx.notify();
+                    return;
+                }
+                self.remove_active_task_entry(&task_id, window, cx);
+                self.task_menu = None;
+                cx.notify();
+            }
+            Some(info) => {
+                self.shutdown_workspace(&task_id);
+                let repo_root = PathBuf::from(info.repo_root);
+                let worktree_path = PathBuf::from(info.path);
+                let branch = info.branch;
+                cx.spawn_in(window, async move |this, cx| {
+                    let outcome = cx
+                        .background_spawn(async move {
+                            task_lifecycle::remove_worktree_and_maybe_branch(
+                                &repo_root,
+                                &worktree_path,
+                                &branch,
+                                delete_branch,
+                            )
+                        })
+                        .await;
+                    let _ = this.update_in(cx, |app, window, cx| {
+                        app.finish_worktree_delete(&task_id, outcome, window, cx);
+                    });
+                })
+                .detach();
+            }
+        }
+    }
+
+    /// worktree 削除のバックグラウンド処理の完了側。
+    fn finish_worktree_delete(
+        &mut self,
+        task_id: &str,
+        outcome: WorktreeRemoveOutcome,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match outcome {
+            WorktreeRemoveOutcome::Refused { message } => {
+                // タスクは DB にも一覧にも残す。shutdown 済みの workspace
+                // は次の選択時に張り直される（`shutdown_workspace` 参照）。
+                if let Some(menu) = &mut self.task_menu {
+                    menu.fail(message);
+                }
+            }
+            WorktreeRemoveOutcome::Removed { branch_warning } => {
+                if let Err(err) = self.db.delete_task(task_id) {
+                    eprintln!("labolabo-app: failed to delete task row {task_id}: {err}");
+                }
+                self.remove_active_task_entry(task_id, window, cx);
+                match branch_warning {
+                    // worktree 削除自体は完了扱い -- ブランチ削除の失敗
+                    // だけを後日談として表示する。
+                    Some(warning) => {
+                        if let Some(menu) = &mut self.task_menu {
+                            menu.show_notice(format!("worktree は削除しました。{warning}"));
+                        }
+                    }
+                    None => {
+                        self.task_menu = None;
+                    }
+                }
+            }
+        }
+        cx.notify();
     }
 
     /// The terminal grid size for the window's current viewport (full
@@ -2573,6 +2991,69 @@ impl LaboLaboApp {
         cx.notify();
     }
 
+    // MARK: - メニューバー用アクション (wave 6c §1, `crate::menus`)。
+    // `Quit` はウィンドウ非依存なので `main.rs` のグローバル
+    // `cx.on_action` 側（`cx.quit()`）。
+
+    fn action_about(&mut self, _: &About, _window: &mut Window, cx: &mut Context<Self>) {
+        self.about_open = true;
+        cx.notify();
+    }
+
+    fn action_new_attached_task(
+        &mut self,
+        _: &NewAttachedTask,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.start_new_attached_task(window, cx);
+    }
+
+    fn action_new_worktree_task(
+        &mut self,
+        _: &NewWorktreeTask,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.start_new_worktree_task(window, cx);
+    }
+
+    fn action_minimize_window(
+        &mut self,
+        _: &MinimizeWindow,
+        window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+        window.minimize_window();
+    }
+
+    fn action_zoom_window(&mut self, _: &ZoomWindow, window: &mut Window, _cx: &mut Context<Self>) {
+        window.zoom_window();
+    }
+
+    /// 「ファイル → 選択中の作業を IDE で開く」: タスク行「…」メニューの
+    /// エディタ列挙の簡易版で、検出済みエディタの**先頭 1 つ**で開く
+    /// （メニューは起動時に静的に組むため動的なサブメニューにしない判断 --
+    /// `crate::menus` の doc コメント参照）。エディタ未検出なら Finder で
+    /// 表示へフォールバック。
+    fn action_open_selected_in_ide(
+        &mut self,
+        _: &OpenSelectedInIde,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(task_id) = self.selected_task_id.clone() else {
+            return;
+        };
+        match self.installed_editors().first() {
+            Some(editor) => {
+                let bundle_id = editor.bundle_id;
+                self.open_task_in_editor(&task_id, bundle_id, cx);
+            }
+            None => self.reveal_task_in_finder(&task_id, cx),
+        }
+    }
+
     pub(crate) fn close_settings(&mut self, cx: &mut Context<Self>) {
         if !self.settings_open {
             return;
@@ -2894,6 +3375,12 @@ impl Render for LaboLaboApp {
         // on top of the sidebar/workspace/Git pane below it.
         let settings_el = settings::render_settings_overlay(self, cx);
 
+        // タスク行「…」メニュー / 削除確認 (wave 6c §2) と About
+        // (wave 6c §1) -- settings と同じ「開いている間だけ子が存在する」
+        // オーバーレイ。
+        let task_menu_el = task_menu::render_task_menu_overlay(self, window, cx);
+        let about_el = menus::render_about_overlay(self, cx);
+
         div()
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(Self::key_down))
@@ -2916,6 +3403,12 @@ impl Render for LaboLaboApp {
             .on_action(cx.listener(Self::action_select_tab_9))
             .on_action(cx.listener(Self::action_toggle_git_pane))
             .on_action(cx.listener(Self::action_toggle_settings))
+            .on_action(cx.listener(Self::action_about))
+            .on_action(cx.listener(Self::action_new_attached_task))
+            .on_action(cx.listener(Self::action_new_worktree_task))
+            .on_action(cx.listener(Self::action_minimize_window))
+            .on_action(cx.listener(Self::action_zoom_window))
+            .on_action(cx.listener(Self::action_open_selected_in_ide))
             .relative()
             .flex()
             .flex_row()
@@ -2925,6 +3418,8 @@ impl Render for LaboLaboApp {
             .child(workspace_el)
             .children(git_pane_el)
             .children(settings_el)
+            .children(task_menu_el)
+            .children(about_el)
     }
 }
 
