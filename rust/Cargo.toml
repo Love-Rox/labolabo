@@ -13,3 +13,20 @@ default-members = ["crates/labolabo-core", "crates/labolabo-term"]
 
 [workspace.package]
 edition = "2021"
+
+# LOCAL PATCH (LaboLabo, W14): pin `libghostty-vt-sys` to a vendored copy
+# with a one-line build.rs fix. See vendor/libghostty-vt-sys/README.md and
+# vendor/libghostty-vt-sys/build.rs for the full rationale -- summary:
+# upstream skips `-Dtarget` for native (non-cross) builds, so Zig
+# auto-detects and bakes in the *exact* build machine's CPU features
+# (confirmed via LLVM IR `target-features` dumps: native picks up things
+# like AVX-512, while an explicit target triple resolves to the portable
+# baseline CPU for that architecture). On GitHub Actions' heterogeneous
+# runner fleet this produced intermittent `SIGILL` crashes in
+# `backend_common` tests (a `.zig-cache` built by a wide-ISA runner gets
+# reused, via `mlugg/setup-zig`'s cross-run cache, by a narrower one) and is
+# a live risk for the Linux/macOS release bundles (native-CPU code shipped
+# to end users with unknown CPUs). Drop this patch once a fix lands upstream
+# (https://github.com/uzaaft/libghostty-rs).
+[patch.crates-io]
+libghostty-vt-sys = { path = "vendor/libghostty-vt-sys" }
