@@ -257,6 +257,11 @@ note above); gpui itself ships Zed on both daily.
 - **Window menu's しまう/拡大・縮小** call gpui's cross-platform
   `Window::minimize_window`/`zoom_window`; behavior under Wayland (where
   minimize-self is compositor-dependent) is unverified.
+- **The window keeps its native titlebar** (第13波b §1, see "Window chrome"
+  below) — the inline-traffic-lights + drag-region + status-pill top row is
+  `#[cfg(target_os = "macos")]`-gated in `crate::titlebar`; Linux gets the
+  desktop environment's own decorations, with the status pill still shown
+  as a plain toolbar row underneath them.
 
 ## Windows (wave 7c)
 
@@ -492,6 +497,14 @@ a Windows machine joins the dev loop to verify it against.
   package's own README documents). A proper installer is future work, same
   category as the Linux package's own root-less `install.sh` being the
   "no real package manager integration yet" placeholder for that platform.
+- **The window keeps its native titlebar, same as Linux** (第13波b §1). gpui
+  0.2's `TitlebarOptions::appears_transparent` doc comment notes it applies
+  on Windows too (not just macOS), so this *could* have been extended here
+  with the same custom-drawn-chrome treatment — deliberately not attempted
+  this wave (no Windows host to visually verify traffic-light-equivalent
+  min/max/close hit-testing against, and the brief scoped the inline
+  window-controls treatment to macOS). `crate::titlebar`'s status pill still
+  renders as a plain toolbar row underneath Windows' own decorations.
 
 ## Design
 
@@ -511,7 +524,10 @@ a Windows machine joins the dev loop to verify it against.
 | `import_prompt.rs` | 第8波d: the first-launch Swift-import confirmation prompt — a pure, unit-tested three-gate state machine (`should_show_import_prompt`: no Task yet × a Swift db present × never answered) plus the yes/no overlay (`task_menu.rs`'s confirm-modal style). See "Importing from the Swift app" above. |
 | `app.rs` | The gpui root view (`LaboLaboApp`): owns the `TaskDatabase`, the Task list, one `TaskWorkspace` per loaded Task, Task selection/persistence, the new-Task flows' orchestration, key routing, the action handlers for every keybinding (including Cmd+V paste), and the `EntityInputHandler` impl that wires up IME composition. |
 | `task_workspace.rs` | One Task's live workspace: its `PaneTilingModel` + one `PaneRuntime` (real `Terminal` session + redraw bridge) per terminal pane, and the recursive split/tab-bar render tree (wave 5b-2's tree, made per-Task — every render/click path carries a `task_id`). The focused pane's leaf also registers the IME input handler and paints the preedit overlay each frame. |
-| `sidebar.rs` | The Task sidebar: pure, unit-tested repo-grouping (`group_tasks_by_repo`) + minimal rendering (title + a one-glyph worktree/attached marker, "+ Attached"/"+ Worktree" buttons, error banner). |
+| `sidebar.rs` | The Task sidebar: pure, unit-tested repo-grouping (`group_tasks_by_repo`) + rendering (title + a `crate::icons` worktree/attached marker, "+ Attached"/"+ Worktree" buttons, error banner, and the shared `banner()` chrome the update/import/missing-worktree banners share — 第13波b §4). |
+| `titlebar.rs` | Window-integrated toolbar chrome (第13波b §1): the mac-only custom-drawn titlebar (`window_titlebar_options`, inline traffic lights + `WindowControlArea::Drag`) and the status pill (`PillData`, pure/unit-tested assembly + `render`) shown on every platform. See "Window chrome" below. |
+| `icons.rs` | LaboLabo's SVG icon set (第13波b §2): `Icon` (name -> `include_bytes!`-embedded asset path, unit-tested), `icon`/`icon_colored`/`chevron_element` (gpui `svg()` builders), and `Assets` (the `gpui::AssetSource` impl wired in via `Application::with_assets`). |
+| `empty_state.rs` | The shared "nothing here yet" tone (第13波b §3): a centered icon + one line + an optional primary-action button, used by the no-Task-selected workspace placeholder and the Git pane's "変更なし" list. |
 | `new_task.rs` | The new-Task flows' git side (gpui-free, integration-tested against real temp repos): repo-identity resolution for attached Tasks, and branch-generation + `git worktree add` for worktree Tasks. |
 | `focus.rs` | Pure tile-tree focus logic (gpui-independent, unit-tested): which pane to focus after a close, next/previous-pane cycling, Cmd+N tab lookup. See its module doc comment for the "focus is a `PaneId`, not a `NodeId`" invariant. |
 | `hooks.rs` | Claude Code hooks integration (wave 5c): the app-wide `AgentStatusBus`, `.claude/settings.local.json` injection/restore, and the `LABOLABO_PANE` routing table. See "Claude Code hooks integration" below. |
@@ -524,6 +540,44 @@ a Windows machine joins the dev loop to verify it against.
 | `paste.rs` | Pure function: a clipboard string -> the PTY bytes for a paste (`encode_paste`) — unsafe control byte stripping, newline normalization to `"\r"`, optional bracketed-paste wrapping. Unit-tested directly. |
 | `render.rs` | `RenderSpec` (font resolution + cell measurement) and painting one `labolabo_term::GridSnapshot` into a gpui canvas (background, glyphs, a selection highlight, cursor, and — via `ime.rs` — the IME preedit overlay). |
 | `selection.rs` | Pure text-selection geometry (`CellPos`/`Selection`) and cell-range -> string extraction (`selected_text`) over a `GridSnapshot`. No gpui types — unit-tested directly. See "Text selection, scroll & copy" below. |
+
+### Window chrome (第13波b §1 -- "見た目のモダン化", wave 2)
+
+Previously the window used its OS titlebar as-is (`WindowOptions::default()`'s
+plain `Some(TitlebarOptions::default())` — a normal titlebar with a blank
+title), entirely disconnected from the sidebar/workspace/Git-pane row
+starting its own chrome underneath it. This wave integrates the two on
+macOS and adds an always-visible status pill on every platform:
+
+- **macOS**: the native titlebar is hidden (`TitlebarOptions {
+  appears_transparent: true, .. }`, set by `titlebar::window_titlebar_options`
+  and passed into `main.rs`'s `cx.open_window(WindowOptions { titlebar: ..,
+  .. })`), the traffic lights are repositioned inline
+  (`TitlebarOptions::traffic_light_position`) into `titlebar::render`'s own
+  38px top row, and that whole row is the window's drag handle
+  (`Div::window_control_area(WindowControlArea::Drag)` — confirmed as
+  gpui 0.2's real API for this in `elements/div.rs`/`window.rs`, not a
+  hand-rolled `on_mouse_down` + platform-move hack).
+- **Linux/Windows**: the native titlebar is left exactly as it was
+  (`window_titlebar_options` is `#[cfg(target_os = "macos")]`-gated —
+  `TitlebarOptions::appears_transparent`'s own doc comment notes it affects
+  Windows too, not just macOS, so this had to be an explicit `cfg`, not a
+  runtime branch, to keep "Linux/Windows keep native decorations" true). The
+  status pill still renders, just as a plain toolbar row under the OS's own
+  titlebar rather than sharing space with inlined traffic lights.
+- **The status pill** (`titlebar::render_pill`, fed by `titlebar::PillData`)
+  shows the selected Task's title, attached/worktree kind, branch, and
+  changed-file count — "Swift 版の `SessionStatusPill` 相当の情報量"
+  (`app/Sources/SessionStatusBar.swift`), subscribed to the same
+  `TaskWorkspace::git` state the Git pane already reads (`LaboLaboApp::
+  titlebar_pill_data`, `app.rs`) rather than a new poll/subscription — the
+  pill only changes when `LaboLaboApp::render` already re-runs (the existing
+  Git-refresh/selection-change triggers), so this adds no new continuous
+  work (power principle).
+- `PillData::build`'s branch-fallback/kind-resolution assembly is
+  gpui-free and unit-tested (`titlebar.rs`'s `#[cfg(test)]` module); the
+  rendering itself (icons, pill capsule, dividers) is not (no gpui test
+  harness in this crate, matching every other render function here).
 
 ### The Task model (wave 5b-3)
 
@@ -1416,8 +1470,10 @@ Three independent DnD systems, all built on gpui 0.2's `on_drag`/
   been selected has no entry in the cache and neither contributes to nor
   triggers a conflict warning, even if it really is editing the same file.
   This is a deliberate wave-5i scope decision (no all-Tasks background
-  polling) rather than an oversight: the warning badge (sidebar row, an
-  orange ⚠) only ever reflects the *last-known* status of whichever Tasks
+  polling) rather than an oversight: the warning badge (sidebar row, a
+  `theme::status::CONFLICT`-tinted warning icon — `crate::icons::Icon::
+  Warning` as of 第13波b §2, previously a plain "⚠" glyph) only ever
+  reflects the *last-known* status of whichever Tasks
   happen to have been visited, refreshed on the selected Task's own Git
   pane refresh cadence (FSEvents-debounced, not polled).
 - **Transcript usage display is best-effort and per-tab, not per-Task.**
@@ -1436,6 +1492,20 @@ Three independent DnD systems, all built on gpui 0.2's `on_drag`/
   toggle `Cmd+,` again. The Git-pane-default-visible and scrollback-lines
   settings only affect Tasks/panes loaded *after* the change — see
   `crate::settings`'s module doc comment.
+- **第13波b §2 (SVG icon system) didn't reach every "×"/glyph in the app.**
+  `crate::icons` now covers the sidebar/tab-bar/Git-pane targets the wave's
+  brief named explicitly; the settings overlay's own "×" close button
+  (`settings.rs`) and the commit-pane/diff-detail placeholder text
+  (`git_pane::placeholder`, used for "No diff"/"Select a file"/"No
+  commits" — distinct from the "変更なし" changed-files-list empty state
+  this wave *did* move onto `crate::empty_state`'s tone) are unconverted —
+  out of the brief's named scope, left as a natural follow-up rather than
+  scope-crept into.
+- **The macOS traffic-light inline position (`titlebar::traffic_light_
+  position`) is a first-pass estimate, not pixel-verified against a real
+  running window** — see "Window chrome" above; this wave's own quality
+  gate defers the final visual judgment to the user (before/after listed in
+  the PR description, marked unverified).
 
 ## What was and wasn't verified
 
