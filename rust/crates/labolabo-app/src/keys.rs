@@ -10,27 +10,48 @@
 //!
 //! Once a pane has gpui's IME/text-input handler wired up
 //! (`Window::handle_input`, called from the focused pane's canvas paint --
-//! see `task_workspace::render_leaf`), the platform (macOS's
-//! `NSTextInputContext`, X11/Wayland's IBus/fcitx bridge) takes over
-//! **every** keystroke that carries a `key_char` and no
-//! Ctrl/Alt/Cmd modifier: it either self-inserts the character (calling
-//! `EntityInputHandler::replace_text_in_range`) or starts an IME
-//! composition (`replace_and_mark_text_in_range`). This is true on macOS,
-//! X11, *and* Wayland (traced through gpui's own platform backends: all
-//! three route plain/shift-only key_char keystrokes through the input
-//! handler once one is registered, not through the raw `KeyDownEvent`).
-//!
-//! That means this function must **not** also handle those keystrokes --
-//! doing so would either double-send the character (once here, once via the
-//! input handler) or, worse, pre-empt IME composition entirely (writing the
+//! see `task_workspace::render_leaf`), plain printable text -- including
+//! space -- is deliberately *not* handled in this function; it arrives
+//! exclusively via `EntityInputHandler::replace_text_in_range` (a committed
+//! character, or an IME composition's final confirmed text) or
+//! `replace_and_mark_text_in_range` (an in-progress composition's preedit).
+//! Handling such a keystroke in both places would either double-send the
+//! character, or -- worse -- pre-empt IME composition entirely (writing the
 //! *unconverted* Roman letter to the PTY before the IME ever gets a chance
-//! to turn it into a composed character). So `keystroke_to_bytes` is
-//! intentionally narrow: it only covers keys that must always be handled
-//! directly, because they either carry no `key_char` at all (Enter,
-//! Backspace, Tab, Escape, arrows) or must never be treated as text
-//! (Ctrl-<letter>). Plain printable text -- including space -- is *not*
-//! handled here anymore; it arrives exclusively via
-//! `EntityInputHandler::replace_text_in_range`.
+//! to turn it into a composed character).
+//!
+//! **Correction (wave 15 follow-up) to an earlier version of this comment,
+//! which claimed gpui's platform backends pre-empt `on_key_down` for every
+//! `key_char`-carrying keystroke, routing it to the input handler *instead
+//! of* the raw `KeyDownEvent` -- that is not what the real macOS backend
+//! does, and the earlier framing led directly to an incorrect hypothesis
+//! about why Shift+Enter wasn't working (it was never a key-routing
+//! problem; see `rust/README.md`'s "Wave 15 followup" for the real root
+//! cause).** Verified by reading gpui `0.2.2`'s actual dispatch, not
+//! assumed: `platform/mac/events.rs`'s `parse_keystroke` sets `key_char` to
+//! `Some(..)` for Enter/Tab/Space **unconditionally** on the *named* key
+//! matched (`Some(ENTER_KEY) => { key_char = Some("\n".into()); "enter" }`,
+//! wholly independent of which modifiers are held), so a Shift+Enter
+//! keystroke on macOS is `{ key: "enter", key_char: Some("\n"), modifiers:
+//! { shift: true, .. } }` -- it *does* carry a `key_char`. And
+//! `platform/mac/window.rs`'s `handle_key_event` (the actual routing
+//! decision, in the real crate, not this module's own paraphrase of it)
+//! calls `run_callback` -- which is what ultimately reaches `div::
+//! on_key_down`'s registered listener, `app::LaboLaboApp::key_down` here --
+//! **first**, for every keystroke that isn't mid-IME-composition, key_char
+//! or not; the platform input context (`NSTextInputContext`) is consulted
+//! only as a *fallback*, when `on_key_down`'s handler didn't claim the
+//! event (no `cx.stop_propagation()`). So this function does not need to
+//! -- and must not try to -- avoid handling `key_char`-carrying named keys
+//! like Enter/Tab/Backspace/Escape at all: what actually keeps a plain
+//! letter from double-sending is that *this function itself* returns
+//! `None` for it (no `cx.stop_propagation()`, so gpui's dispatch falls
+//! through to the input context on its own), not any pre-routing gpui does
+//! based on `key_char`'s presence. (X11/Wayland/Windows were not re-audited
+//! this wave -- their own platform files, listed near the end of this
+//! comment's revision history in git blame, were not re-read against this
+//! corrected macOS understanding; treat their exact dispatch order as
+//! unverified rather than assumed identical.)
 //!
 //! `app::LaboLaboApp::key_down` calls `cx.stop_propagation()` whenever this
 //! function returns `Some(..)`, which is what prevents gpui from *also*
@@ -386,6 +407,47 @@ mod tests {
         assert_eq!(
             keystroke_to_bytes(&shift_enter, true),
             Some(b"\x1b[13;2u".to_vec())
+        );
+    }
+
+    /// Regression coverage for the wave 15 follow-up's key-routing
+    /// hypothesis (see this module's doc comment's "Correction" note):
+    /// real macOS keystrokes for Enter carry `key_char: Some("\n")`
+    /// **unconditionally** (verified by reading gpui `0.2.2`'s
+    /// `platform/mac/events.rs`), not `None` the way every other test in
+    /// this file constructs it -- this function must be indifferent to
+    /// that, since it never inspects `key_char` for a named key match at
+    /// all. Exercised with the exact keystroke shape a real Shift+Enter
+    /// keypress produces on macOS, both with the flag off (legacy `\r`,
+    /// matching this file's pre-wave-15 behavior) and on (the Kitty `CSI
+    /// u` encoding) -- both must be identical to the `key_char: None`
+    /// versions above.
+    #[test]
+    fn real_macos_enter_key_char_does_not_change_the_result() {
+        let shift_enter_real_key_char = keystroke(
+            "enter",
+            Some("\n"),
+            Modifiers {
+                shift: true,
+                ..Modifiers::none()
+            },
+        );
+        assert_eq!(
+            keystroke_to_bytes(&shift_enter_real_key_char, false),
+            Some(vec![b'\r']),
+            "kitty off: identical to the key_char: None case"
+        );
+        assert_eq!(
+            keystroke_to_bytes(&shift_enter_real_key_char, true),
+            Some(b"\x1b[13;2u".to_vec()),
+            "kitty on: identical to the key_char: None case"
+        );
+
+        let plain_enter_real_key_char = keystroke("enter", Some("\n"), Modifiers::none());
+        assert_eq!(
+            keystroke_to_bytes(&plain_enter_real_key_char, true),
+            Some(vec![b'\r']),
+            "kitty on, unmodified: still legacy \\r regardless of key_char"
         );
     }
 

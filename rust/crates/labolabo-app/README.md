@@ -1017,11 +1017,12 @@ the IME side:
   selection, scroll & copy" below, a separate path from either of the
   above).
 
-  **Kitty keyboard protocol (wave 15) — Shift+Enter.** `keys::
-  keystroke_to_bytes` takes a second `kitty_disambiguate: bool` parameter,
-  threaded in from the focused pane's live `Terminal::kitty_disambiguate()`
-  (`false` for the text-field input-routing branch, which has no real PTY
-  behind it). When the running program has requested the [Kitty keyboard
+  **Kitty keyboard protocol (wave 15, `TERM_PROGRAM` fix in the wave 15
+  follow-up) — Shift+Enter.** `keys::keystroke_to_bytes` takes a second
+  `kitty_disambiguate: bool` parameter, threaded in from the focused
+  pane's live `Terminal::kitty_disambiguate()` (`false` for the
+  text-field input-routing branch, which has no real PTY behind it). When
+  the running program has requested the [Kitty keyboard
   protocol](https://sw.kovidgoyal.net/kitty/keyboard-protocol/)'s
   "disambiguate escape codes" flag (`CSI > 1 u` — Claude Code's own TUI is
   the motivating case, this is how it tells Shift+Enter apart from a plain
@@ -1029,9 +1030,17 @@ the IME side:
   <code>;<modifier> u` instead of its plain legacy byte (Shift+Enter ->
   `\x1b[13;2u`; an *unmodified* Enter/Tab still sends `\r`/`\t` even with
   the flag on — the protocol's own documented exception, so shell-level
-  typing is unaffected either way). See the root `rust/README.md`'s "Wave
-  15" section for the full backend-query design (why the two backends'
-  implementations are asymmetric) and the encoding table.
+  typing is unaffected either way). This alone turned out to be
+  necessary-but-not-sufficient: reverse-engineering Claude Code's own
+  compiled CLI (the wave 15 follow-up, after a real-machine check found
+  Shift+Enter still didn't work post-wave-15) found it never even
+  *attempts* the Kitty handshake with a terminal it doesn't recognize by a
+  static name allowlist keyed on `TERM_PROGRAM` (checked well before any
+  live capability probe) — `labolabo-term::session` now also sets
+  `TERM_PROGRAM=ghostty` on every spawned child for exactly this reason.
+  See the root `rust/README.md`'s "Wave 15" and "Wave 15 followup" sections
+  for the full backend-query design, the encoding table, and the
+  investigation that found the `TERM_PROGRAM` gap.
 
 **Not implemented:**
 
@@ -1374,11 +1383,19 @@ Three independent DnD systems, all built on gpui 0.2's `on_drag`/
   protocol), Shift+Enter still sends plain `\r`, indistinguishable from a
   bare Enter — deliberately not worked around, since the one program this
   matters for (Claude Code) always has `\` + Enter as a manual-newline
-  fallback of its own, and no other equivalent-`/terminal-setup` step is
-  needed on this app's side: both backends parse the Kitty protocol's
-  push/pop sequences unconditionally (see root `rust/README.md`'s "Wave
-  15"), so the flag turns on automatically the moment Claude Code requests
-  it — there is nothing for a user to configure.
+  fallback of its own. Both backends parse the Kitty protocol's push/pop
+  sequences unconditionally, so the flag turns on automatically once a
+  program actually attempts the handshake — but *whether* a given program
+  attempts it at all is that program's own decision, entirely outside this
+  app's control. Claude Code specifically was found (wave 15 follow-up,
+  after a real-machine check) to gate that decision on recognizing this
+  app's `TERM_PROGRAM` as a known terminal — now `ghostty` (see
+  `labolabo_term::session`'s spawn code and root `rust/README.md`'s "Wave
+  15 followup") — so as of that fix there is nothing left for a user to
+  configure for Claude Code specifically, but a *different* Kitty-aware
+  program with its own, differently-scoped terminal-name allowlist could
+  in principle still not recognize `TERM_PROGRAM=ghostty` and skip the
+  handshake regardless of this app's own protocol support.
 - **Restore resumes Claude sessions per tab (wave 5c), not terminal
   scrollback.** A pane with a previously-observed Claude session (and an
   existing or unrecorded transcript) spawns `claude --resume` directly
