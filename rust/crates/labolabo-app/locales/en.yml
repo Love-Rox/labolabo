@@ -158,7 +158,12 @@ swift_import:
 
 app:
   loading_task: "Loading task…"
-  no_task_selected: "No task selected. Use the + icons in the top-left to start with a folder or worktree."
+  # Wave 13b §3 (empty-state design): previously a long sentence with the
+  # call to action inline; now a short one-liner + a separate action button
+  # (`no_task_selected_action`), matching the new centered icon + line +
+  # button treatment.
+  no_task_selected: "No task selected"
+  no_task_selected_action: "+ New Task"
   swift_import_db_not_found: "Couldn't find the Swift app's database."
   missing_task:
     title: "Working directory not found"
@@ -190,3 +195,12 @@ color:
   custom_apply: "Apply"
   invalid_hex: "Enter a color as #rrggbb"
   tab_menu_title: "Tab color"
+
+# Wave 13b §1 (window-integrated toolbar): the top status pill's
+# (`crate::titlebar`) strings. Appended at the end, same rationale as the
+# wave-8d/wave-10 blocks above.
+titlebar:
+  kind_worktree: "worktree"
+  kind_attached: "attached"
+  changes_clean: "Clean"
+  changes_count: "%{count} file(s) changed"
