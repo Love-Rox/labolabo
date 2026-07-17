@@ -624,6 +624,17 @@ treatment (`task_workspace::status_dot_color`) — on each tab chip and, as
 the highest-priority status across a Task's panes
 (`LaboLaboApp::task_agent_status`), on its sidebar row.
 
+**13th wave a fix — `SessionStart`/`source: "compact"` no longer regresses
+the dot to orange.** Auto/manual context compaction fires `SessionStart`
+mid-task, not at session start; `AgentStatus::from_hook_event` (unchanged
+here — the mapping logic lives in `labolabo-core`, this crate just consumes
+its output) special-cases `source: "compact"` to `Running` instead of the
+default `Starting` so a pane that was showing green keeps showing green
+through a compaction instead of flashing back to orange until the next
+tool call. See `docs/hooks-protocol.md` §5 for the full mapping table and
+the Swift-vs-Rust divergence note (Swift still has the old
+always-`Starting` behavior).
+
 **Session memory**: an event carrying `session_id` updates two records, both
 keyed off the routed pane/Task:
 
@@ -676,6 +687,20 @@ time is not recommended** — this matches `plans/012` §1's own "要設計" not
 on the same-cwd-multiple-Tasks case, which remains only partially resolved
 (the *socket* collision is solved by this wave's one-socket-per-process
 design; the *settings-file* backup race is not).
+
+**Known limitation — hooks only cover Task-registered directories.**
+`ensure_injected` only merges LaboLabo's hook entry into a *Task's own*
+working directory (`docs/hooks-protocol.md` §2). `claude` started somewhere
+else — a different repo, or any directory that isn't a currently-registered
+Task's cwd — never gets the hook injected, even if it's running inside a
+LaboLabo-spawned pane (the `LABOLABO_PANE` env var routes an event to the
+right pane *if one arrives*; it doesn't make Claude Code emit one from an
+un-injected directory). The status dot for that pane simply stops updating
+(or never lights up) rather than showing something wrong. Investigated as
+one of the "status indicator gaps" root-cause hypotheses (13th wave a) and
+confirmed unfixable without injecting hooks globally
+(`~/.claude/settings.json`), which would affect Claude Code sessions this
+app isn't managing — out of scope for now.
 
 ### Control CLI
 

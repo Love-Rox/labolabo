@@ -490,6 +490,90 @@ mod tests {
         let _ = fs::remove_file(&runtime.socket_path);
     }
 
+    /// Headless integration coverage for the "status indicator gaps" root
+    /// cause (13th wave a): sends the exact event sequence a real auto-
+    /// compaction mid-task produces -- `SessionStart(startup)` ->
+    /// `UserPromptSubmit` -> `PreToolUse` -> `SessionStart(compact)` ->
+    /// `PostToolUse` -- through a real AF_UNIX socket (same
+    /// `forward_hook`/bus/channel path as the test above, not a synthetic
+    /// call into `AgentStatus::from_hook_event` directly) and asserts the
+    /// decoded status never regresses to `Starting` once the session has
+    /// reached `Running` -- in particular that the `SessionStart(compact)`
+    /// event in the middle decodes to `Running`, not `Starting`.
+    #[test]
+    fn compact_mid_task_session_start_does_not_regress_status_to_starting() {
+        #[cfg(windows)]
+        let socket_path = hook_pipe_name_from_uuid(&uuid::Uuid::new_v4().to_string());
+        #[cfg(not(windows))]
+        let socket_path = std::env::temp_dir()
+            .join(format!("lb-hr-compact-{}.sock", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
+        let (mut runtime, mut rx) = HookRuntime::new_at(socket_path);
+        let pane_uuid = "integration-pane-compact".to_string();
+        let pane_id = fresh_pane_id();
+        runtime.register_pane(pane_uuid.clone(), "task-compact-1".to_string(), pane_id);
+
+        let mut env = HashMap::new();
+        env.insert("LABOLABO_PANE".to_string(), pane_uuid.clone());
+
+        let send = |payload: &[u8]| {
+            let mut sent = false;
+            for _ in 0..150 {
+                if labolabo_core::forward_hook(&runtime.socket_path, payload, &env).is_ok() {
+                    sent = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            assert!(
+                sent,
+                "forward_hook should eventually connect to the bus's socket"
+            );
+        };
+
+        let recv = |rx: &mut mpsc::UnboundedReceiver<AgentStatusEvent>| {
+            recv_with_timeout(rx, std::time::Duration::from_secs(3))
+                .expect("the bus should deliver the parsed event over the channel")
+        };
+
+        // SessionStart(startup) -- a fresh session: starting (orange), as
+        // always.
+        send(br#"{"hook_event_name":"SessionStart","source":"startup","session_id":"sess-c1"}"#);
+        let e = recv(&mut rx);
+        assert_eq!(e.status, labolabo_core::AgentStatus::Starting);
+
+        // UserPromptSubmit -- work begins: running (green).
+        send(br#"{"hook_event_name":"UserPromptSubmit","session_id":"sess-c1"}"#);
+        let e = recv(&mut rx);
+        assert_eq!(e.status, labolabo_core::AgentStatus::Running);
+
+        // PreToolUse -- still running.
+        send(br#"{"hook_event_name":"PreToolUse","session_id":"sess-c1"}"#);
+        let e = recv(&mut rx);
+        assert_eq!(e.status, labolabo_core::AgentStatus::Running);
+
+        // SessionStart(compact) -- auto-compaction fires mid-task. This is
+        // the regression this test pins: must stay running, not flip back
+        // to starting.
+        send(br#"{"hook_event_name":"SessionStart","source":"compact","session_id":"sess-c1"}"#);
+        let e = recv(&mut rx);
+        assert_eq!(
+            e.status,
+            labolabo_core::AgentStatus::Running,
+            "SessionStart(source=compact) mid-task must not regress the indicator to Starting"
+        );
+        assert_eq!(e.source.as_deref(), Some("compact"));
+
+        // PostToolUse -- the agent keeps working right after compaction:
+        // still running, confirming the sequence never dipped to starting.
+        send(br#"{"hook_event_name":"PostToolUse","session_id":"sess-c1"}"#);
+        let e = recv(&mut rx);
+        assert_eq!(e.status, labolabo_core::AgentStatus::Running);
+
+        let _ = fs::remove_file(&runtime.socket_path);
+    }
+
     #[test]
     fn registering_the_same_uuid_twice_overwrites_the_route() {
         let mut runtime = runtime_for_test("overwrite");
