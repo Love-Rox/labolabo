@@ -205,22 +205,35 @@ fn pill_divider() -> impl IntoElement {
     div().w(px(1.0)).h(px(12.0)).bg(rgb(theme::surface::STROKE))
 }
 
-fn pill_segment(icon: Icon, label: impl Into<SharedString>) -> impl IntoElement {
+fn pill_segment(marker: impl IntoElement, label: impl Into<SharedString>) -> impl IntoElement {
     div()
         .flex()
         .flex_row()
         .items_center()
         .gap_1()
-        .child(icons::icon_colored(icon, 11.0, theme::text::SECONDARY))
+        .child(marker)
         .child(label.into())
 }
 
-fn render_pill(data: PillData) -> impl IntoElement {
-    let kind_icon = if data.is_worktree {
-        Icon::Branch
+/// The kind segment's marker -- mirrors `sidebar::kind_marker`'s own
+/// branch-icon-vs-filled-dot grammar exactly (same two shapes, same
+/// meaning) rather than introducing a third "what does attached look like"
+/// visual language just for the pill.
+fn kind_marker(is_worktree: bool) -> gpui::AnyElement {
+    if is_worktree {
+        icons::icon_colored(Icon::Branch, 11.0, theme::text::SECONDARY).into_any_element()
     } else {
-        Icon::Window
-    };
+        div()
+            .w(px(5.0))
+            .h(px(5.0))
+            .flex_shrink_0()
+            .rounded_full()
+            .bg(rgb(theme::text::SECONDARY))
+            .into_any_element()
+    }
+}
+
+fn render_pill(data: PillData) -> impl IntoElement {
     let kind_label = if data.is_worktree {
         t!("titlebar.kind_worktree").to_string()
     } else {
@@ -260,9 +273,12 @@ fn render_pill(data: PillData) -> impl IntoElement {
                 .child(SharedString::from(data.task_title)),
         )
         .child(pill_divider())
-        .child(pill_segment(kind_icon, kind_label))
+        .child(pill_segment(kind_marker(data.is_worktree), kind_label))
         .child(pill_divider())
-        .child(pill_segment(Icon::Branch, data.branch))
+        .child(pill_segment(
+            icons::icon_colored(Icon::Branch, 11.0, theme::text::SECONDARY),
+            data.branch,
+        ))
         .child(pill_divider())
         .child(
             div()
