@@ -2971,6 +2971,15 @@ impl LaboLaboApp {
     /// via this struct's `EntityInputHandler` impl below (see `keys.rs`'s
     /// module doc comment for the full reasoning).
     ///
+    /// The real-PTY branch below also reads the focused pane's live
+    /// `TermSession::kitty_disambiguate()` and threads it into
+    /// `keystroke_to_bytes` -- once the running program (Claude Code's own
+    /// TUI is the motivating case) has requested the Kitty keyboard
+    /// protocol's disambiguate flag, a modifier-carrying Enter/Tab
+    /// (Shift+Enter, Shift+Tab, ...) is re-encoded as a `CSI u` sequence
+    /// instead of its plain legacy byte -- see `keys.rs`'s "Kitty keyboard
+    /// protocol" doc section.
+    ///
     /// `cx.stop_propagation()` on a claimed keystroke is what prevents gpui
     /// from *also* forwarding it to the input handler (macOS's
     /// `NSTextInputContext`, or the X11/Wayland equivalent) once one is
@@ -3003,14 +3012,26 @@ impl LaboLaboApp {
                     cx.stop_propagation();
                 }
                 _ => {
-                    if keystroke_to_bytes(&event.keystroke).is_some() {
+                    // No real PTY behind a text field, so no Kitty-protocol
+                    // state to query -- `false` matches this branch's
+                    // existing behavior (only used to decide whether to
+                    // swallow the keystroke, never to write real bytes).
+                    if keystroke_to_bytes(&event.keystroke, false).is_some() {
                         cx.stop_propagation();
                     }
                 }
             }
             return;
         }
-        if let Some(bytes) = keystroke_to_bytes(&event.keystroke) {
+        // The focused pane's own live Kitty-protocol state (see
+        // `keys::keystroke_to_bytes`'s doc comment) -- `false` when there is
+        // no focused pane, matching `keystroke_to_bytes`'s legacy encoding
+        // for every keystroke it would otherwise re-encode.
+        let kitty_disambiguate = self
+            .focused_pane_runtime()
+            .map(|runtime| runtime.session.kitty_disambiguate())
+            .unwrap_or(false);
+        if let Some(bytes) = keystroke_to_bytes(&event.keystroke, kitty_disambiguate) {
             if self.write_focused_pane_input(&bytes) {
                 cx.stop_propagation();
             }

@@ -407,6 +407,42 @@ fn bracketed_paste_mode_reflects_decset_2004() {
     );
 }
 
+/// The Kitty keyboard protocol's "disambiguate escape codes" flag toggles
+/// `Terminal::kitty_disambiguate()` the same way a real kitty-protocol-aware
+/// program (Claude Code's own TUI is the motivating case) requests it on
+/// startup and releases it on exit: `CSI > 1 u` pushes the flag onto the
+/// mode stack, `CSI < u` pops it back off (default pop count `1`). This is
+/// the query `labolabo-app`'s `keys::keystroke_to_bytes` uses to decide
+/// whether a modifier-carrying Enter/Tab should be re-encoded as a Kitty
+/// `CSI u` sequence instead of its plain legacy byte.
+///
+/// Same "block on `read` between writes" hardening as
+/// [`bracketed_paste_mode_reflects_decset_2004`] -- see this file's module
+/// doc comment for why a clock-based gap alone can't guarantee the
+/// transient ON state survives being observed under CI load.
+#[test]
+fn kitty_disambiguate_reflects_csi_push_pop() {
+    let term = Terminal::spawn_with_command(
+        80,
+        24,
+        Some(r#"printf '\033[>1u'; read _sync; printf '\033[<u'; sleep 0.2"#),
+        &[],
+    )
+    .expect("spawn");
+    assert!(
+        wait_for_kitty_disambiguate(&term, TIMEOUT, true),
+        "expected kitty_disambiguate to turn on after CSI > 1 u (push)"
+    );
+    // Only unblock the child's second `printf` (the pop) once the ON state
+    // was actually observed, so the OFF write can never land in the same
+    // worker batch as the ON one -- see the doc comment above.
+    term.write_input(b"\n");
+    assert!(
+        wait_for_kitty_disambiguate(&term, TIMEOUT, false),
+        "expected kitty_disambiguate to turn back off after CSI < u (pop)"
+    );
+}
+
 /// DECSET `1000`/`1002`/`1006` toggle `Terminal::mouse_mode()` the same way
 /// `1000`, `1002`, and `1006` are used together by real mouse-aware TUIs
 /// (vim, tmux, ...): normal tracking, then switched to button-event
@@ -867,6 +903,24 @@ fn wait_for_bracketed_paste(term: &Terminal, timeout: Duration, expected: bool) 
         };
         if term.recv_event(remaining.min(Duration::from_millis(50))) == Some(TermEvent::Exit) {
             return term.bracketed_paste() == expected;
+        }
+    }
+}
+
+/// Poll `term.kitty_disambiguate()` until it equals `expected` or `timeout`
+/// elapses -- same shape as [`wait_for_bracketed_paste`] (no dedicated event
+/// of its own; a plain flag refreshed alongside snapshot publishing).
+fn wait_for_kitty_disambiguate(term: &Terminal, timeout: Duration, expected: bool) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if term.kitty_disambiguate() == expected {
+            return true;
+        }
+        let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else {
+            return term.kitty_disambiguate() == expected;
+        };
+        if term.recv_event(remaining.min(Duration::from_millis(50))) == Some(TermEvent::Exit) {
+            return term.kitty_disambiguate() == expected;
         }
     }
 }

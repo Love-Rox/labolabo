@@ -188,6 +188,49 @@ pub trait VtBackend: 'static {
     /// scrollback UI.
     fn mouse_mode(&self) -> MouseMode;
 
+    /// Whether the running program has enabled the Kitty keyboard
+    /// protocol's "disambiguate escape codes" progressive-enhancement flag
+    /// (`CSI > 1 u`, or any push/set that includes that bit -- see
+    /// <https://sw.kovidgoyal.net/kitty/keyboard-protocol/>).
+    ///
+    /// This is the one flag `labolabo-app`'s `keys::keystroke_to_bytes`
+    /// needs: once a program (Claude Code's own TUI is the motivating
+    /// case -- see the crate README's "Kitty keyboard protocol" section)
+    /// has requested it, a **modifier-carrying** Enter/Tab -- which the
+    /// legacy protocol below can't distinguish from a bare Enter/Tab, both
+    /// always sending the same `\r`/`\t` regardless of Shift/Alt/Ctrl -- is
+    /// re-encoded as `CSI <code>;<modifier> u` instead (e.g. Shift+Enter
+    /// becomes `CSI 13;2 u`), which is what lets a TUI tell Shift+Enter
+    /// (insert a newline) apart from a plain Enter (submit). The other four
+    /// progressive-enhancement bits (event types, alternate keys, all-keys-
+    /// as-escape, associated text) are deliberately not surfaced here --
+    /// no caller needs them yet, and this crate only ever sends key-*down*
+    /// bytes to begin with (see `keys.rs`'s own module doc comment), so
+    /// "report key release/repeat events" has nothing to hook into even if
+    /// a program requests it.
+    ///
+    /// Queried after every processed PTY byte batch and cached in a plain
+    /// `bool` the caller thread can read without blocking -- the same
+    /// "publish a cheap plain-data flag for the caller thread" shape as
+    /// [`Self::bracketed_paste`] (see `TermSession::kitty_disambiguate`).
+    ///
+    /// Both backends resolve this from their own native protocol-state
+    /// tracking rather than this crate re-parsing the byte stream itself:
+    /// `libghostty-vt` tracks the Kitty keyboard mode stack unconditionally
+    /// (`Terminal::kitty_keyboard_flags()`, wired through this crate's
+    /// vendored FFI bindings -- confirmed by reading both the vendored
+    /// `bindings.rs` and the upstream Ghostty Zig source's
+    /// `terminal/c/terminal.zig`, which has its own dedicated test for this
+    /// exact getter). `alacritty_terminal`, in contrast, only parses the
+    /// push/pop/set/query `CSI u` sequences at all when its `Config::
+    /// kitty_keyboard` is `true` (confirmed by reading `term/mod.rs`: every
+    /// one of `push_keyboard_mode`/`pop_keyboard_modes`/`set_keyboard_mode`/
+    /// `report_keyboard_mode` early-returns when it's `false`, which is
+    /// `Config::default()`'s value) -- the alacritty backend sets it at
+    /// construction specifically so this method (and the query-response
+    /// round-trip `CSI ? u` needs) works at all; see that backend's `new`.
+    fn kitty_disambiguate(&self) -> bool;
+
     /// The terminal title most recently set by the running program via OSC
     /// `0`/`2` (`ESC ] 0 ; <title> BEL`/`ESC ] 2 ; <title> BEL`, or the same
     /// with an ST terminator) -- the same escape sequence every mainstream
