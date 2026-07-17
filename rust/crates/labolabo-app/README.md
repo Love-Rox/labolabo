@@ -1017,6 +1017,22 @@ the IME side:
   selection, scroll & copy" below, a separate path from either of the
   above).
 
+  **Kitty keyboard protocol (wave 15) — Shift+Enter.** `keys::
+  keystroke_to_bytes` takes a second `kitty_disambiguate: bool` parameter,
+  threaded in from the focused pane's live `Terminal::kitty_disambiguate()`
+  (`false` for the text-field input-routing branch, which has no real PTY
+  behind it). When the running program has requested the [Kitty keyboard
+  protocol](https://sw.kovidgoyal.net/kitty/keyboard-protocol/)'s
+  "disambiguate escape codes" flag (`CSI > 1 u` — Claude Code's own TUI is
+  the motivating case, this is how it tells Shift+Enter apart from a plain
+  Enter), a **modifier-carrying** Enter/Tab is re-encoded as `CSI
+  <code>;<modifier> u` instead of its plain legacy byte (Shift+Enter ->
+  `\x1b[13;2u`; an *unmodified* Enter/Tab still sends `\r`/`\t` even with
+  the flag on — the protocol's own documented exception, so shell-level
+  typing is unaffected either way). See the root `rust/README.md`'s "Wave
+  15" section for the full backend-query design (why the two backends'
+  implementations are asymmetric) and the encoding table.
+
 **Not implemented:**
 
 - Delete (forward-delete)/Home/End/PageUp/PageDown/function keys.
@@ -1352,6 +1368,17 @@ Three independent DnD systems, all built on gpui 0.2's `on_drag`/
 - **No repo registry.** "+ Worktree" asks for a repository directory every
   time via the OS picker; the plan's "registered repositories" notion (and
   reinterpreting "open folder" as registration) isn't built yet.
+- **No fallback for Shift+Enter on a Kitty-protocol-unaware terminal
+  backend/program (wave 15).** If `Terminal::kitty_disambiguate()` never
+  turns `true` (the running program never requests the Kitty keyboard
+  protocol), Shift+Enter still sends plain `\r`, indistinguishable from a
+  bare Enter — deliberately not worked around, since the one program this
+  matters for (Claude Code) always has `\` + Enter as a manual-newline
+  fallback of its own, and no other equivalent-`/terminal-setup` step is
+  needed on this app's side: both backends parse the Kitty protocol's
+  push/pop sequences unconditionally (see root `rust/README.md`'s "Wave
+  15"), so the flag turns on automatically the moment Claude Code requests
+  it — there is nothing for a user to configure.
 - **Restore resumes Claude sessions per tab (wave 5c), not terminal
   scrollback.** A pane with a previously-observed Claude session (and an
   existing or unrecorded transcript) spawns `claude --resume` directly

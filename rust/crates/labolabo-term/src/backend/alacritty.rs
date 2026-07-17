@@ -133,6 +133,18 @@ impl VtBackend for AlacrittyBackend {
         // defaulting to `1000` (`crate::session::DEFAULT_MAX_SCROLLBACK`).
         let config = Config {
             scrolling_history: max_scrollback,
+            // Without this, `Term`'s Kitty-keyboard `Handler` methods
+            // (`push_keyboard_mode`/`pop_keyboard_modes`/`set_keyboard_mode`/
+            // `report_keyboard_mode`) all early-return and never touch
+            // `self.mode` at all (confirmed by reading `term/mod.rs`) -- the
+            // push/pop/set/query `CSI u` sequences would parse (the
+            // `vte::ansi::Processor` dispatch has no such gate) but be
+            // silently dropped, and `Self::kitty_disambiguate` below would
+            // always report `false` regardless of what the running program
+            // requested. `libghostty-vt`, by contrast, tracks this
+            // unconditionally -- see `VtBackend::kitty_disambiguate`'s doc
+            // comment.
+            kitty_keyboard: true,
             ..Config::default()
         };
         let size = GridSize {
@@ -257,6 +269,10 @@ impl VtBackend for AlacrittyBackend {
 
     fn bracketed_paste(&self) -> bool {
         self.term.mode().contains(TermMode::BRACKETED_PASTE)
+    }
+
+    fn kitty_disambiguate(&self) -> bool {
+        self.term.mode().contains(TermMode::DISAMBIGUATE_ESC_CODES)
     }
 
     fn scroll_display(&mut self, delta_lines: i64) {
