@@ -955,3 +955,64 @@ cargo test -p labolabo-term --no-default-features --features backend-ghostty-vt
 ACTIVE_BACKEND_NAME` の再エクスポートで、cfg 判定を crate 境界をまたいで
 二重実装しない設計）。サポート対応時にどちらのビルドが動いているか
 判別できる。
+
+## Wave 14（`rust-term-ghostty` の断続的 SIGILL を根本修正）
+
+`rust-term-ghostty (ubuntu-latest)` の `cargo test`（`backend_common`）が
+断続的に `signal: 4, SIGILL: illegal instruction` でプロセスごと落ちる問題
+を調査し、根本原因を特定して修正した。
+
+### 原因
+
+`libghostty-vt-sys`（`libghostty-vt` の -sys クレート）の `build.rs` は、
+クロスコンパイル時（`TARGET != HOST`）だけ `zig build` に `-Dtarget=<triple>`
+を渡し、ネイティブビルド（`TARGET == HOST`、ubuntu-latest の
+`cargo test` はこれに該当）では省略して Zig に自動検出させていた。
+Ghostty 本体の `build.zig`/`Config.zig` は `b.standardTargetOptions(.{})`
+を素通しするだけで、macOS 向けだけ `genericMacOSTarget()` で CPU を
+`generic` に強制する回避策（github.com/mitchellh/ghostty/issues/1640）を
+持つが、Linux 向けには同等の処理が無い。結果として:
+
+- **`-Dtarget` 省略（ネイティブ）**: Zig がビルドマシンの CPU を実機検出し、
+  そのマシンが持つ拡張命令（AVX-512 等）をすべて焼き込む
+  （`-femit-llvm-ir` の `target-features` 属性で実測確認済み）。
+- **`-Dtarget=x86_64-linux-gnu` のように明示（cpu サフィックス無し）**:
+  そのアーキテクチャの可搬な baseline CPU（SSE/SSE2 相当のみ）に解決される。
+
+GitHub Actions の `ubuntu-latest` はランナー世代が実行ごとに異なる
+（不均質な fleet）うえ、`mlugg/setup-zig@v2` の既定キャッシュが
+`.zig-cache` を**別の・無関係な過去の run**からも `restore-keys` の
+prefix フォールバックで復元する（実際の CI ログで、別 run が保存した
+キャッシュを復元しているのを確認済み）。そのため「幅広い CPU 機能を持つ
+ランナーがビルドした `libghostty-vt.a`」が「その機能を持たない別ランナー」
+に復元・リンクされ、対応していない命令に到達した瞬間に SIGILL で落ちる
+— これが観測されていた断続的な失敗の実体。直近 15 run のサンプルでは、
+`.zig-cache` が空だった（コールドキャッシュ = 同一ランナー上で自己完結
+ビルド）3 run は全て成功、復元ありの run は成否が混在しており、CPU 世代
+不一致仮説と整合していた。もう一つの仮説（Zig `ReleaseFast` での
+`unreachable` がトラップ命令化して SIGILL になる、libghostty-vt 自体の
+バグ）は、ローカルでのフレッシュビルド + 60 回リピート実行が全成功した
+ことと、コールドキャッシュ run が全成功だったことから積極的な支持が
+得られず、採用していない（実機の x86_64 Linux での大規模リピートは
+未実施 — 完全には棄却できないが、観測データは仮説 1 で一貫して説明できる）。
+
+### 修正
+
+`rust/vendor/libghostty-vt-sys/`（`[patch.crates-io]` で `rust/Cargo.toml`
+から差し替え）に、公開クレート `libghostty-vt-sys` 0.2.0 のローカル
+パッチ版を用意した。差分は `build.rs` の一箇所のみ:
+**`-Dtarget` を常に渡す**（`TARGET != HOST` の条件分岐を撤廃）。
+これによりネイティブビルドも含めて常に baseline CPU へ解決されるため、
+CI のキャッシュ復元やランナー世代の違いに関係なく安全になる。
+詳細な経緯は `rust/vendor/libghostty-vt-sys/README.md` と `build.rs` の
+"LOCAL PATCH" コメント参照。upstream（github.com/uzaaft/libghostty-rs）に
+同等の修正が入り次第、このベンダコピーは削除する。
+
+**配布物への影響**: `bundle-macos.sh`/`package-linux.sh` はどちらも
+同じ `libghostty-vt-sys` を使うため、この修正で Linux/macOS の配布
+バイナリも baseline CPU でビルドされるようになり、「リリースランナーの
+たまたまの CPU 世代がユーザーの CPU で SIGILL する」というリスクが
+解消される。macOS は元々 `genericMacOSTarget()` により安全だった
+（world 世代差の影響は小さいと見ているが、Apple Silicon 世代間の
+命令セット差は x86_64 の SSE→AVX-512 ほど大きくないとはいえゼロではない
+ため、今回の修正で明示的にも baseline 化された点は保険として有効）。
