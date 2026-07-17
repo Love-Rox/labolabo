@@ -157,7 +157,12 @@ swift_import:
 
 app:
   loading_task: "タスクを読み込み中…"
-  no_task_selected: "タスクが選択されていません。左上の + アイコンからフォルダまたは worktree で開始してください。"
+  # 第13波b §3 (空状態のデザイン): 以前はここに導線を含む長文を直接表示
+  # していたが、中央配置のアイコン + 1 行 + 主要アクションボタンへ差し替え
+  # たため、本文は短い案内文に、導線はボタン本体
+  # (`no_task_selected_action`) の文言へ分離した。
+  no_task_selected: "作業が選択されていません"
+  no_task_selected_action: "＋ 新しい作業"
   swift_import_db_not_found: "Swift 版のデータベースが見つかりませんでした。"
   missing_task:
     title: "作業ディレクトリが見つかりません"
@@ -187,3 +192,12 @@ color:
   custom_apply: "適用"
   invalid_hex: "#rrggbb 形式で入力してください"
   tab_menu_title: "タブの色"
+
+# 第13波b §1 (ウィンドウ一体型ツールバー): ウィンドウ上部のステータスピル
+# (`crate::titlebar`) の文言。第8波d/第10波ブロックと同じ理由でファイル
+# 末尾へ追記。
+titlebar:
+  kind_worktree: "worktree"
+  kind_attached: "直付け"
+  changes_clean: "クリーン"
+  changes_count: "%{count} 件変更"

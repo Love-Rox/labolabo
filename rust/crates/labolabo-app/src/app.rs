@@ -71,6 +71,7 @@ use rust_i18n::t;
 
 use crate::color_picker::{self, TabColorMenuState};
 use crate::control::{self, ControlRuntime};
+use crate::empty_state;
 use crate::focus;
 use crate::ghostty_config::FontConfig;
 use crate::git_pane::{self, FileViewMode, GitSnapshot};
@@ -98,6 +99,7 @@ use crate::task_menu::{self, TaskMenuPhase, TaskMenuState};
 use crate::task_workspace::{self, PaneDragHover, PaneRuntime, TabDragPayload, TaskWorkspace};
 use crate::text_field::TextFieldState;
 use crate::theme;
+use crate::titlebar;
 use crate::update_check::{self, ReleaseInfo};
 use crate::window_bounds;
 
@@ -665,6 +667,32 @@ impl LaboLaboApp {
 
     pub(crate) fn selected_task_id(&self) -> Option<&str> {
         self.selected_task_id.as_deref()
+    }
+
+    /// The selected Task's `crate::titlebar` status-pill data (第13波b §1),
+    /// or `None` when no Task is selected (`titlebar::render` then draws an
+    /// empty, still-draggable bar). Collects the same three sources
+    /// `sidebar::render`/`git_pane::render_git_pane` already read
+    /// (`self.tasks`, `self.selected_task_id`, the selected Task's
+    /// `TaskWorkspace::git`) into `titlebar::PillData::build`'s pure
+    /// assembly logic -- see that function's doc comment. Deliberately
+    /// tolerant of a not-yet-loaded workspace (branch `None`, changed count
+    /// `0`) rather than hiding the pill entirely, matching `git_pane`'s own
+    /// "読み込み中…" branch-bar state for the same window.
+    pub(crate) fn titlebar_pill_data(&self) -> Option<titlebar::PillData> {
+        let task_id = self.selected_task_id.as_deref()?;
+        let task = self.tasks.iter().find(|t| t.id == task_id)?;
+        let workspace = self.workspaces.get(task_id);
+        let branch = workspace
+            .and_then(|w| w.git.status.as_ref())
+            .and_then(|status| status.branch.as_deref());
+        let changed_count = workspace.map(|w| w.git.items.len()).unwrap_or(0);
+        Some(titlebar::PillData::build(
+            &task.title,
+            titlebar::is_worktree_kind(&task.kind),
+            branch,
+            changed_count,
+        ))
     }
 
     pub(crate) fn new_task_error(&self) -> Option<&str> {
@@ -4335,7 +4363,7 @@ impl Render for LaboLaboApp {
                 empty_state(t!("app.loading_task").to_string())
             }
         } else {
-            empty_state(t!("app.no_task_selected").to_string())
+            render_no_task_placeholder(cx)
         };
 
         // The selected Task's Git pane -- a fixed pane to the right of the
@@ -4371,6 +4399,22 @@ impl Render for LaboLaboApp {
         // 第8波d) -- 同じく「開いている間だけ子が存在する」オーバーレイ。
         let import_prompt_el = import_prompt::render_import_prompt_overlay(self, cx);
 
+        // Window-integrated toolbar chrome (第13波b §1): a top row above
+        // the sidebar/workspace/Git pane row, rather than a fourth `.child`
+        // alongside them -- see `crate::titlebar`'s module doc comment for
+        // why (native-titlebar hiding + drag region on macOS, the status
+        // pill on every platform). Built from `titlebar_pill_data()` (this
+        // impl block, above), which is `None` whenever no Task is selected.
+        let titlebar_el = titlebar::render(self.titlebar_pill_data());
+        let content_row = div()
+            .flex_1()
+            .min_h(px(0.0))
+            .flex()
+            .flex_row()
+            .child(sidebar_el)
+            .child(workspace_el)
+            .children(git_pane_el);
+
         div()
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(Self::key_down))
@@ -4404,12 +4448,11 @@ impl Render for LaboLaboApp {
             .on_action(cx.listener(Self::action_open_selected_in_ide))
             .relative()
             .flex()
-            .flex_row()
+            .flex_col()
             .size_full()
             .bg(rgb(theme::surface::ROOT))
-            .child(sidebar_el)
-            .child(workspace_el)
-            .children(git_pane_el)
+            .child(titlebar_el)
+            .child(content_row)
             .children(settings_el)
             .children(task_menu_el)
             .children(tab_color_el)
@@ -4441,6 +4484,36 @@ fn empty_state(message: impl Into<String>) -> gpui::AnyElement {
         .justify_center()
         .text_color(rgb(theme::text::SECONDARY))
         .child(message.into())
+        .into_any_element()
+}
+
+/// タスク未選択時（タスクゼロを含む）のワークスペース領域プレースホルダ
+/// (第13波b §3 -- モダン化第2弾): `crate::empty_state`の共通トーン
+/// （中央配置のアイコン + 1 行 + 主要アクション）に、「新しい作業を始める」
+/// ボタンを添えたもの。以前は `empty_state()`（テキストのみ）を直接ここへ
+/// 出していた。ボタンはサイドバーの 2 択（フォルダ直付け/worktree）のうち
+/// より単純な「フォルダ直付け」フローへ配線している -- worktree 側は git
+/// リポジトリの選択を要求するぶん一手多く、単一の主要アクションとしては
+/// 直付けのほうが「とりあえず始める」に近いため（もう一方はサイドバーの
+/// 既存の "+" 群に残っている）。
+fn render_no_task_placeholder(cx: &mut Context<LaboLaboApp>) -> gpui::AnyElement {
+    let cluster = empty_state::render(
+        crate::icons::Icon::Window,
+        t!("app.no_task_selected").to_string(),
+        Some(empty_state::Action {
+            id: "empty-workspace-new-task",
+            label: t!("app.no_task_selected_action").to_string().into(),
+            on_click: Box::new(cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                this.start_new_attached_task(window, cx);
+            })),
+        }),
+    );
+    div()
+        .flex_1()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(cluster)
         .into_any_element()
 }
 
