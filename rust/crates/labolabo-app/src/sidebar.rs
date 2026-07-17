@@ -6,9 +6,9 @@
 //! [`render`] just walks its output and wires up click/drag/drop handlers.
 //!
 //! Deliberately minimal per this wave's brief ("title + kind の別が分かる
-//! 程度の最小表示" / "本格ダイアログは将来"): no icons beyond a one-glyph
-//! kind marker. Drag & drop (plan §3) *is* implemented here: dragging a
-//! Task row reorders it within its repo group (`LaboLaboApp::
+//! 程度の最小表示" / "本格ダイアログは将来"): title + a small kind marker.
+//! Drag & drop (plan §3) *is* implemented here: dragging a Task row
+//! reorders it within its repo group (`LaboLaboApp::
 //! reorder_tasks_in_sidebar`, ordering math in `labolabo_core::
 //! reorder_task_ids`), and dropping an OS folder anywhere on the sidebar
 //! starts a new attached Task there (`LaboLaboApp::
@@ -17,6 +17,12 @@
 //! Wave 6c adds: 行ホバーの「…」ボタン（`crate::task_menu` のアーカイブ/
 //! 削除/IDE で開くメニュー）と、下部の「アーカイブ済み (n)」折りたたみ
 //! セクション（[`render_archived_section`]、復元ボタン付き）。
+//!
+//! 第13波b §2 (SVG アイコン体系): every glyph in this module (worktree
+//! marker, conflict/missing badges, "…" menu button, archived-section
+//! chevron, banner dismiss "×") is now `crate::icons`-drawn instead of a
+//! plain Unicode text child -- see that module's doc comment for the
+//! rendering model (single-tone, tinted via `.text_color(..)`).
 
 use gpui::{
     div, prelude::*, px, rgb, rgba, App, Context, ExternalPaths, FontWeight, IntoElement,
@@ -27,6 +33,7 @@ use rust_i18n::t;
 use labolabo_core::{AgentStatus, Task, TaskKind};
 
 use crate::app::LaboLaboApp;
+use crate::icons::{self, Icon};
 use crate::task_workspace::status_dot_color;
 use crate::theme;
 
@@ -135,13 +142,29 @@ pub fn group_tasks_by_repo(tasks: &[Task]) -> Vec<RepoGroup<'_>> {
     groups
 }
 
-/// A one-glyph marker distinguishing a worktree Task from an attached-
-/// directory Task in the sidebar row -- the wave's "title + kind の別が
-/// 分かる程度の最小表示" bar, nothing more.
-fn kind_marker(kind: &TaskKind) -> &'static str {
+/// A small marker distinguishing a worktree Task from an attached-directory
+/// Task in the sidebar row -- the wave's "title + kind の別が分かる程度の
+/// 最小表示" bar, nothing more. Worktree gets the branch icon (第13波b §2,
+/// `crate::icons::Icon::Branch` -- previously the "⎇-ish" `\u{2387}`
+/// glyph); attached keeps its plain filled dot ("in place"), now drawn as a
+/// `div` circle rather than a Unicode `\u{25CF}` glyph so both arms render
+/// via the same explicit-`text_color` mechanism instead of mixing a font
+/// glyph with an SVG icon. `color` is passed in (rather than relying on the
+/// caller's ambient `.text_color(..)`) so this marker tracks the same
+/// missing/normal dimming its two call sites already apply to the rest of
+/// their row.
+fn kind_marker(kind: &TaskKind, color: u32) -> gpui::AnyElement {
     match kind {
-        TaskKind::Worktree { .. } => "\u{2387}", // ⎇-ish branch glyph
-        TaskKind::Attached { .. } => "\u{25CF}", // solid dot: "in place"
+        TaskKind::Worktree { .. } => {
+            icons::icon_colored(Icon::Branch, 11.0, color).into_any_element()
+        }
+        TaskKind::Attached { .. } => div()
+            .w(px(5.0))
+            .h(px(5.0))
+            .flex_shrink_0()
+            .rounded_full()
+            .bg(gpui::rgb(color))
+            .into_any_element(),
     }
 }
 
@@ -154,14 +177,13 @@ fn kind_marker(kind: &TaskKind) -> &'static str {
 /// on-device: the row overflowed the sidebar). Rather than a single
 /// full-width button opening a 2-choice overlay (`settings.rs`'s modal
 /// pattern, also considered), this keeps both actions a single click away
-/// as compact icon buttons, using glyphs already established elsewhere in
-/// this module ([`kind_marker`]'s "⎇" = worktree) plus a plain "+", with
-/// the full label carried by gpui 0.2's own `Div::tooltip` (a real API,
-/// not hand-rolled -- confirmed in `elements/div.rs`: ~500ms show delay,
-/// auto-positioning, dismiss-on-scroll/click, all built in) instead of
-/// squeezing text onto the button face. No emoji (project policy) -- both
-/// glyphs are plain Unicode the UI font already renders elsewhere in this
-/// same view.
+/// as compact icon buttons, with the full label carried by gpui 0.2's own
+/// `Div::tooltip` (a real API, not hand-rolled -- confirmed in
+/// `elements/div.rs`: ~500ms show delay, auto-positioning,
+/// dismiss-on-scroll/click, all built in) instead of squeezing text onto
+/// the button face. `content` is `crate::icons`-drawn (第13波b §2 -- no
+/// emoji, project policy) -- a single icon for the plain "+" button, or
+/// [`plus_branch_icon`]'s composed pair for the worktree one.
 ///
 /// Not implemented: the "2 個目以降は遅延なしで即表示" toolbar convention
 /// (hovering a second nearby tooltip skips the delay) -- gpui 0.2's
@@ -171,7 +193,7 @@ fn kind_marker(kind: &TaskKind) -> &'static str {
 /// app-wide) was judged not worth it for two adjacent buttons.
 fn icon_button(
     id: &'static str,
-    glyph: &'static str,
+    content: impl IntoElement,
     tooltip_text: String,
     on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
@@ -185,12 +207,29 @@ fn icon_button(
         .justify_center()
         .rounded_sm()
         .bg(rgb(theme::surface::RAISED))
-        .text_color(rgb(theme::text::PRIMARY))
         .hover(|el| el.bg(rgb(theme::surface::ACTIVE)))
         .active(|el| el.opacity(0.8))
         .tooltip(move |_window, cx| cx.new(|_| IconTooltip(tooltip_text.clone())).into())
         .on_mouse_down(MouseButton::Left, on_click)
-        .child(glyph)
+        .child(content)
+}
+
+/// A small "+" next to a smaller branch glyph, side by side -- the
+/// "new worktree Task" button's icon (previously the single combined glyph
+/// `"+\u{2387}"`). Two `crate::icons` icons rather than one hand-drawn
+/// composite SVG, since the icon set has no "plus-with-a-branch" glyph of
+/// its own and this reads just as clearly at 28px.
+fn plus_branch_icon() -> impl IntoElement {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .child(icons::icon_colored(Icon::Plus, 12.0, theme::text::PRIMARY))
+        .child(icons::icon_colored(
+            Icon::Branch,
+            11.0,
+            theme::text::PRIMARY,
+        ))
 }
 
 pub fn render(
@@ -300,7 +339,6 @@ pub fn render(
                 .rounded_sm()
                 .opacity(0.0)
                 .group_hover(row_group.clone(), |el| el.opacity(1.0))
-                .text_color(rgb(theme::text::SECONDARY))
                 .hover(|el| el.bg(rgb(theme::surface::ACTIVE)))
                 .active(|el| el.opacity(0.8))
                 .tooltip(move |_window, cx| {
@@ -317,7 +355,11 @@ pub fn render(
                         this.open_task_menu(&menu_task_id, event.position, cx);
                     }),
                 )
-                .child("\u{22EF}"); // ⋯
+                .child(icons::icon_colored(
+                    Icon::More,
+                    12.0,
+                    theme::text::SECONDARY,
+                ));
 
             // 第10波: タスクのカスタム色 (`Task::color`)。行の左バー
             // (非選択時も表示)とタイトル横の 6px 色ドットで表現する。
@@ -389,7 +431,14 @@ pub fn render(
                     theme::text::PRIMARY
                 }))
                 .text_size(px(theme::font_size::LABEL))
-                .child(kind_marker(&task.kind))
+                .child(kind_marker(
+                    &task.kind,
+                    if missing {
+                        theme::text::MUTED
+                    } else {
+                        theme::text::PRIMARY
+                    },
+                ))
                 // カスタム色の 6px ドット (第10波 §1 -- 状態ドット 8px 枠
                 // とは別物。左バーと同じ色の「ラベル」としてタイトルの左に)。
                 .when_some(custom_color, |el, color| {
@@ -407,12 +456,14 @@ pub fn render(
                     el.child(
                         div()
                             .id(missing_badge_id)
-                            .text_size(px(theme::font_size::CAPTION))
-                            .text_color(rgb(theme::status::CONFLICT))
                             .tooltip(move |_window, cx| {
                                 cx.new(|_| IconTooltip(missing_tooltip.clone())).into()
                             })
-                            .child("\u{2205}"),
+                            .child(icons::icon_colored(
+                                Icon::NotFound,
+                                12.0,
+                                theme::status::CONFLICT,
+                            )),
                     )
                 })
                 // 状態ドットは 8px 固定の枠に中央揃えしてから置く(ドット
@@ -432,12 +483,14 @@ pub fn render(
                     el.child(
                         div()
                             .id(conflict_badge_id)
-                            .text_size(px(theme::font_size::CAPTION))
-                            .text_color(rgb(theme::status::CONFLICT))
                             .tooltip(move |_window, cx| {
                                 cx.new(|_| IconTooltip(conflict_tooltip.clone())).into()
                             })
-                            .child("\u{26A0}"),
+                            .child(icons::icon_colored(
+                                Icon::Warning,
+                                12.0,
+                                theme::status::CONFLICT,
+                            )),
                     )
                 })
                 .child(menu_button)
@@ -494,7 +547,7 @@ pub fn render(
         .py_1()
         .child(icon_button(
             "new-attached-task",
-            "+",
+            icons::icon_colored(Icon::Plus, 14.0, theme::text::PRIMARY).into_any_element(),
             t!("sidebar.new_attached_task_tooltip").to_string(),
             cx.listener(|this, _: &MouseDownEvent, window, cx| {
                 this.start_new_attached_task(window, cx);
@@ -502,7 +555,7 @@ pub fn render(
         ))
         .child(icon_button(
             "new-worktree-task",
-            "+\u{2387}",
+            plus_branch_icon().into_any_element(),
             t!("sidebar.new_worktree_task_tooltip").to_string(),
             cx.listener(|this, _: &MouseDownEvent, window, cx| {
                 this.start_new_worktree_task(window, cx);
@@ -572,18 +625,106 @@ pub fn render(
     sidebar
 }
 
+/// A boxed mouse-down handler, matching `Div::on_mouse_down`'s own bound --
+/// named so [`BannerAction::on_click`]/[`banner`]'s `on_body_click` don't
+/// spell the whole trait object out inline (clippy's `type_complexity`
+/// lint).
+type ClickHandler = Box<dyn Fn(&MouseDownEvent, &mut Window, &mut App) + 'static>;
+
+/// A secondary text action rendered between the banner body and its close
+/// button (e.g. update's "開く") -- see [`banner`].
+struct BannerAction {
+    id: &'static str,
+    label: SharedString,
+    on_click: ClickHandler,
+}
+
+/// Shared chrome for the sidebar's "app/environment has something to tell
+/// you" banners (第13波b §4 -- banner unification): a leading tinted icon,
+/// the message (optionally itself clickable via `on_body_click`), an
+/// optional secondary text action, and an icon close button -- one visual
+/// style, previously three independent hand-rolled `flex` rows in
+/// [`render_update_banner`]/[`render_import_banner`]/
+/// [`render_missing_tasks_banner`] that agreed on spacing/colors by
+/// convention rather than by construction. The leading icon also gives each
+/// banner a wordless "what kind of banner is this" cue at a glance:
+/// [`Icon::Info`] for the two "the app is telling you something" banners
+/// (update/import), [`Icon::Warning`] for the one "your environment needs
+/// attention" banner (missing worktrees) -- reusing the same warning tone
+/// [`Icon::Warning`] already carries in the Task-row conflict badge above.
+#[allow(clippy::too_many_arguments)]
+fn banner(
+    icon: Icon,
+    icon_color: u32,
+    body_id: &'static str,
+    message: SharedString,
+    on_body_click: Option<ClickHandler>,
+    action: Option<BannerAction>,
+    dismiss_id: &'static str,
+    on_dismiss: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    let mut body = div()
+        .id(body_id)
+        .flex_1()
+        .rounded_sm()
+        .text_color(rgb(theme::text::SECONDARY))
+        .text_size(px(theme::font_size::CAPTION))
+        .child(message);
+    if let Some(on_click) = on_body_click {
+        body = body
+            .hover(|el| el.bg(rgb(theme::surface::ACTIVE)))
+            .on_mouse_down(MouseButton::Left, on_click);
+    }
+
+    let mut row = div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .px_2()
+        .py_1()
+        .bg(rgb(theme::surface::RAISED))
+        .border_b_1()
+        .border_color(rgb(theme::surface::STROKE))
+        .child(icons::icon_colored(icon, 13.0, icon_color))
+        .child(body);
+
+    if let Some(action) = action {
+        row = row.child(
+            div()
+                .id(action.id)
+                .px_1()
+                .rounded_sm()
+                .text_color(rgb(theme::text::SECONDARY))
+                .text_size(px(theme::font_size::CAPTION))
+                .hover(|el| el.bg(rgb(theme::surface::ACTIVE)))
+                .on_mouse_down(MouseButton::Left, action.on_click)
+                .child(action.label),
+        );
+    }
+
+    row.child(
+        div()
+            .id(dismiss_id)
+            .px_1()
+            .rounded_sm()
+            .hover(|el| el.bg(rgb(theme::surface::ACTIVE)))
+            .on_mouse_down(MouseButton::Left, on_dismiss)
+            .child(icons::icon_colored(Icon::Close, 10.0, theme::text::MUTED)),
+    )
+}
+
 /// アップデート確認 (`crate::update_check`, RC release wave) の結果一行
 /// バナー -- サイドバー最上部（Swift 版インポータのバナーより上）に出す。
 /// `render_import_banner` と同じ「閉じるまで残る」動線だが、"開く" ボタンが
 /// 追加で付く点が異なる（リリースページを既定ブラウザで開く、
-/// `LaboLaboApp::open_update_release_page`）。"×" は
+/// `LaboLaboApp::open_update_release_page`）。閉じるアイコンは
 /// `LaboLaboApp::dismiss_update_banner` -- 閉じると同時に「このバージョン
 /// を通知しない」を appState へ永続化する（同メソッドの doc コメント参照）。
 /// `app.update_banner()` が `None` なら何も描画しない。
 fn render_update_banner(
     app: &LaboLaboApp,
     cx: &mut Context<LaboLaboApp>,
-) -> Option<impl IntoElement> {
+) -> Option<gpui::AnyElement> {
     let release = app.update_banner()?.clone();
     let message = t!(
         "update.available.message",
@@ -591,102 +732,52 @@ fn render_update_banner(
     )
     .to_string();
     Some(
-        div()
-            .flex()
-            .items_center()
-            .justify_between()
-            .gap_2()
-            .px_2()
-            .py_1()
-            .bg(rgb(theme::surface::RAISED))
-            .border_b_1()
-            .border_color(rgb(theme::surface::STROKE))
-            .child(
-                div()
-                    .flex_1()
-                    .text_color(rgb(theme::text::SECONDARY))
-                    .text_size(px(theme::font_size::CAPTION))
-                    .child(SharedString::from(message)),
-            )
-            .child(
-                div()
-                    .id("update-banner-open")
-                    .px_1()
-                    .rounded_sm()
-                    .text_color(rgb(theme::text::SECONDARY))
-                    .text_size(px(theme::font_size::CAPTION))
-                    .hover(|el| el.bg(rgb(theme::surface::ACTIVE)))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _: &MouseDownEvent, _window, cx| {
-                            this.open_update_release_page(cx);
-                        }),
-                    )
-                    .child(t!("update.available.open").to_string()),
-            )
-            .child(
-                div()
-                    .id("update-banner-dismiss")
-                    .px_1()
-                    .rounded_sm()
-                    .text_color(rgb(theme::text::MUTED))
-                    .text_size(px(theme::font_size::CAPTION))
-                    .hover(|el| el.bg(rgb(theme::surface::ACTIVE)))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _: &MouseDownEvent, _window, cx| {
-                            this.dismiss_update_banner(cx);
-                        }),
-                    )
-                    .child("×"),
-            ),
+        banner(
+            Icon::Info,
+            theme::text::SECONDARY,
+            "update-banner-text",
+            message.into(),
+            None,
+            Some(BannerAction {
+                id: "update-banner-open",
+                label: t!("update.available.open").to_string().into(),
+                on_click: Box::new(cx.listener(|this, _: &MouseDownEvent, _window, cx| {
+                    this.open_update_release_page(cx);
+                })),
+            }),
+            "update-banner-dismiss",
+            cx.listener(|this, _: &MouseDownEvent, _window, cx| {
+                this.dismiss_update_banner(cx);
+            }),
+        )
+        .into_any_element(),
     )
 }
 
 /// Swift 版インポータ (`crate::swift_import`, `plans` W6e) の結果一行バナー
 /// -- サイドバー最上部（新規作業の "+" 行より上）に出す。`new_task_error`
-/// と違い、閉じる（"×"）ボタンで明示的に消すまで残る（`LaboLaboApp::
+/// と違い、閉じるアイコンで明示的に消すまで残る（`LaboLaboApp::
 /// dismiss_import_banner`）。`app.import_banner()` が `None` なら何も描画
 /// しない。
 fn render_import_banner(
     app: &LaboLaboApp,
     cx: &mut Context<LaboLaboApp>,
-) -> Option<impl IntoElement> {
+) -> Option<gpui::AnyElement> {
     let text = app.import_banner()?.to_string();
     Some(
-        div()
-            .flex()
-            .items_center()
-            .justify_between()
-            .gap_2()
-            .px_2()
-            .py_1()
-            .bg(rgb(theme::surface::RAISED))
-            .border_b_1()
-            .border_color(rgb(theme::surface::STROKE))
-            .child(
-                div()
-                    .flex_1()
-                    .text_color(rgb(theme::text::SECONDARY))
-                    .text_size(px(theme::font_size::CAPTION))
-                    .child(SharedString::from(text)),
-            )
-            .child(
-                div()
-                    .id("import-banner-dismiss")
-                    .px_1()
-                    .rounded_sm()
-                    .text_color(rgb(theme::text::MUTED))
-                    .text_size(px(theme::font_size::CAPTION))
-                    .hover(|el| el.bg(rgb(theme::surface::ACTIVE)))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _: &MouseDownEvent, _window, cx| {
-                            this.dismiss_import_banner(cx);
-                        }),
-                    )
-                    .child("×"),
-            ),
+        banner(
+            Icon::Info,
+            theme::text::SECONDARY,
+            "import-banner-text",
+            text.into(),
+            None,
+            None,
+            "import-banner-dismiss",
+            cx.listener(|this, _: &MouseDownEvent, _window, cx| {
+                this.dismiss_import_banner(cx);
+            }),
+        )
+        .into_any_element(),
     )
 }
 
@@ -694,13 +785,13 @@ fn render_import_banner(
 /// `app.missing_task_count()` が 0、あるいは既に閉じられている
 /// (`missing_banner_dismissed`) なら `None`（見出しごと出さない）。本文の
 /// クリックでサイドバー順で最初の該当タスクへジャンプし
-/// (`jump_to_first_missing_task`)、"×" は `dismiss_missing_tasks_banner`。
-/// 自動一括削除はしない -- あくまで気づかせるだけ（設計方針、モジュール
-/// 冒頭のタスク doc コメント参照）。
+/// (`jump_to_first_missing_task`)、閉じるアイコンは
+/// `dismiss_missing_tasks_banner`。自動一括削除はしない -- あくまで
+/// 気づかせるだけ（設計方針、モジュール冒頭のタスク doc コメント参照）。
 fn render_missing_tasks_banner(
     app: &LaboLaboApp,
     cx: &mut Context<LaboLaboApp>,
-) -> Option<impl IntoElement> {
+) -> Option<gpui::AnyElement> {
     if app.missing_banner_dismissed() {
         return None;
     }
@@ -710,48 +801,23 @@ fn render_missing_tasks_banner(
     }
     let text = t!("sidebar.missing_tasks_banner", count = count).to_string();
     Some(
-        div()
-            .flex()
-            .items_center()
-            .justify_between()
-            .gap_2()
-            .px_2()
-            .py_1()
-            .bg(rgb(theme::surface::RAISED))
-            .border_b_1()
-            .border_color(rgb(theme::surface::STROKE))
-            .child(
-                div()
-                    .id("missing-tasks-banner-text")
-                    .flex_1()
-                    .rounded_sm()
-                    .text_color(rgb(theme::text::SECONDARY))
-                    .text_size(px(theme::font_size::CAPTION))
-                    .hover(|el| el.bg(rgb(theme::surface::ACTIVE)))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _: &MouseDownEvent, window, cx| {
-                            this.jump_to_first_missing_task(window, cx);
-                        }),
-                    )
-                    .child(SharedString::from(text)),
-            )
-            .child(
-                div()
-                    .id("missing-tasks-banner-dismiss")
-                    .px_1()
-                    .rounded_sm()
-                    .text_color(rgb(theme::text::MUTED))
-                    .text_size(px(theme::font_size::CAPTION))
-                    .hover(|el| el.bg(rgb(theme::surface::ACTIVE)))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _: &MouseDownEvent, _window, cx| {
-                            this.dismiss_missing_tasks_banner(cx);
-                        }),
-                    )
-                    .child("×"),
-            ),
+        banner(
+            Icon::Warning,
+            theme::status::CONFLICT,
+            "missing-tasks-banner-text",
+            text.into(),
+            Some(Box::new(cx.listener(
+                |this, _: &MouseDownEvent, window, cx| {
+                    this.jump_to_first_missing_task(window, cx);
+                },
+            ))),
+            None,
+            "missing-tasks-banner-dismiss",
+            cx.listener(|this, _: &MouseDownEvent, _window, cx| {
+                this.dismiss_missing_tasks_banner(cx);
+            }),
+        )
+        .into_any_element(),
     )
 }
 
@@ -760,7 +826,7 @@ fn render_missing_tasks_banner(
 fn render_archived_section(
     app: &LaboLaboApp,
     cx: &mut Context<LaboLaboApp>,
-) -> Option<impl IntoElement> {
+) -> Option<gpui::AnyElement> {
     let archived = app.archived_tasks();
     if archived.is_empty() {
         return None;
@@ -785,7 +851,7 @@ fn render_archived_section(
                 this.toggle_archived_section(cx);
             }),
         )
-        .child(if expanded { "\u{25BE}" } else { "\u{25B8}" }) // ▾ / ▸
+        .child(icons::chevron_element(10.0, expanded).text_color(rgb(theme::text::SECONDARY)))
         .child(SharedString::from(
             t!("sidebar.archived_section_title", count = archived.len()).to_string(),
         ));
@@ -816,7 +882,7 @@ fn render_archived_section(
                     .rounded(px(theme::radius::ROW))
                     .text_color(rgb(theme::text::MUTED))
                     .text_size(px(theme::font_size::LABEL))
-                    .child(kind_marker(&task.kind))
+                    .child(kind_marker(&task.kind, theme::text::MUTED))
                     .child(SharedString::from(task.title.clone()))
                     .child(div().flex_1())
                     .child(
@@ -841,7 +907,7 @@ fn render_archived_section(
         }
     }
 
-    Some(section)
+    Some(section.into_any_element())
 }
 
 #[cfg(test)]

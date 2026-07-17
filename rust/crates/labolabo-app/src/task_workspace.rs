@@ -44,6 +44,7 @@ use crate::app::{LaboLaboApp, PreeditState};
 use crate::commit_pane;
 use crate::git_pane::{self, GitPaneState};
 use crate::grid;
+use crate::icons::{self, Icon};
 use crate::motion::{self, DotAnimState};
 use crate::render::RenderSpec;
 use crate::selection::Selection;
@@ -547,6 +548,15 @@ pub fn insert_runtime(
 /// the time, matching most desktop split-pane conventions.
 const DIVIDER_HIT_WIDTH: f32 = 6.0;
 
+/// A pane divider's hover highlight -- `第13波b §4`: lowered from the
+/// previous `0x66` (~40% alpha) to a genuinely low alpha, per the wave's
+/// brief ("ディバイダーのホバーハイライトをアクセントの低アルファに"). The
+/// hue stays [`theme::ACCENT`] (unchanged -- a divider drag is the same
+/// "operate on this" family as a focused pane's border/glow, see
+/// `theme::ACCENT`'s doc comment), only the intensity drops so hovering a
+/// divider reads as a subtle cue rather than a bright accent stripe.
+const DIVIDER_HOVER_COLOR: u32 = theme::with_alpha(theme::ACCENT, 0x2e);
+
 /// Recursively render one node of `task_id`'s tile tree -- identical
 /// tree-walk to wave 5b-2's `app::render_tile`, just carrying `task_id`
 /// through so leaf click handlers route back to the right Task, plus (W5j
@@ -695,7 +705,7 @@ pub fn render_tile(
             .ml(px(-(DIVIDER_HIT_WIDTH / 2.0)))
             .w(px(DIVIDER_HIT_WIDTH))
             .cursor(CursorStyle::ResizeLeftRight)
-            .hover(|el| el.bg(rgba(theme::with_alpha(theme::ACCENT, 0x66))))
+            .hover(|el| el.bg(rgba(DIVIDER_HOVER_COLOR)))
     } else {
         div()
             .id(divider_id)
@@ -706,7 +716,7 @@ pub fn render_tile(
             .mt(px(-(DIVIDER_HIT_WIDTH / 2.0)))
             .h(px(DIVIDER_HIT_WIDTH))
             .cursor(CursorStyle::ResizeUpDown)
-            .hover(|el| el.bg(rgba(theme::with_alpha(theme::ACCENT, 0x66))))
+            .hover(|el| el.bg(rgba(DIVIDER_HOVER_COLOR)))
     };
     let divider = divider.on_drag(
         DividerDragPayload {
@@ -1396,7 +1406,6 @@ fn render_pane_tab_bar(
                         )))
                         .px_1()
                         .rounded_sm()
-                        .text_color(rgb(theme::text::SECONDARY))
                         .hover(|el| el.bg(rgb(theme::surface::ACTIVE)))
                         .active(|el| el.opacity(0.8))
                         .on_mouse_down(
@@ -1406,7 +1415,11 @@ fn render_pane_tab_bar(
                                 window.focus(this.focus_handle());
                             }),
                         )
-                        .child("\u{d7}"),
+                        .child(icons::icon_colored(
+                            Icon::Close,
+                            10.0,
+                            theme::text::SECONDARY,
+                        )),
                 )
         }))
         .child({
@@ -1415,7 +1428,6 @@ fn render_pane_tab_bar(
                 .id(SharedString::from(format!("tab-add-{task_id}")))
                 .px_2()
                 .rounded_sm()
-                .text_color(rgb(theme::text::PRIMARY))
                 .hover(|el| el.bg(rgb(theme::surface::ACTIVE)))
                 .active(|el| el.opacity(0.7))
                 .on_mouse_down(
@@ -1426,7 +1438,7 @@ fn render_pane_tab_bar(
                         }
                     }),
                 )
-                .child("+")
+                .child(icons::icon_colored(Icon::Plus, 11.0, theme::text::PRIMARY))
         })
         // `plans` W6d §3.1: "フォーカスペインのタブバー「+」の隣...に
         // 「Git ペインを開く ▸ 変更ファイル/Diff/コミット」" -- only the
@@ -1446,28 +1458,28 @@ fn render_pane_tab_bar(
 /// [`crate::sidebar::IconTooltip`] view rather than a second one), just
 /// sized to fit a tab bar rather than the sidebar.
 fn render_open_git_tile_buttons(task_id: &str, cx: &mut Context<LaboLaboApp>) -> impl IntoElement {
-    // Plain Unicode glyphs, no emoji (project policy -- see
-    // `crate::sidebar::icon_button`'s doc comment): ▤ (list/file lines) for
-    // Files, ± for Diff, ⧖ (hourglass -- history) for Commits.
+    // `crate::icons` glyphs, no emoji (project policy -- see
+    // `crate::sidebar::icon_button`'s doc comment): file-lines icon for
+    // Files, ± for Diff, a small clock for Commits (history).
     let buttons = [
         (
             PaneKind::Files,
-            "\u{25a4}",
+            Icon::Files,
             t!("git.tile_button.files_tooltip").to_string(),
         ),
         (
             PaneKind::Diff,
-            "\u{00b1}",
+            Icon::Diff,
             t!("git.tile_button.diff_tooltip").to_string(),
         ),
         (
             PaneKind::Commits,
-            "\u{29d6}",
+            Icon::History,
             t!("git.tile_button.commits_tooltip").to_string(),
         ),
     ];
     let mut row = div().flex().flex_row().items_center().gap_1().pl_1();
-    for (kind, glyph, tooltip) in buttons {
+    for (kind, icon, tooltip) in buttons {
         let open_task_id = task_id.to_string();
         let id: SharedString = format!("tab-open-git-{}-{task_id}", kind.raw_value()).into();
         let tooltip_text: SharedString = tooltip.into();
@@ -1480,8 +1492,6 @@ fn render_open_git_tile_buttons(task_id: &str, cx: &mut Context<LaboLaboApp>) ->
                 .items_center()
                 .justify_center()
                 .rounded_sm()
-                .text_color(rgb(theme::text::SECONDARY))
-                .text_size(px(11.0))
                 .hover(|el| el.bg(rgb(theme::surface::ACTIVE)))
                 .active(|el| el.opacity(0.7))
                 .tooltip(move |_window, cx| {
@@ -1494,7 +1504,7 @@ fn render_open_git_tile_buttons(task_id: &str, cx: &mut Context<LaboLaboApp>) ->
                         this.open_git_tile_pane(&open_task_id, kind, window, cx);
                     }),
                 )
-                .child(glyph),
+                .child(icons::icon_colored(icon, 12.0, theme::text::SECONDARY)),
         );
     }
     row

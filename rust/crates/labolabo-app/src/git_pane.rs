@@ -89,6 +89,8 @@ use labolabo_core::{
 };
 
 use crate::app::LaboLaboApp;
+use crate::empty_state;
+use crate::icons::{self, Icon};
 use crate::render::RenderSpec;
 use crate::theme;
 
@@ -630,15 +632,25 @@ fn render_branch_bar(
         .bg(rgb(HEADER_BG))
         .text_size(px(11.0))
         .text_color(rgb(theme::text::PRIMARY))
-        .child(SharedString::from("\u{2387}")) // branch glyph, matches sidebar::kind_marker
+        .child(icons::icon_colored(
+            Icon::Branch,
+            11.0,
+            theme::text::PRIMARY,
+        ))
         .child(branch_text)
         .when(ahead > 0, |el| el.child(format!("\u{2191}{ahead}")))
         .when(behind > 0, |el| el.child(format!("\u{2193}{behind}")))
         .when(dirty, |el| {
+            // A plain filled dot -- drawn as a `div` circle (matching every
+            // other status dot in the app, e.g. `sidebar::kind_marker`'s
+            // attached-Task marker) rather than a `\u{25cf}` text glyph.
             el.child(
                 div()
-                    .text_color(rgb(theme::status::STARTING))
-                    .child(SharedString::from("\u{25cf}")),
+                    .w(px(6.0))
+                    .h(px(6.0))
+                    .flex_shrink_0()
+                    .rounded_full()
+                    .bg(rgb(theme::status::STARTING)),
             )
         })
         .child(div().flex_1())
@@ -661,7 +673,6 @@ fn render_branch_bar(
                 .px_1p5()
                 .py_0p5()
                 .rounded_sm()
-                .text_color(rgb(theme::text::SECONDARY))
                 .hover(|el| el.bg(rgb(theme::surface::ACTIVE)))
                 .active(|el| el.opacity(0.8))
                 .tooltip(move |_window, cx| {
@@ -678,19 +689,26 @@ fn render_branch_bar(
                         this.promote_git_pane_to_tiles(&promote_task_id, window, cx);
                     }),
                 )
-                .child(SharedString::from("\u{25a6}")), // ▦ grid/tile glyph, plain Unicode
+                .child(icons::icon_colored(
+                    Icon::Grid,
+                    12.0,
+                    theme::text::SECONDARY,
+                )),
         )
         .child(
             div()
                 .px_1()
-                .text_color(rgb(theme::text::SECONDARY))
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _: &MouseDownEvent, _window, cx| {
                         this.set_git_pane_visible(&close_task_id, false, cx);
                     }),
                 )
-                .child(SharedString::from("\u{d7}")),
+                .child(icons::icon_colored(
+                    Icon::Close,
+                    11.0,
+                    theme::text::SECONDARY,
+                )),
         )
 }
 
@@ -708,11 +726,18 @@ pub(crate) fn render_file_list(
     cx: &mut Context<LaboLaboApp>,
 ) -> impl IntoElement {
     if state.items.is_empty() {
+        // 第13波b §3: 空状態のトーンをワークスペース側 (`crate::empty_state`)
+        // と統一 -- 中央配置のアイコン + 1 行。アクションボタンは無し
+        // （「変更が無い」は次に取るべき操作が無い状態のため）。
         return div()
-            .p_2()
-            .text_size(px(11.0))
-            .text_color(rgb(theme::text::MUTED))
-            .child(SharedString::from(t!("git.file_list.empty").to_string()))
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(empty_state::render_message(
+                Icon::Check,
+                t!("git.file_list.empty").to_string(),
+            ))
             .into_any_element();
     }
 
