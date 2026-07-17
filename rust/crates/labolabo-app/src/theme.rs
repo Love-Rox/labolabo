@@ -72,6 +72,22 @@ pub mod status {
     pub const CONFLICT: u32 = 0xff6b6b;
 }
 
+/// GitHub PR 状態バッジ (`plans` 第16波 #3) の色 -- GitHub 自身のダーク
+/// テーマの PR 状態ラベル慣習(draft=灰・open=緑・merged=紫・closed=赤)に
+/// 合わせる。open/closed は [`diff::ADD`]/[`diff::DEL`] と同じ緑/赤(この
+/// アプリのダークパレットが既に GitHub のダークテーマ配色と一致している
+/// ため、素直に共有できる)。
+pub mod pr {
+    /// Draft PR。
+    pub const DRAFT: u32 = 0x8b949e;
+    /// Open PR -- [`super::diff::ADD`] と同色。
+    pub const OPEN: u32 = super::diff::ADD;
+    /// Merged PR。
+    pub const MERGED: u32 = 0xa371f7;
+    /// Closed PR -- [`super::diff::DEL`] と同色。
+    pub const CLOSED: u32 = super::diff::DEL;
+}
+
 /// Git 差分の追加/削除行。
 pub mod diff {
     pub const ADD: u32 = 0x3fb950;

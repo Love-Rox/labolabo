@@ -204,3 +204,8 @@ titlebar:
   kind_attached: "attached"
   changes_clean: "Clean"
   changes_count: "%{count} file(s) changed"
+  # Wave 16 #3 (PR status badge): the status pill's PR segment.
+  pr_draft: "Draft"
+  pr_open: "Open"
+  pr_merged: "Merged"
+  pr_closed: "Closed"

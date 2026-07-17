@@ -25,8 +25,8 @@
 //! rendering model (single-tone, tinted via `.text_color(..)`).
 
 use gpui::{
-    div, prelude::*, px, rgb, rgba, App, Context, ExternalPaths, FontWeight, IntoElement,
-    MouseButton, MouseDownEvent, Render, SharedString, Window,
+    div, prelude::*, px, rgb, rgba, App, Context, CursorStyle, ExternalPaths, FontWeight,
+    IntoElement, MouseButton, MouseDownEvent, Render, SharedString, Window,
 };
 use rust_i18n::t;
 
@@ -34,7 +34,9 @@ use labolabo_core::{AgentStatus, Task, TaskKind};
 
 use crate::app::LaboLaboApp;
 use crate::icons::{self, Icon};
-use crate::task_workspace::status_dot_color;
+use crate::motion;
+use crate::pr_status;
+use crate::task_workspace::{self, status_dot_color};
 use crate::theme;
 
 /// Background tint applied to a Task row while a same-repo row is being
@@ -109,10 +111,89 @@ impl Render for IconTooltip {
     }
 }
 
-/// Fixed sidebar width -- a simple constant is enough for this wave (no
-/// resize handle yet, same simplification the tile tree's divider-drag
-/// took in wave 5b-2).
-pub const SIDEBAR_WIDTH: f32 = 220.0;
+/// Sidebar width the app starts with before any drag-resize (`plans` 第16波
+/// #1) or persisted `sidebarWidth` (`labolabo_core::TaskDatabase::
+/// sidebar_width`) is applied -- unchanged from the previous fixed value.
+pub const DEFAULT_SIDEBAR_WIDTH: f32 = 220.0;
+
+/// Narrowest the sidebar can be dragged to -- still wide enough for a
+/// worktree row's branch icon + a short title + the "…" menu button without
+/// truncating illegibly.
+pub const MIN_SIDEBAR_WIDTH: f32 = 180.0;
+
+/// Widest the sidebar can be dragged to -- past this it would start eating
+/// into the terminal/Git-pane workspace for no real benefit (the sidebar's
+/// content is a flat list, not a document that benefits from extra width).
+pub const MAX_SIDEBAR_WIDTH: f32 = 480.0;
+
+/// Clamps a candidate sidebar width (`app::LaboLaboApp::
+/// update_sidebar_width_drag`'s raw drag-position pixel value, or a
+/// persisted `sidebarWidth` value read back at startup) into
+/// `[MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH]`. Non-finite input (`NaN`/`±inf`
+/// -- reachable from a corrupt persisted value, or in principle a
+/// degenerate drag position) falls back to [`DEFAULT_SIDEBAR_WIDTH`] rather
+/// than propagating garbage into layout, mirroring `grid::
+/// ratio_from_drag_position`'s callers' own "reject non-finite, keep the
+/// previous value" posture.
+pub fn clamp_sidebar_width(width: f32) -> f32 {
+    if !width.is_finite() {
+        return DEFAULT_SIDEBAR_WIDTH;
+    }
+    width.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH)
+}
+
+/// Marker payload for the sidebar-width divider drag (`plans` 第16波 #1) --
+/// unlike `task_workspace::DividerDragPayload` there is only one sidebar
+/// divider app-wide, so no fields are needed to identify which drag this
+/// is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SidebarDividerDragPayload;
+
+/// The (deliberately invisible) drag preview for the sidebar-width divider
+/// -- same reasoning as `task_workspace::DividerDragPreview`: the sidebar
+/// itself resizing live, underneath the cursor, already *is* the drag's
+/// visual feedback.
+pub struct SidebarDividerDragPreview;
+
+impl Render for SidebarDividerDragPreview {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+    }
+}
+
+/// The draggable divider at the sidebar's right edge (`plans` 第16波 #1): an
+/// absolutely-positioned handle at `left: sidebar_width px`, shifted back by
+/// half `task_workspace::DIVIDER_HIT_WIDTH` so it straddles the boundary --
+/// mirrors that module's tile-divider math, just in a raw pixel offset
+/// rather than a `ratio * 100%` (the sidebar's own width *is* the value
+/// being dragged, no container-relative ratio involved). Reuses that
+/// module's hit-width/hover-highlight constants so both dividers look and
+/// feel identical.
+///
+/// Positioned by the *caller* (`app::LaboLaboApp::render`'s `content_row`,
+/// which must be `.relative()` for this `.absolute()` child to anchor
+/// against), and its `on_drag_move`/`on_drop` are wired there too, not
+/// here -- mirrors `task_workspace::render_tile`'s own split between "the
+/// handle" (drag source + cursor/hover styling) and "the container that
+/// measures the drag" (`event.bounds`, see `app::LaboLaboApp::
+/// update_sidebar_width_drag`'s doc comment for why `content_row` itself,
+/// not this handle, must be the container the drag is registered on).
+pub fn render_sidebar_divider(sidebar_width: f32) -> impl IntoElement {
+    div()
+        .id("sidebar-divider")
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .left(px(sidebar_width))
+        .ml(px(-(task_workspace::DIVIDER_HIT_WIDTH / 2.0)))
+        .w(px(task_workspace::DIVIDER_HIT_WIDTH))
+        .cursor(CursorStyle::ResizeLeftRight)
+        .hover(|el| el.bg(rgba(task_workspace::DIVIDER_HOVER_COLOR)))
+        .on_drag(
+            SidebarDividerDragPayload,
+            |_payload, _offset, _window, cx| cx.new(|_cx| SidebarDividerDragPreview),
+        )
+}
 
 /// One repo's Tasks, in the order they were encountered in the input slice.
 pub struct RepoGroup<'a> {
@@ -173,7 +254,7 @@ fn kind_marker(kind: &TaskKind, color: u32) -> gpui::AnyElement {
 ///
 /// Previously two text-labeled buttons side by side ("+ Attached"/
 /// "+ Worktree"); once translated to Japanese ("+ 既存フォルダ"/"+ 新規
-/// worktree") they no longer fit [`SIDEBAR_WIDTH`] at its minimum (reported
+/// worktree") they no longer fit [`MIN_SIDEBAR_WIDTH`] (reported
 /// on-device: the row overflowed the sidebar). Rather than a single
 /// full-width button opening a 2-choice overlay (`settings.rs`'s modal
 /// pattern, also considered), this keeps both actions a single click away
@@ -232,6 +313,75 @@ fn plus_branch_icon() -> impl IntoElement {
         ))
 }
 
+/// タスク行の高さ(第8波a §3/第10波 §2 から値そのものは変更なし)。行の
+/// 見せ方を「統合ドット→PR バッジ→タイトル→(右端)使用量」に整理した
+/// 第16波 #4 の指示("後からスクリーンショットで微調整できるよう定数化")
+/// に従い、以前はここへのリテラル埋め込みだった値を named const に昇格
+/// させてある。
+const TASK_ROW_HEIGHT: f32 = 30.0;
+
+/// PR バッジ(`plans` 第16波 #3)の寸法 -- 行の高さに収まる小さなピル。
+/// [`TASK_ROW_HEIGHT`]同様、後から実 UI のスクリーンショットを見て
+/// 微調整できるよう定数化してある(第16波 #4)。
+const PR_BADGE_HEIGHT: f32 = 16.0;
+/// バッジ内の状態ドット径。
+const PR_BADGE_DOT_SIZE: f32 = 6.0;
+
+/// A Task row's PR badge (`plans` 第16波 #3): `#<number>` + a small dot in
+/// `pr_status::badge_color(info.state)` (draft=灰/open=緑/merged=紫/
+/// closed=赤, GitHub's own dark-theme state colors -- `theme::pr`). The
+/// sidebar already groups by `owner/repo`, so the badge itself only needs
+/// the bare number (`plans/012`'s per-repo grouping already answers "which
+/// repo"); the tooltip spells out the full `owner/repo#number title` for
+/// when that context isn't visually obvious (a scrolled-away group header,
+/// or just wanting the title without opening the PR). Clicking opens the
+/// PR page in the browser (`LaboLaboApp::open_task_pr_page`, same
+/// background-`open`-process contract as `crate::ide_open`'s "IDE で開く").
+fn pr_badge_element(
+    task_id: &str,
+    repo_name: &str,
+    info: &pr_status::PrInfo,
+    cx: &mut Context<LaboLaboApp>,
+) -> impl IntoElement {
+    let color = pr_status::badge_color(info.state);
+    let label: SharedString = format!("#{}", info.number).into();
+    let tooltip: SharedString = format!("{repo_name}#{} {}", info.number, info.title).into();
+    let badge_id: SharedString = format!("pr-badge-{task_id}").into();
+    let open_task_id = task_id.to_string();
+    div()
+        .id(badge_id)
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .px_1()
+        .h(px(PR_BADGE_HEIGHT))
+        .flex_shrink_0()
+        .rounded_sm()
+        .bg(rgba(theme::with_alpha(color, 0x22)))
+        .text_color(rgb(color))
+        .text_size(px(theme::font_size::CAPTION))
+        .tooltip(move |_window, cx| cx.new(|_| IconTooltip(tooltip.clone())).into())
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, _window, cx| {
+                // 行本体の on_mouse_down（タスク選択）まで届かせない --
+                // `menu_button`と同じ意図。
+                cx.stop_propagation();
+                this.open_task_pr_page(&open_task_id, cx);
+            }),
+        )
+        .child(
+            div()
+                .w(px(PR_BADGE_DOT_SIZE))
+                .h(px(PR_BADGE_DOT_SIZE))
+                .rounded_full()
+                .flex_shrink_0()
+                .bg(rgb(color)),
+        )
+        .child(label)
+}
+
 pub fn render(
     app: &LaboLaboApp,
     breathing_enabled: bool,
@@ -276,15 +426,40 @@ pub fn render(
             let status = app.task_agent_status(&task.id);
             let status_color = status.and_then(status_dot_color);
             let is_running = status == Some(AgentStatus::Running);
+            // 第10波のカスタム色 (`Task::color`) -- 第16波 #2 で状態ドットと
+            // 統合する(このすぐ下の `dot_el` 参照)ため、行の左バーより先に
+            // 計算しておく。
+            let custom_color = task
+                .color
+                .as_deref()
+                .and_then(crate::color_picker::parse_hex_rgb);
+            // 統合ドット (`plans` 第16波 #2): 外輪=カスタム色・中の塗り=
+            // 状態色。以前は「状態ドット」と「カスタム色ドット」の 2 個を
+            // 別々に描いていたが、`motion::unified_dot_element` に一本化 --
+            // 詳細はその doc コメント参照。
             let dot_el = app.task_dot_anim(&task.id).and_then(|anim| {
-                crate::motion::status_dot_element(
+                motion::unified_dot_element(
                     format!("sidebar-dot-{}", task.id),
                     status_color,
+                    custom_color,
                     is_running,
                     breathing_enabled,
                     anim,
                 )
             });
+            // PR 状態バッジ (`plans` 第16波 #3): worktree タスクだけブランチ
+            // が分かるので対象。`gh` 未導入/未認証や PR 未作成は静かに
+            // バッジ非表示 -- `LaboLaboApp::task_pr_info`のキャッシュは
+            // "取得済みで PR なし"/"未取得"のどちらも`None`に潰れるので、
+            // ここでの分岐に違いは出ない(バッジを出さないだけ)。
+            let pr_info = app.task_pr_info(&task.id).cloned();
+            // 使用量 (第16波 #4: 行右端に集約表示) -- タブチップ側の
+            // `format_usage_compact` をそのまま再利用し、複数タブぶんを
+            // 合算した `task_agent_usage` を渡す。
+            let usage_label: Option<SharedString> = app
+                .task_agent_usage(&task.id)
+                .and_then(|usage| task_workspace::format_usage_compact(&usage))
+                .map(SharedString::from);
             // Cross-session conflict warning (`plans` wave 5i §2): another
             // Task in the same repo has changed one of the same files, per
             // whatever Git status each has cached so far -- see
@@ -361,12 +536,13 @@ pub fn render(
                     theme::text::SECONDARY,
                 ));
 
-            // 第10波: タスクのカスタム色 (`Task::color`)。行の左バー
-            // (非選択時も表示)とタイトル横の 6px 色ドットで表現する。
-            let custom_color = task
-                .color
-                .as_deref()
-                .and_then(crate::color_picker::parse_hex_rgb);
+            // PR 状態バッジ (`plans` 第16波 #3) -- `menu_button` と同じく
+            // `cx.listener` を使うのでここで(行の `.child()` 連鎖に入る前に)
+            // 組み立てておく。`pr_info` が `None`(未取得/gh 不在/PR 無し)
+            // なら静かに `None` -- バッジ自体を描かない。
+            let pr_badge_el =
+                pr_info.map(|info| pr_badge_element(&task.id, &task.repo_name, &info, cx));
+
             // タイトル: 選択中はセミボールド (第10波 §2)。attached 型は
             // フルパスをツールチップで補う (§3 -- 行のタイトルはディレクトリ
             // 名だけなので、どのディレクトリかの完全な答えはここに残す)。
@@ -402,7 +578,7 @@ pub fn render(
                 .flex_row()
                 .items_center()
                 .gap_1()
-                .h(px(30.0))
+                .h(px(TASK_ROW_HEIGHT))
                 .px_2()
                 .rounded(px(theme::radius::ROW))
                 .border_l_2()
@@ -439,18 +615,26 @@ pub fn render(
                         theme::text::PRIMARY
                     },
                 ))
-                // カスタム色の 6px ドット (第10波 §1 -- 状態ドット 8px 枠
-                // とは別物。左バーと同じ色の「ラベル」としてタイトルの左に)。
-                .when_some(custom_color, |el, color| {
-                    el.child(
-                        div()
-                            .w(px(6.0))
-                            .h(px(6.0))
-                            .rounded_full()
-                            .flex_shrink_0()
-                            .bg(rgb(color)),
-                    )
-                })
+                // 統合ドット (`plans` 第16波 #2): 外輪=カスタム色/中の塗り=
+                // 状態色を 1 個で表現する(以前の「カスタム色 6px ドット」+
+                // 「状態ドット」の 2 個表示はここで統合・廃止)。
+                // `motion::DOT_RING_SIZE` 固定の枠に中央揃え -- 輪の有無で
+                // 行内の占有幅がガタつかないよう、輪なしの行でも同じ枠を
+                // 確保する。
+                .children(dot_el.map(|el| {
+                    div()
+                        .w(px(motion::DOT_RING_SIZE))
+                        .h(px(motion::DOT_RING_SIZE))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .flex_shrink_0()
+                        .child(el)
+                }))
+                // PR 状態バッジ (`plans` 第16波 #3): ドットのすぐ右、タイトル
+                // より前 -- 「行の左に状態・PR が凝縮される」情報密度の高い
+                // 並び (第16波 #4)。
+                .children(pr_badge_el)
                 .child(title_el)
                 .when(missing, move |el| {
                     el.child(
@@ -466,19 +650,6 @@ pub fn render(
                             )),
                     )
                 })
-                // 状態ドットは 8px 固定の枠に中央揃えしてから置く(ドット
-                // 自体の描画径は `motion::STATUS_DOT_SIZE`=6px のまま --
-                // タブチップ側と共用の定数なのでここでは変えず、行内の
-                // 割り付けだけ 8px 分確保して複数行の並びを揃える)。
-                .children(dot_el.map(|el| {
-                    div()
-                        .w(px(8.0))
-                        .h(px(8.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(el)
-                }))
                 .when(has_conflict, move |el| {
                     el.child(
                         div()
@@ -491,6 +662,17 @@ pub fn render(
                                 12.0,
                                 theme::status::CONFLICT,
                             )),
+                    )
+                })
+                // 使用量 (第16波 #4: 行右端に集約表示、タブチップと同じ
+                // `format_usage_compact` の書式)。
+                .when_some(usage_label, |el, label| {
+                    el.child(
+                        div()
+                            .flex_shrink_0()
+                            .text_size(px(theme::font_size::CAPTION))
+                            .text_color(rgb(theme::text::SECONDARY))
+                            .child(label),
                     )
                 })
                 .child(menu_button)
@@ -577,7 +759,7 @@ pub fn render(
     let mut sidebar = div()
         .flex()
         .flex_col()
-        .w(px(SIDEBAR_WIDTH))
+        .w(px(app.sidebar_width()))
         .h_full()
         .bg(rgb(theme::surface::SUNKEN))
         .border_1()
@@ -926,6 +1108,37 @@ mod tests {
         );
         t.title = title.to_string();
         t
+    }
+
+    // MARK: - clamp_sidebar_width (第16波 #1)
+
+    #[test]
+    fn clamp_sidebar_width_leaves_an_in_range_value_untouched() {
+        assert_eq!(clamp_sidebar_width(260.0), 260.0);
+        assert_eq!(clamp_sidebar_width(MIN_SIDEBAR_WIDTH), MIN_SIDEBAR_WIDTH);
+        assert_eq!(clamp_sidebar_width(MAX_SIDEBAR_WIDTH), MAX_SIDEBAR_WIDTH);
+    }
+
+    #[test]
+    fn clamp_sidebar_width_clamps_below_the_minimum() {
+        assert_eq!(clamp_sidebar_width(10.0), MIN_SIDEBAR_WIDTH);
+        assert_eq!(clamp_sidebar_width(0.0), MIN_SIDEBAR_WIDTH);
+        assert_eq!(clamp_sidebar_width(-50.0), MIN_SIDEBAR_WIDTH);
+    }
+
+    #[test]
+    fn clamp_sidebar_width_clamps_above_the_maximum() {
+        assert_eq!(clamp_sidebar_width(1000.0), MAX_SIDEBAR_WIDTH);
+    }
+
+    #[test]
+    fn clamp_sidebar_width_non_finite_falls_back_to_the_default() {
+        assert_eq!(clamp_sidebar_width(f32::NAN), DEFAULT_SIDEBAR_WIDTH);
+        assert_eq!(clamp_sidebar_width(f32::INFINITY), DEFAULT_SIDEBAR_WIDTH);
+        assert_eq!(
+            clamp_sidebar_width(f32::NEG_INFINITY),
+            DEFAULT_SIDEBAR_WIDTH
+        );
     }
 
     #[test]

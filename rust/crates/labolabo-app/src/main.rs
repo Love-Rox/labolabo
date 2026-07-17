@@ -42,6 +42,7 @@ mod mouse_report;
 mod new_task;
 mod paste;
 mod path_abbrev;
+mod pr_status;
 mod render;
 mod selection;
 mod settings;

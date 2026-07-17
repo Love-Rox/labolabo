@@ -95,7 +95,9 @@ use crate::render::RenderSpec;
 use crate::theme;
 
 /// Fixed width of the Git pane -- same "no resize handle yet" simplification
-/// `sidebar::SIDEBAR_WIDTH` already made for the Task sidebar.
+/// the sidebar's width used to have (`sidebar::DEFAULT_SIDEBAR_WIDTH`, drag-
+/// resizable as of `plans` 第16波 #1 -- the Git pane hasn't grown the same
+/// affordance).
 pub const GIT_PANE_WIDTH: f32 = 340.0;
 
 /// Watch latency for the Git pane's [`FileWatcher`] -- matches the Swift

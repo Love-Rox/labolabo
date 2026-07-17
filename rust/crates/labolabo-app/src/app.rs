@@ -64,7 +64,7 @@ use labolabo_core::{
     claude_resume_command, cross_session_conflicts, quote_dropped_paths, reorder_task_ids,
     shell_quote, AgentBindings, AgentStatus, AgentStatusEvent, AgentUsage, ControlCommand,
     ControlResponse, DropEdge, PaneId, PaneItem, PaneKind, PaneTilingModel, Task, TaskDatabase,
-    TaskStatus, TileNode, TileOrientation,
+    TaskKind, TaskStatus, TileNode, TileOrientation,
 };
 use labolabo_term::{ColorScheme, Terminal};
 use rust_i18n::t;
@@ -89,6 +89,7 @@ use crate::mouse_report::{self, MouseAction, MouseButtonKind, MouseMods};
 use crate::new_task;
 use crate::paste;
 use crate::path_abbrev;
+use crate::pr_status;
 use crate::render::RenderSpec;
 use crate::selection::{self, CellPos};
 use crate::settings::{self, AppSettings};
@@ -119,6 +120,11 @@ const DEFAULT_PANE_ROWS: u16 = 24;
 /// ウィンドウ bounds 保存 (wave 6c §3) のデバウンス幅 -- ドラッグ中の
 /// 連続イベントを 1 回の SQLite 書き込みへ集約する。
 const WINDOW_BOUNDS_SAVE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// サイドバー幅保存 (`plans` 第16波 #1) のデバウンス幅 -- 同じ「ドラッグ中
+/// の連続イベントを 1 回の SQLite 書き込みへ集約する」設計を
+/// [`WINDOW_BOUNDS_SAVE_DEBOUNCE`]から流用(値も同じ 500ms)。
+const SIDEBAR_WIDTH_SAVE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(500);
 
 actions!(
     labolabo_app,
@@ -229,16 +235,37 @@ pub struct LaboLaboApp {
     /// brief's explicitly accepted "status 取得済みのタスク間のみで検出"
     /// limitation (see `crates/labolabo-app/README.md`).
     changed_files_cache: HashMap<String, HashSet<String>>,
-    /// Whether a pane-divider drag-resize (`plans` W5j #2) is currently in
-    /// progress, anywhere in any Task's tree -- a single app-wide flag
-    /// (not per-Task/per-node) because at most one divider can be dragged
-    /// at a time regardless of which Task's tree it's in. Set `true` on
-    /// every `update_divider_drag` call (harmless to set repeatedly) and
-    /// back to `false` on `finish_divider_drag`. Threaded down through
-    /// `task_workspace::render_tile`/`render_leaf` so every terminal
-    /// pane's canvas can suppress `Terminal::resize` while a drag is live
-    /// -- see `render_leaf`'s `prepaint` closure for why.
+    /// Whether a pane-divider drag-resize (`plans` W5j #2), **or** the
+    /// sidebar-width divider drag (`plans` 第16波 #1, `update_sidebar_
+    /// width_drag`), is currently in progress -- a single app-wide flag
+    /// (not per-Task/per-node/per-divider) because at most one divider can
+    /// be dragged at a time regardless of which one it is. Set `true` on
+    /// every `update_divider_drag`/`update_sidebar_width_drag` call
+    /// (harmless to set repeatedly) and back to `false` on
+    /// `finish_divider_drag`/`finish_sidebar_width_drag`. Threaded down
+    /// through `task_workspace::render_tile`/`render_leaf` so every
+    /// terminal pane's canvas can suppress `Terminal::resize` while *either*
+    /// divider is live -- see `render_leaf`'s `prepaint` closure for why a
+    /// sidebar-width drag (which also changes every terminal pane's
+    /// available width, same as a tile divider does) needs the same
+    /// suppression.
     divider_drag_active: bool,
+    /// The sidebar's current drag-resizable width (`plans` 第16波 #1),
+    /// already clamped into `sidebar::{MIN,MAX}_SIDEBAR_WIDTH` -- loaded at
+    /// startup from `db.sidebar_width()` (falling back to `sidebar::
+    /// DEFAULT_SIDEBAR_WIDTH`), live-updated by `update_sidebar_width_drag`,
+    /// and persisted debounced (`schedule_sidebar_width_save`, same pattern
+    /// as `pending_window_bounds`/`bounds_save_generation` below).
+    sidebar_width: f32,
+    /// Debounce generation counter for sidebar-width persistence -- same
+    /// "only the newest scheduled save actually writes" design as
+    /// `bounds_save_generation` (see that field's doc comment; this is its
+    /// sidebar-width counterpart, kept as a separate field/counter since the
+    /// two persist independently and on different `appState` keys).
+    sidebar_width_save_generation: u64,
+    /// The most recent (not yet persisted) sidebar width, mirroring
+    /// `pending_window_bounds`'s role for `schedule_window_bounds_save`.
+    pending_sidebar_width: Option<f32>,
     /// アーカイブ済み (`TaskStatus::Archived`) タスク -- サイドバー下部の
     /// 折りたたみセクション（既定折りたたみ）の内容 (wave 6c §2)。`tasks`
     /// と違い workspace は持たない（アーカイブ時に shutdown 済み）。復元で
@@ -304,6 +331,28 @@ pub struct LaboLaboApp {
     /// 再表示はしない（明示的に閉じた操作を尊重する -- 個々の行の減光/
     /// 警告アイコンはバナーと独立に常に出るので、情報が消えるわけではない）。
     missing_banner_dismissed: bool,
+    /// GitHub PR status cache (`plans` 第16波 #3, `crate::pr_status`), keyed
+    /// by `Task::id`. **In-memory only, never persisted** (see `crate::
+    /// pr_status`'s module doc comment for why) -- a fresh launch starts
+    /// empty and re-fetches lazily as Tasks get selected/refreshed.
+    /// `PrCacheEntry::info` is itself `Option` because "checked, no PR
+    /// found" is a meaningful, cacheable (and throttled the same as any
+    /// other result) outcome, distinct from "never checked" (no entry at
+    /// all, the `HashMap::get` `None` case).
+    pr_cache: HashMap<String, PrCacheEntry>,
+    /// `Task::id`s with a `gh pr list` fetch currently in flight on a
+    /// background thread -- prevents `maybe_refresh_pr_status` from
+    /// spawning a second overlapping fetch for the same Task (e.g. Task
+    /// selection and a Git refresh landing close together).
+    pr_fetch_in_flight: HashSet<String>,
+}
+
+/// One cached `gh pr list` result (`plans` 第16波 #3) -- see
+/// `LaboLaboApp::pr_cache`'s doc comment for why `info` is itself
+/// `Option`.
+struct PrCacheEntry {
+    info: Option<pr_status::PrInfo>,
+    fetched_at: std::time::Instant,
 }
 
 /// The focused pane's in-progress IME composition, tracked by
@@ -397,6 +446,16 @@ impl LaboLaboApp {
         // sees the persisted value from the very first Task load, not just
         // after the settings panel is opened once.
         let settings = AppSettings::load(&db);
+
+        // サイドバー幅の起動時復元 (`plans` 第16波 #1) -- `windowBounds`と
+        // 同じ「未設定/壊れた値は既定へフォールバック」の流儀
+        // (`sidebar::clamp_sidebar_width`が非有限値も既定へ倒す)。
+        let sidebar_width = db
+            .sidebar_width()
+            .ok()
+            .flatten()
+            .map(sidebar::clamp_sidebar_width)
+            .unwrap_or(sidebar::DEFAULT_SIDEBAR_WIDTH);
 
         // Claude Code hooks integration (docs/hooks-protocol.md): one shared
         // socket/bus for the whole app process (see `hooks`'s module doc
@@ -494,6 +553,9 @@ impl LaboLaboApp {
             settings_open: false,
             changed_files_cache: HashMap::new(),
             divider_drag_active: false,
+            sidebar_width,
+            sidebar_width_save_generation: 0,
+            pending_sidebar_width: None,
             archived_tasks,
             archived_expanded: false,
             task_menu: None,
@@ -507,6 +569,8 @@ impl LaboLaboApp {
             missing_task_ids: HashSet::new(),
             missing_banner_dismissed: false,
             import_prompt_open,
+            pr_cache: HashMap::new(),
+            pr_fetch_in_flight: HashSet::new(),
         };
 
         if let Some(id) = selected_task_id {
@@ -572,6 +636,77 @@ impl LaboLaboApp {
                     window_bounds::encode(window_bounds::SavedWindowBounds::from_bounds(bounds));
                 if let Err(err) = app.db.set_window_bounds(&json) {
                     eprintln!("labolabo-app: failed to persist window bounds: {err}");
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Live-updates the sidebar's width as its divider is dragged (`plans`
+    /// 第16波 #1) -- mirrors `update_divider_drag`'s shape (see that
+    /// method's doc comment), but computes the new width directly as a
+    /// pixel position rather than a `ratio_from_drag_position` ratio: the
+    /// sidebar's width *is* the value being dragged, and `event.bounds` here
+    /// is `content_row`'s own bounds (registered in `Render::render`, not on
+    /// `sidebar::render_sidebar_divider`'s handle itself -- same "container
+    /// measures the drag" split `update_divider_drag`'s own doc comment
+    /// describes), whose left edge is exactly the sidebar's left edge (the
+    /// sidebar is `content_row`'s first child, flush left) -- so `local_x`
+    /// *is* the candidate sidebar width with no further conversion needed.
+    /// Clamped via `sidebar::clamp_sidebar_width`. Sets [`Self::
+    /// divider_drag_active`] `true` (shared with the tile-divider drag, see
+    /// that field's doc comment) so every terminal pane's canvas suppresses
+    /// `Terminal::resize` for the duration, and schedules a debounced save
+    /// on every call -- unlike `update_divider_drag` (which persists once on
+    /// drop via `finish_divider_drag`), this mirrors `schedule_window_
+    /// bounds_save`'s pattern instead (per this wave's brief: "windowBounds
+    /// の保存パターンを流用"), so a width set any other way in the future
+    /// (e.g. a settings-screen input) can reuse the same save path without
+    /// needing an explicit "drag ended" event.
+    pub(crate) fn update_sidebar_width_drag(
+        &mut self,
+        event: &DragMoveEvent<sidebar::SidebarDividerDragPayload>,
+        cx: &mut Context<Self>,
+    ) {
+        self.divider_drag_active = true;
+        let local_x = f32::from(event.event.position.x - event.bounds.origin.x);
+        self.sidebar_width = sidebar::clamp_sidebar_width(local_x);
+        self.schedule_sidebar_width_save(cx);
+        cx.notify();
+    }
+
+    /// Finishes a sidebar-width divider drag (`plans` 第16波 #1) on drop:
+    /// clears [`Self::divider_drag_active`], mirroring `finish_divider_
+    /// drag`'s own shape. No explicit save here -- `update_sidebar_width_
+    /// drag`'s debounced `schedule_sidebar_width_save` (called on every
+    /// drag-move event, including the final one before this drop) already
+    /// has a save scheduled that will land ~500ms after the drag's last
+    /// move, same as a window-resize's own trailing `observe_window_
+    /// bounds` event would.
+    pub(crate) fn finish_sidebar_width_drag(&mut self, cx: &mut Context<Self>) {
+        self.divider_drag_active = false;
+        cx.notify();
+    }
+
+    /// Schedules a debounced `sidebarWidth` `appState` save -- byte-for-byte
+    /// the same generation-counter debounce shape as `schedule_window_
+    /// bounds_save` (see that method's doc comment), just against
+    /// `sidebar_width_save_generation`/`pending_sidebar_width` instead.
+    fn schedule_sidebar_width_save(&mut self, cx: &mut Context<Self>) {
+        self.pending_sidebar_width = Some(self.sidebar_width);
+        self.sidebar_width_save_generation = self.sidebar_width_save_generation.wrapping_add(1);
+        let generation = self.sidebar_width_save_generation;
+        cx.spawn(async move |this, cx| {
+            gpui::Timer::after(SIDEBAR_WIDTH_SAVE_DEBOUNCE).await;
+            let _ = this.update(cx, |app, _cx| {
+                if app.sidebar_width_save_generation != generation {
+                    return; // 新しい幅変化に置き換えられた
+                }
+                let Some(width) = app.pending_sidebar_width.take() else {
+                    return;
+                };
+                if let Err(err) = app.db.set_sidebar_width(width) {
+                    eprintln!("labolabo-app: failed to persist sidebar width: {err}");
                 }
             });
         })
@@ -669,6 +804,30 @@ impl LaboLaboApp {
         self.selected_task_id.as_deref()
     }
 
+    /// The sidebar's current (already-clamped) drag-resizable width
+    /// (`plans` 第16波 #1).
+    pub(crate) fn sidebar_width(&self) -> f32 {
+        self.sidebar_width
+    }
+
+    /// `task_id`'s cached PR info (`plans` 第16波 #3, `crate::pr_status`) --
+    /// `None` whenever nothing has been fetched yet, or the last fetch
+    /// found no PR for that branch (`crate::sidebar`'s badge simply doesn't
+    /// render either way).
+    pub(crate) fn task_pr_info(&self, task_id: &str) -> Option<&pr_status::PrInfo> {
+        self.pr_cache.get(task_id)?.info.as_ref()
+    }
+
+    /// `task_id`'s Task-level usage total (`plans` 第16波 #4's sidebar-row
+    /// usage label) -- sums every loaded pane's `AgentUsage` via
+    /// `task_workspace::aggregate_usage`. `None` for a not-yet-loaded
+    /// workspace or one with no usage observed yet, same "nothing to show"
+    /// contract `task_agent_status` already has for the status dot.
+    pub(crate) fn task_agent_usage(&self, task_id: &str) -> Option<AgentUsage> {
+        let workspace = self.workspaces.get(task_id)?;
+        task_workspace::aggregate_usage(workspace.pane_usage.values())
+    }
+
     /// The selected Task's `crate::titlebar` status-pill data (第13波b §1),
     /// or `None` when no Task is selected (`titlebar::render` then draws an
     /// empty, still-draggable bar). Collects the same three sources
@@ -687,11 +846,19 @@ impl LaboLaboApp {
             .and_then(|w| w.git.status.as_ref())
             .and_then(|status| status.branch.as_deref());
         let changed_count = workspace.map(|w| w.git.items.len()).unwrap_or(0);
+        // PR 状態 (`plans` 第16波 #3): 選択タスクの PR を `#123` + 状態と
+        // して併記(`crate::sidebar`の行バッジと同じキャッシュ、こちらは
+        // ツールバーのステータスピル用)。
+        let pr = self.task_pr_info(task_id).map(|info| titlebar::PrPillData {
+            number: info.number,
+            state: info.state,
+        });
         Some(titlebar::PillData::build(
             &task.title,
             titlebar::is_worktree_kind(&task.kind),
             branch,
             changed_count,
+            pr,
         ))
     }
 
@@ -1531,7 +1698,7 @@ impl LaboLaboApp {
     /// for its single-Task case.
     fn viewport_grid_size(&self, window: &Window) -> (u16, u16) {
         let size = window.viewport_size();
-        let sidebar_adjusted_width = (f32::from(size.width) - sidebar::SIDEBAR_WIDTH).max(0.0);
+        let sidebar_adjusted_width = (f32::from(size.width) - self.sidebar_width).max(0.0);
         grid::grid_size_for_window(
             sidebar_adjusted_width,
             size.height.into(),
@@ -1984,6 +2151,10 @@ impl LaboLaboApp {
             let _ = self.db.upsert_task(task);
         }
         self.sync_git_pane_activation(&task_id, cx);
+        // PR 状態バッジ (`plans` 第16波 #3): 取得タイミングの一つ
+        // ("タスク選択時") -- スロットル込みなので毎回叩くわけではない
+        // (`maybe_refresh_pr_status`の doc コメント参照)。
+        self.maybe_refresh_pr_status(&task_id, cx);
 
         window.focus(&self.focus_handle);
         cx.notify();
@@ -3795,9 +3966,92 @@ impl LaboLaboApp {
             }
         }
         cx.notify();
+        // PR 状態バッジ (`plans` 第16波 #3): 取得タイミングのもう一つ
+        // ("Git refresh 完了時") -- コアレスされて連続で完了しても
+        // `maybe_refresh_pr_status`自身のスロットルで実際の `gh` 呼び出し
+        // は最短120秒間隔に抑えられる。
+        self.maybe_refresh_pr_status(task_id, cx);
         if refresh_again {
             self.request_git_refresh(task_id, cx);
         }
+    }
+
+    /// Kicks off a background `gh pr list` fetch for `task_id`'s branch
+    /// (`plans` 第16波 #3, `crate::pr_status`), throttled to at most once
+    /// per `pr_status::REFRESH_INTERVAL` per Task (`pr_status::
+    /// should_refresh`) -- called from `select_task` and `apply_git_refresh`
+    /// (see those call sites), never from a bare timer, so a Task that's
+    /// never selected/refreshed never spends a background thread on this.
+    /// A no-op for: an `Attached`-kind Task (no branch to look up), a repo
+    /// whose `repo_name` doesn't look like a GitHub `owner/repo` slug
+    /// (`pr_status::looks_like_github_slug` -- avoids a doomed `gh` spawn
+    /// for a Task with no GitHub remote at all), or while a fetch for this
+    /// Task is already in flight (`pr_fetch_in_flight`).
+    pub(crate) fn maybe_refresh_pr_status(&mut self, task_id: &str, cx: &mut Context<Self>) {
+        if self.pr_fetch_in_flight.contains(task_id) {
+            return;
+        }
+        let Some(task) = self.tasks.iter().find(|t| t.id == task_id) else {
+            return;
+        };
+        let TaskKind::Worktree { branch, .. } = &task.kind else {
+            return;
+        };
+        if !pr_status::looks_like_github_slug(&task.repo_name) {
+            return;
+        }
+        let now = std::time::Instant::now();
+        let elapsed = self
+            .pr_cache
+            .get(task_id)
+            .map(|entry| now.duration_since(entry.fetched_at));
+        if !pr_status::should_refresh(elapsed) {
+            return;
+        }
+
+        self.pr_fetch_in_flight.insert(task_id.to_string());
+        let branch = branch.clone();
+        let repo = task.repo_name.clone();
+        let task_id = task_id.to_string();
+        cx.spawn(async move |this, cx| {
+            let info = cx
+                .background_spawn(async move { pr_status::fetch_pr_info_default(&branch, &repo) })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                app.pr_fetch_in_flight.remove(&task_id);
+                app.pr_cache.insert(
+                    task_id,
+                    PrCacheEntry {
+                        info,
+                        fetched_at: std::time::Instant::now(),
+                    },
+                );
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// "PR バッジ" のクリック -- PR ページをブラウザで開く(`update_check::
+    /// open_url`、`crate::ide_open`の「IDE で開く」と同じバックグラウンド
+    /// `open`プロセスの流儀)。キャッシュに URL が無ければ(未取得/PR 無し)
+    /// 何もしない -- バッジ自体がそのときは描画されないので、実際には
+    /// 到達しない防御的ガード。
+    pub(crate) fn open_task_pr_page(&mut self, task_id: &str, cx: &mut Context<Self>) {
+        let Some(url) = self
+            .pr_cache
+            .get(task_id)
+            .and_then(|entry| entry.info.as_ref())
+            .map(|info| info.url.clone())
+        else {
+            return;
+        };
+        cx.background_spawn(async move {
+            if let Err(err) = update_check::open_url(&url) {
+                eprintln!("labolabo-app: failed to open PR page: {err}");
+            }
+        })
+        .detach();
     }
 
     /// The [`cross_session_conflicts::Conflict`]s for `task_id`: paths it
@@ -4427,14 +4681,34 @@ impl Render for LaboLaboApp {
         // pill on every platform). Built from `titlebar_pill_data()` (this
         // impl block, above), which is `None` whenever no Task is selected.
         let titlebar_el = titlebar::render(self.titlebar_pill_data());
+        // サイドバー幅ドラッグ (`plans` 第16波 #1): `content_row` 自身が
+        // `task_workspace::render_tile`の split `container`と同じ役目
+        // (「ドラッグを計測する側」)を担う -- `.relative()`で
+        // `sidebar::render_sidebar_divider`の`.absolute()`ハンドルの基準に
+        // なり、`on_drag_move`/`on_drop`はここに登録する(ハンドル自身の
+        // 狭い当たり判定より、ドラッグの実ポインタ位置を優先して追従
+        // させるため -- `update_divider_drag`の doc コメント参照)。
+        let sidebar_width = self.sidebar_width;
         let content_row = div()
+            .relative()
             .flex_1()
             .min_h(px(0.0))
             .flex()
             .flex_row()
+            .on_drag_move::<sidebar::SidebarDividerDragPayload>(cx.listener(
+                |app, event: &DragMoveEvent<sidebar::SidebarDividerDragPayload>, _window, cx| {
+                    app.update_sidebar_width_drag(event, cx);
+                },
+            ))
+            .on_drop::<sidebar::SidebarDividerDragPayload>(cx.listener(
+                |app, _payload: &sidebar::SidebarDividerDragPayload, _window, cx| {
+                    app.finish_sidebar_width_drag(cx);
+                },
+            ))
             .child(sidebar_el)
             .child(workspace_el)
-            .children(git_pane_el);
+            .children(git_pane_el)
+            .child(sidebar::render_sidebar_divider(sidebar_width));
 
         div()
             .track_focus(&self.focus_handle)

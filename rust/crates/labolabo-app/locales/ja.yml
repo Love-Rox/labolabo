@@ -201,3 +201,8 @@ titlebar:
   kind_attached: "直付け"
   changes_clean: "クリーン"
   changes_count: "%{count} 件変更"
+  # 第16波 #3 (PR 状態バッジ): ステータスピルの PR セグメント。
+  pr_draft: "ドラフト"
+  pr_open: "オープン"
+  pr_merged: "マージ済み"
+  pr_closed: "クローズ済み"
