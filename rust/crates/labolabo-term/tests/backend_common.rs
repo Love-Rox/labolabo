@@ -368,6 +368,12 @@ fn cwd_none_matches_spawn_with_options() {
     );
 }
 
+// NOTE: これらのトグル系テストは「spawn 直後にデフォルト状態を assert」しない。
+// 子プロセス（printf）はテストスレッドの最初の読み取りより先に走り得るため、
+// その形の precondition assert は本質的に race する（CI で実際にフレークした:
+// mouse_mode_reflects_decset_1000_1002_1006 が高速ランナーで子の 1000h に先を
+// 越された）。既定値そのものは各型のユニットテストが担保している。
+
 /// DECSET `2004` (bracketed paste) toggles `Terminal::bracketed_paste()`:
 /// off before the child runs, on once it enables it, off again once it
 /// disables it. This is the mode-query API `labolabo-app`'s Cmd+V paste
@@ -387,10 +393,6 @@ fn bracketed_paste_mode_reflects_decset_2004() {
         &[],
     )
     .expect("spawn");
-    assert!(
-        !term.bracketed_paste(),
-        "bracketed paste should be off before the child runs"
-    );
     assert!(
         wait_for_bracketed_paste(&term, TIMEOUT, true),
         "expected bracketed paste to turn on after DECSET 2004h"
@@ -431,11 +433,6 @@ fn mouse_mode_reflects_decset_1000_1002_1006() {
         &[],
     )
     .expect("spawn");
-    assert_eq!(
-        term.mouse_mode(),
-        MouseMode::OFF,
-        "mouse mode should be off before the child runs"
-    );
     assert!(
         wait_for_mouse_mode(
             &term,
@@ -694,10 +691,6 @@ fn alt_screen_active_reflects_decset_1049() {
         &[],
     )
     .expect("spawn");
-    assert!(
-        !term.alt_screen_active(),
-        "alt screen should be off before the child runs"
-    );
     assert!(
         wait_for_alt_screen(&term, TIMEOUT, true),
         "expected alt screen to turn on after DECSET 1049h"
