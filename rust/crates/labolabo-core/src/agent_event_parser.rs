@@ -34,10 +34,15 @@ pub fn parse(data: &[u8]) -> Option<AgentStatusEvent> {
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
-    let status = AgentStatus::from_hook_event(&hook_event)?;
+    let source = object
+        .get("source")
+        .and_then(Value::as_str)
+        .map(String::from);
+    let status = AgentStatus::from_hook_event(&hook_event, source.as_deref())?;
     Some(AgentStatusEvent {
         hook_event,
         status,
+        source,
         session_id: object
             .get("session_id")
             .and_then(Value::as_str)
@@ -90,11 +95,46 @@ mod tests {
     fn optional_fields_may_be_absent() {
         let event = parse_str(r#"{"hook_event_name":"Stop"}"#).expect("event");
         assert_eq!(event.status, AgentStatus::Idle);
+        assert_eq!(event.source, None);
         assert_eq!(event.session_id, None);
         assert_eq!(event.transcript_path, None);
         assert_eq!(event.cwd, None);
         assert_eq!(event.pane_id, None);
         assert_eq!(event.task_id, None);
+    }
+
+    /// End-to-end regression coverage for the `SessionStart`/`source:
+    /// "compact"` fix (`AgentStatus::from_hook_event`'s doc comment): the
+    /// real wire payload Claude Code sends after auto/manual context
+    /// compaction must parse to `Running`, not `Starting`, and `source`
+    /// itself must round-trip onto the event.
+    #[test]
+    fn session_start_with_compact_source_maps_to_running() {
+        let event =
+            parse_str(r#"{"hook_event_name":"SessionStart","source":"compact","session_id":"s1"}"#)
+                .expect("event");
+        assert_eq!(event.status, AgentStatus::Running);
+        assert_eq!(event.source.as_deref(), Some("compact"));
+    }
+
+    /// A `source` other than `"compact"` (or none at all) is unaffected --
+    /// still maps `SessionStart` to `Starting`, and `source` still
+    /// round-trips onto the event for a non-`SessionStart` hook too (the
+    /// field is parsed unconditionally, not gated on `hook_event_name`).
+    #[test]
+    fn source_field_is_parsed_for_any_hook_event() {
+        let startup =
+            parse_str(r#"{"hook_event_name":"SessionStart","source":"startup"}"#).expect("event");
+        assert_eq!(startup.status, AgentStatus::Starting);
+        assert_eq!(startup.source.as_deref(), Some("startup"));
+
+        // `source` isn't documented on non-SessionStart events, but nothing
+        // stops the parser from picking it up if present -- matches
+        // docs/hooks-protocol.md §9's forward-compatible "未知フィールドは無視"
+        // stance applied in reverse (known field, unexpected event).
+        let stop = parse_str(r#"{"hook_event_name":"Stop","source":"startup"}"#).expect("event");
+        assert_eq!(stop.status, AgentStatus::Idle);
+        assert_eq!(stop.source.as_deref(), Some("startup"));
     }
 
     /// `labolabo_task_id` can be present without `labolabo_pane_id` (e.g. a
