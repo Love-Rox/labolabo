@@ -1145,3 +1145,206 @@ protocol の push/pop を無条件にパースする（前述）ので、Claude 
   同型機能が同じ経路で動作確認済みであることと、Kitty push/pop の
   ヘッドレステスト自体は両バックエンドで green であることから、
   低リスクと判断している。
+
+## Wave 15 followup（実機確認で Shift+Enter がまだ効かない → 真因は別にあった）
+
+Wave 15 の PR マージ後、実機（LaboLabo アプリ上で本物の `claude` を起動）
+で確認したところ **Shift+Enter はまだ改行にならなかった**。Wave 15 時点の
+「未検証」節に書いたとおり実機確認は最初から済んでいなかったため、これは
+regression ではなく元々の未検証事項が実際に不具合だったと判明したケース。
+4 つの仮説（クエリ応答の欠如／macOS のキー経路／ghostty 側の追跡／
+その他）を総当たりで検証した結果、**当たっていたのはどれでもなかった**
+-- 実際の Claude Code バイナリを逆解析して見つけた、より根本的な原因が
+別にあった。
+
+### 調査方法: 実際の Claude Code CLI バイナリを直接解析
+
+`which claude` → `~/.local/share/claude/versions/2.1.212`（Bun でコンパイル
+された単一 Mach-O 実行ファイル、245MB）。ソースは公開されていないが、
+Bun バンドルは文字列リテラル・正規表現ソース・関数名（一部）がバイナリ内に
+平文で残るため、`strings -a` (615,177 行) + `ripgrep` で該当ロジックを
+直接読める。以下は実際に読んだコード片（変数名は minify 済みだが、
+ロジックはそのまま引用）。
+
+### 仮説①「クエリ応答（`CSI ? u`）が無いと push しない」-- 否定
+
+Claude Code 自身のキーボード応答パーサ:
+
+```js
+Iwg = /^\x1b\[\?(\d+)u$/;          // クエリ応答 CSI ? <flags> u を解釈
+C7i = /^\x1b\[(\d+)(?:;(\d+))?u/;  // 自分の stdin に来た CSI u キーイベントを解釈
+```
+
+`Iwg` は確かに存在するが、「クエリを送って応答を確認してから push する」
+という分岐はどこにも無かった。push 自体は次の 1 行:
+
+```js
+Tiu = mE(">1u");   // "\x1b[>1u" -- kitty disambiguate を push
+LLe = mE("<u");    // "\x1b[<u"  -- pop
+function __e() { return YRg() ? LLe + Tiu + Siu : "" }
+```
+
+`__e()` は Ink（Claude Code の TUI ランタイム）が raw モードに入る/戻る
+たびに**無条件で**呼ばれ、`YRg()` が真なら push 文字列を stdout（= この
+アプリからは PTY 経由で子プロセスの stdin）へ書く。クエリ応答は一切
+待たない。→ **仮説①は誤り。** ただし「対応バックエンド側は `CSI ? u`
+に正しく応答できるか」自体は独立に価値のある確認なので、後述のとおり
+新規 e2e テストで両バックエンドとも検証した（結果: 既存の `Event::
+PtyWrite`/`on_pty_write`（DA1/DSR と同じ経路）がそのまま kitty query
+にも効いており、**新規コード不要**だった）。
+
+### 真因: `YRg()`（terminal-identity allowlist）が LaboLabo を認識していない
+
+```js
+KRg = ["iTerm.app", "kitty", "WezTerm", "ghostty", "tmux",
+       "windows-terminal", "WarpTerminal"];
+function YRg(e) { return KRg.includes(e ?? Z.terminal ?? "") }
+```
+
+`__e()`（kitty push を書く関数）は **`Z.terminal` がこの固定リストに
+含まれるときしか呼ばれない**。つまり Claude Code は「相手の端末が Kitty
+protocol を実装しているか」をライブに調べるのではなく、**静的な端末名
+の allowlist** で判定している。`Z.terminal` の解決ロジック（優先順）:
+
+```js
+if (process.env.TERM === "xterm-ghostty") return "ghostty";
+if (process.env.TERM?.includes("kitty")) return "kitty";
+if (process.env.TERM_PROGRAM) { ...; return process.env.TERM_PROGRAM; }
+if (process.env.TMUX) return "tmux";
+// ... KITTY_WINDOW_ID / ALACRITTY_LOG / WT_SESSION / ...
+```
+
+Wave 15 以前（そして Wave 15 の変更後もそのまま）、`session.rs` が子
+プロセスへ渡す環境変数は `TERM=xterm-256color` のみで、`TERM_PROGRAM`
+は未設定だった。上のチェーンをどれも満たさないため `Z.terminal` は
+Claude Code にとって「認識できない端末」のままになり、**`__e()` が一度も
+呼ばれず、`\x1b[>1u` が子プロセスの stdin に一度も書き込まれない**。
+Wave 15 で実装した `VtBackend::kitty_disambiguate`/CSI u エンコードは
+「push が来れば正しく中継できる」よう terminal 側を正しくしただけで、
+Claude Code 側がそもそも push を試みていなかった -- これが実機で
+Shift+Enter が動かなかった直接の原因。
+
+### 修正: 子プロセスに `TERM_PROGRAM=ghostty` を設定
+
+`labolabo-term::session::TermSession::spawn_with_scrollback_options`
+（`session.rs`）で、既存の `cmd.env("TERM", "xterm-256color")` に加えて
+`cmd.env("TERM_PROGRAM", "ghostty")` を設定した。これだけで上の解決
+チェーンの `TERM_PROGRAM` 分岐が `"ghostty"` を返し、`KRg` に一致する。
+
+- **`TERM` ではなく `TERM_PROGRAM` を選んだ理由**: `TERM` は terminfo/
+  termcap 解決に使われ、システムに `xterm-ghostty` terminfo が入って
+  いない環境（実物の Ghostty を一度もインストールしていないマシンなど）
+  では ncurses 系プログラム（`tput`、`vim` の一部機能など）を壊すリスク
+  がある。`TERM_PROGRAM` は端末識別のための慣習的な変数で、それを読む
+  プログラムはごく少数（端末機能検出目的のみ）のため、この用途には
+  `TERM_PROGRAM` だけで十分かつ低リスク。
+- **`"ghostty"` を名乗る妥当性**: 本クレートの本番バックエンドは実際に
+  `libghostty-vt`（本物の Ghostty VT エンジン）そのものであり、CI 既定の
+  `backend-alacritty` フォールバックも同じ統合テストで Ghostty 相当の
+  挙動（bracketed paste・mouse mode・kitty keyboard 等）を保証している
+  （`backend/mod.rs`）。したがってどちらのバックエンドでビルドされて
+  いても "Ghostty 互換の端末である" という自己申告は正確。
+
+### 仮説②「macOS で Shift+Enter が `key_down` に届いていない」-- 否定（ただし `keys.rs` 自身のコメントに誤りを発見）
+
+`gpui` 0.2.2 の実ソースを直接読んで検証（`~/.cargo/registry/src/.../
+gpui-0.2.2/`）。
+
+- `platform/mac/events.rs`: Enter キーは `key_char` を**修飾キーに
+  関係なく無条件で** `Some("\n")` にする
+  (`Some(ENTER_KEY) => { key_char = Some("\n".to_string()); "enter" }`)。
+  つまり Shift+Enter は `{ key: "enter", key_char: Some("\n"), modifiers:
+  { shift: true, .. } }` になる -- `key_char` を持つ。
+- `platform/mac/window.rs`'s `handle_key_event`: IME 合成中でなければ、
+  `key_char` の有無に関わらず**まず `run_callback`（= `div::on_key_down`
+  → `app::LaboLaboApp::key_down`）を呼ぶ**。`NSTextInputContext.
+  handleEvent` は `run_callback` が `cx.stop_propagation()` しなかった
+  場合の**フォールバック**としてのみ呼ばれる。
+
+つまり macOS では `on_key_down` が `key_char` の有無に関わらず常に先に
+呼ばれ、`keystroke_to_bytes` が `None` を返した（= plain な文字入力の
+場合）ときだけ IME 側へフォールスルーする、という「先取り＋非取得なら
+委譲」の構造だった。**`keys.rs` 自身の元々のモジュールドキュメントは
+これと逆のこと**（"key_char を持つキーストロークは常に IME 側が横取り
+し、`on_key_down` には届かない"）**を書いていた** -- 実際の観測結果
+（素の Enter は元から動いていた）と矛盾しない誤解だったため気づかれずに
+残っていたが、将来「gpui がどうせ横取りするから」という誤った前提で
+このモジュールの防御的な分岐を削ってしまう regression の種になり得る
+ため、コメントを実ソースの引用で修正した（`keys.rs` 参照）。→ **仮説②は
+macOS について明確に否定**（X11/Wayland/Windows は今回未再監査 -- 実装が
+プラットフォーム非依存の純関数である `keys.rs` 側の対応は変わらないが、
+"gpui がどう配送するか" の部分はコメントで「未検証」と明記した）。
+
+### 仮説③「ghostty バックエンドのフラグ追跡が効いていない」-- 否定
+
+Wave 15 の PR #148 の実 CI ログを直接確認: `rust-term-ghostty
+(macos-15)`・`rust-term-ghostty (ubuntu-latest)` 両ジョブのログに
+`test kitty_disambiguate_reflects_csi_push_pop ... ok` が実際に出力
+されている（`gh run view <run_id> --job <job_id> --log` で確認）。
+**実 libghostty-vt バックエンドで push/pop の追跡は既に green** -- 憶測
+ではなく CI ログの一次証跡で確定。
+
+### 新規 e2e（両バックエンドで実行・green）
+
+- `kitty_query_response_reflects_current_flags_before_and_after_push`
+  （`labolabo-term/tests/backend_common.rs`）: 子プロセスが `stty raw
+  -echo` の上で `CSI ? u` を送り、応答を `dd bs=1 count=5` で生バイト
+  キャプチャ（このクレート自身の VT パーサを経由させない、W5j の mouse
+  e2e と同じ手法）。push 前は `\x1b[?0u`、`CSI > 1 u` push 後は
+  `\x1b[?1u` が返ることを両バックエンドで確認 -- 仮説①の「クエリ応答は
+  新規実装不要」を実測で裏付け。
+- `term_program_env_is_ghostty_for_every_spawned_child`
+  （同ファイル）: 子プロセスの `$TERM_PROGRAM` が実際に `ghostty` に
+  なっていることを確認 -- 今回の修正そのものの直接的な回帰テスト。
+- `real_macos_enter_key_char_does_not_change_the_result`
+  （`labolabo-app/src/keys.rs`）: 実 macOS が生成する `key_char:
+  Some("\n")` を持つ Shift+Enter キーストロークでも結果が変わらない
+  ことを確認 -- 仮説②の裏付け。
+
+### 品質ゲート結果
+
+- `cargo build/test/clippy(-D warnings)` を `-p labolabo-term`（alacritty
+  backend（既定）と ghostty-vt backend（`PATH` に
+  `~/.local/opt/zig-aarch64-macos-0.16.0` を先頭追加 +
+  `GHOSTTY_SOURCE_DIR=~/ghq/.../labolabo-spikes/ghostty-zig016-src` で
+  ローカル実ビルド）の両方）/ `-p labolabo-app` / ルート
+  `default-members` それぞれで実行、全 green（`labolabo-term`: unit 6 +
+  統合 28、うち新規 2 件込み。`labolabo-app`: `keys::` 18 -- 前回 17 +
+  新規 1）。
+- `cargo fmt --check`（ワークスペース全体）green。
+- スモーク: `LABOLABO_RS_DATA_DIR=$(mktemp -d)` の上で `cargo run -p
+  labolabo-app` を約5秒起動して kill -- パニック/クラッシュ出力なし
+  （`timeout(1)` がこのマシンに無いため、バックグラウンド起動 + `sleep
+  5` + `kill` で代替。合成入力・spawn直後のデフォルト状態 assert なし）。
+
+### 手動確認手順（PR に記載・実機の `claude` 確認前にこれで一次確認可能）
+
+```sh
+# LaboLabo で新規ペインを開き、シェルで直接:
+printf 'TERM_PROGRAM=%s\n' "$TERM_PROGRAM"   # -> "ghostty" になっているはず
+stty raw -echo; printf '\033[?u'; dd bs=1 count=5 2>/dev/null | cat -v; stty sane; echo
+# -> "^[[?0u" (プッシュ前、flags=0) が出力されるはず
+stty raw -echo; printf '\033[>1u\033[?u'; dd bs=1 count=5 2>/dev/null | cat -v; stty sane; echo
+# -> "^[[?1u" (disambiguate を push 後、flags=1) が出力されるはず
+```
+
+### 未検証
+
+- **実際の `claude` での Shift+Enter 改行は依然ユーザー未確認。** 上記は
+  すべて「Claude Code の実バイナリを逆解析して判明した判定ロジック」＋
+  「そのロジックが要求する条件（`TERM_PROGRAM=ghostty`）をこのアプリが
+  満たすようになったこと」をヘッドレスな e2e テストで裏付けたものであり、
+  実機の LaboLabo アプリ上で `claude` を起動し、実際に Shift+Enter を
+  押して改行が入ることそのものはまだ確認していない（合成キーボード入力は
+  この移植の検証方針で禁止されているため、ユーザー確認が必要）。ただし
+  今回はブラックボックスの推測ではなく、Claude Code 自身のバイナリが
+  実際にチェックしている条件をソースレベルで特定し、それを満たしたという
+  点で、Wave 15 時点より確度は大きく上がっている。
+- **X11/Wayland/Windows での `on_key_down` 配送順は今回未検証**（macOS の
+  gpui ソースのみ直接確認）。`keys.rs` はプラットフォーム非依存の純関数
+  なので機能的な影響は無いはずだが、"gpui 側がどう配送するか" は
+  プラットフォームごとに独立した検証が必要な部分として未確認のまま
+  残した。
+- 実際の Claude Code バイナリは version 2.1.212 時点のもの -- 将来
+  バージョンで `KRg` allowlist や `Z.terminal` 解決ロジックが変わる
+  可能性はあり、その場合はこの節の記述も追随が必要。

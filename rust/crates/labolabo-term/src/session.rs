@@ -271,6 +271,50 @@ impl<B: VtBackend> TermSession<B> {
             None => CommandBuilder::new_default_prog(),
         };
         cmd.env("TERM", "xterm-256color");
+        // `TERM_PROGRAM=ghostty` -- **not** cosmetic. Real terminal-aware
+        // programs (Claude Code's own TUI is the motivating case; see
+        // `crate` root docs / `rust/README.md`'s "Wave 15 followup") decide
+        // whether to attempt the Kitty keyboard protocol handshake (`CSI >
+        // 1 u`, the mechanism `keys::keystroke_to_bytes`'s `kitty_
+        // disambiguate` parameter needs to see fire at all) purely from a
+        // static terminal-identity allowlist keyed on `TERM_PROGRAM` (and a
+        // few backup env vars for terminals that don't set it, like Kitty
+        // itself) -- **not** from any live capability probe/query-response
+        // round trip. Confirmed by reading Claude Code's own compiled CLI:
+        // its terminal-name resolver checks `TERM=="xterm-ghostty"`, then
+        // `TERM.includes("kitty")`, then falls back to `TERM_PROGRAM`
+        // verbatim; the result is matched against an allowlist that
+        // includes `"ghostty"` (also `"iTerm.app"`/`"kitty"`/`"WezTerm"`/
+        // `"tmux"`/`"windows-terminal"`/`"WarpTerminal"`) before it will
+        // ever write the push sequence to this pane's stdin. Without this,
+        // a Kitty-protocol-*capable* terminal (this crate, once `VtBackend
+        // ::kitty_disambiguate` landed) still never gets asked to prove
+        // it -- the actual root cause of the wave 15 bug report ("Shift+
+        // Enter still doesn't work") surviving that wave's own fix, since
+        // that fix made this crate *able* to relay a push correctly but
+        // did nothing to make Claude Code ever attempt one.
+        //
+        // `"ghostty"` (not e.g. `"iTerm.app"`) is the honest choice here,
+        // not an arbitrary pick to unlock the feature: this crate's
+        // intended production `VtBackend` **is** `libghostty-vt`, the same
+        // VT engine real Ghostty embeds (see `backend/ghostty.rs`'s module
+        // doc comment), and the crates.io-only `backend-alacritty` fallback
+        // is deliberately held to the same integration-test contract (see
+        // `backend/mod.rs`) specifically so it stays behaviorally
+        // interchangeable -- claiming to be Ghostty-compatible is accurate
+        // for both, not just whichever backend a given build happens to use.
+        //
+        // Deliberately `TERM_PROGRAM` only, not also `TERM=xterm-ghostty`:
+        // `TERM` drives terminfo/termcap lookups for every program in the
+        // child (not just Claude Code), and an `xterm-ghostty` terminfo
+        // entry isn't guaranteed to be installed on a machine that has
+        // never had real Ghostty on it -- a wrong/missing terminfo entry
+        // risks breaking `tput`/ncurses-based programs system-wide for a
+        // benefit (this one program's Kitty-protocol detection) that
+        // `TERM_PROGRAM` alone already delivers with none of that risk
+        // (virtually nothing outside terminal-identity feature-detection
+        // reads `TERM_PROGRAM`, unlike `TERM`).
+        cmd.env("TERM_PROGRAM", "ghostty");
         for (key, value) in env {
             cmd.env(key, value);
         }

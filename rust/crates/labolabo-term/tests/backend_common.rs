@@ -88,6 +88,35 @@ fn env_injection_reaches_child() {
     );
 }
 
+/// `TERM_PROGRAM=ghostty` reaches every spawned child -- the actual fix for
+/// the wave 15 follow-up bug report ("Shift+Enter still doesn't work"):
+/// Claude Code's own terminal-identity detection (confirmed by reading its
+/// compiled CLI) resolves a name from `TERM`/`TERM_PROGRAM`/a handful of
+/// backup env vars and only ever attempts the Kitty keyboard protocol
+/// handshake (`CSI > 1 u`) with a terminal whose resolved name is in its
+/// own allowlist (which includes `"ghostty"`) -- **not** from any live
+/// capability probe. Without this env var, `VtBackend::kitty_disambiguate`
+/// (wave 15) is correct but moot: nothing ever asks this crate's child to
+/// push the flag in the first place. See `session.rs`'s `spawn_with_
+/// scrollback_options` for the full rationale (including why `TERM_PROGRAM`
+/// alone, not also `TERM=xterm-ghostty`).
+#[test]
+fn term_program_env_is_ghostty_for_every_spawned_child() {
+    let term = Terminal::spawn_with_command(
+        80,
+        24,
+        Some("printf '%s' \"$TERM_PROGRAM\"; sleep 0.2"),
+        &[],
+    )
+    .expect("spawn");
+    let snap = term.wait_for(TIMEOUT, |g| g.contains_text("ghostty"));
+    assert!(
+        snap.is_some(),
+        "expected TERM_PROGRAM=ghostty in the child's environment, got:\n{}",
+        term.snapshot().to_text()
+    );
+}
+
 /// Resizing updates the reported grid dimensions.
 #[test]
 fn resize_changes_grid_dimensions() {
@@ -440,6 +469,88 @@ fn kitty_disambiguate_reflects_csi_push_pop() {
     assert!(
         wait_for_kitty_disambiguate(&term, TIMEOUT, false),
         "expected kitty_disambiguate to turn back off after CSI < u (pop)"
+    );
+}
+
+/// `CSI ? u` (query current Kitty keyboard mode) gets a real `CSI ? <flags>
+/// u` reply written back to the child's own stdin -- proving both
+/// backends' existing VT-response plumbing (the same `Event::PtyWrite`/
+/// `on_pty_write` path DA1/DSR/cursor-position replies already use) covers
+/// the Kitty protocol's query too, with no new backend code needed for it.
+///
+/// Investigated as part of the wave 15 follow-up (a real terminal-aware
+/// program *could* gate its own `CSI > 1 u` push on first confirming a
+/// query round trip, even though Claude Code itself turned out not to --
+/// see `session.rs`'s `TERM_PROGRAM` doc comment) -- this closes that
+/// question definitively for both backends rather than leaving it assumed.
+///
+/// Captured **raw**, bypassing this crate's own VT parser entirely (same
+/// technique as `labolabo-app::mouse_report`'s `mouse_scroll_reporting_
+/// end_to_end_reaches_the_pty_as_sgr_bytes`, this wave's own e2e model): the
+/// child puts its pty into raw/no-echo mode and `dd`s the exact expected
+/// byte count to a temp file, so an escape sequence fed back in as *input*
+/// (which no real terminal is meant to interpret) can't be silently
+/// swallowed/reinterpreted by our own grid and produce a false pass.
+///
+/// No "block on `read` between writes" hand-off is needed here (unlike the
+/// DECSET-toggle tests above): `dd bs=1 count=N` itself blocks until
+/// exactly `N` bytes have arrived, which is already a real happens-before
+/// gate, and VT parsing (unlike snapshot publishing) is never throttled --
+/// `feed()` runs against every `WorkerMsg::Bytes` batch as it's received,
+/// so the push write is always fully applied before the second query's
+/// bytes are ever parsed (same fd, program-order writes, no reordering
+/// possible).
+#[test]
+fn kitty_query_response_reflects_current_flags_before_and_after_push() {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as u64;
+    let before_path = std::env::temp_dir().join(format!(
+        "labolabo-kitty-query-before-{}-{nanos:x}",
+        std::process::id()
+    ));
+    let after_path = std::env::temp_dir().join(format!(
+        "labolabo-kitty-query-after-{}-{nanos:x}",
+        std::process::id()
+    ));
+
+    // `\x1b[?0u` / `\x1b[?1u` are both exactly 5 bytes (a single-digit
+    // flags value in both the never-pushed and disambiguate-only-pushed
+    // cases), so both captures can use the same fixed count.
+    const RESPONSE_LEN: usize = 5;
+
+    let script = format!(
+        "stty raw -echo; \
+         printf '\\033[?u'; dd bs=1 count={RESPONSE_LEN} of='{}' 2>/dev/null; \
+         printf '\\033[>1u'; \
+         printf '\\033[?u'; dd bs=1 count={RESPONSE_LEN} of='{}' 2>/dev/null; \
+         printf DONE",
+        before_path.display(),
+        after_path.display(),
+    );
+    let term = Terminal::spawn_with_command(80, 24, Some(&script), &[]).expect("spawn");
+    let done = term.wait_for(TIMEOUT, |g| g.contains_text("DONE"));
+    assert!(
+        done.is_some(),
+        "expected the child's capture script to finish, got:\n{}",
+        term.snapshot().to_text()
+    );
+
+    let before = std::fs::read(&before_path).unwrap_or_default();
+    let after = std::fs::read(&after_path).unwrap_or_default();
+    let _ = std::fs::remove_file(&before_path);
+    let _ = std::fs::remove_file(&after_path);
+
+    assert_eq!(
+        before, b"\x1b[?0u",
+        "expected a not-yet-pushed query to reply with flags=0"
+    );
+    assert_eq!(
+        after, b"\x1b[?1u",
+        "expected a post-push (disambiguate-only) query to reply with flags=1"
     );
 }
 
