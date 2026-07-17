@@ -23,12 +23,14 @@ mod app;
 mod color_picker;
 mod commit_pane;
 mod control;
+mod empty_state;
 mod focus;
 mod ghostty_config;
 mod git_pane;
 mod grid;
 mod hooks;
 mod i18n;
+mod icons;
 mod ide_open;
 mod ime;
 mod import_prompt;
@@ -50,6 +52,7 @@ mod task_menu;
 mod task_workspace;
 mod text_field;
 mod theme;
+mod titlebar;
 mod update_check;
 mod window_bounds;
 
@@ -127,80 +130,94 @@ fn main() {
         .unwrap_or_default();
     rust_i18n::set_locale(locale_setting.resolve());
 
-    Application::new().run(move |cx: &mut App| {
-        // Tile/tab keybindings (see `app.rs`'s `actions!` list for the
-        // handlers; README.md documents this table for users). Cmd-modified
-        // keystrokes never reach a terminal's own input (`keys::
-        // keystroke_to_bytes` reserves the whole `platform` modifier for
-        // application shortcuts), so there's no conflict with typing into a
-        // pane. Menu items (`crate::menus`) reference these same actions,
-        // and gpui renders each menu item's shortcut from this keymap --
-        // so `bind_keys` must run before `set_menus` below.
-        cx.bind_keys([
-            KeyBinding::new("cmd-t", NewTab, None),
-            KeyBinding::new("cmd-w", CloseTab, None),
-            KeyBinding::new("cmd-d", SplitRight, None),
-            KeyBinding::new("cmd-shift-d", SplitDown, None),
-            KeyBinding::new("cmd-v", Paste, None),
-            KeyBinding::new("cmd-c", Copy, None),
-            KeyBinding::new("cmd-]", FocusNextPane, None),
-            KeyBinding::new("cmd-[", FocusPrevPane, None),
-            KeyBinding::new("cmd-1", SelectTab1, None),
-            KeyBinding::new("cmd-2", SelectTab2, None),
-            KeyBinding::new("cmd-3", SelectTab3, None),
-            KeyBinding::new("cmd-4", SelectTab4, None),
-            KeyBinding::new("cmd-5", SelectTab5, None),
-            KeyBinding::new("cmd-6", SelectTab6, None),
-            KeyBinding::new("cmd-7", SelectTab7, None),
-            KeyBinding::new("cmd-8", SelectTab8, None),
-            KeyBinding::new("cmd-9", SelectTab9, None),
-            // Git pane (`crate::git_pane`) visibility toggle -- the task
-            // brief's own suggested binding ("Cmd+Shift+G 等").
-            KeyBinding::new("cmd-shift-g", ToggleGitPane, None),
-            // Settings overlay (`crate::settings`) -- matches the Swift
-            // app's `Cmd+,` (macOS's conventional "Preferences" shortcut).
-            KeyBinding::new("cmd-,", ToggleSettings, None),
-            // Menu-bar standards (wave 6c §1): quit and minimize.
-            KeyBinding::new("cmd-q", Quit, None),
-            KeyBinding::new("cmd-m", MinimizeWindow, None),
-        ]);
+    // Icon assets (第13波b §2): `icons::Assets` serves the compiled-in SVG
+    // set `crate::icons::icon`/`icons::icon_colored` reference by path
+    // (`Icon::asset_path`) -- see that module's doc comment for why a
+    // `gpui::AssetSource` impl over `include_bytes!` was chosen. Must be
+    // wired in before `cx.open_window` below (the very first paint already
+    // needs it resolvable).
+    Application::new()
+        .with_assets(icons::Assets)
+        .run(move |cx: &mut App| {
+            // Tile/tab keybindings (see `app.rs`'s `actions!` list for the
+            // handlers; README.md documents this table for users). Cmd-modified
+            // keystrokes never reach a terminal's own input (`keys::
+            // keystroke_to_bytes` reserves the whole `platform` modifier for
+            // application shortcuts), so there's no conflict with typing into a
+            // pane. Menu items (`crate::menus`) reference these same actions,
+            // and gpui renders each menu item's shortcut from this keymap --
+            // so `bind_keys` must run before `set_menus` below.
+            cx.bind_keys([
+                KeyBinding::new("cmd-t", NewTab, None),
+                KeyBinding::new("cmd-w", CloseTab, None),
+                KeyBinding::new("cmd-d", SplitRight, None),
+                KeyBinding::new("cmd-shift-d", SplitDown, None),
+                KeyBinding::new("cmd-v", Paste, None),
+                KeyBinding::new("cmd-c", Copy, None),
+                KeyBinding::new("cmd-]", FocusNextPane, None),
+                KeyBinding::new("cmd-[", FocusPrevPane, None),
+                KeyBinding::new("cmd-1", SelectTab1, None),
+                KeyBinding::new("cmd-2", SelectTab2, None),
+                KeyBinding::new("cmd-3", SelectTab3, None),
+                KeyBinding::new("cmd-4", SelectTab4, None),
+                KeyBinding::new("cmd-5", SelectTab5, None),
+                KeyBinding::new("cmd-6", SelectTab6, None),
+                KeyBinding::new("cmd-7", SelectTab7, None),
+                KeyBinding::new("cmd-8", SelectTab8, None),
+                KeyBinding::new("cmd-9", SelectTab9, None),
+                // Git pane (`crate::git_pane`) visibility toggle -- the task
+                // brief's own suggested binding ("Cmd+Shift+G 等").
+                KeyBinding::new("cmd-shift-g", ToggleGitPane, None),
+                // Settings overlay (`crate::settings`) -- matches the Swift
+                // app's `Cmd+,` (macOS's conventional "Preferences" shortcut).
+                KeyBinding::new("cmd-,", ToggleSettings, None),
+                // Menu-bar standards (wave 6c §1): quit and minimize.
+                KeyBinding::new("cmd-q", Quit, None),
+                KeyBinding::new("cmd-m", MinimizeWindow, None),
+            ]);
 
-        // Quit is a *global* action handler (not a window-scoped
-        // `.on_action` in `LaboLaboApp::render`) so the menu item works
-        // even with no window focused. `cx.quit()` runs the app's
-        // `on_app_quit` cleanup (hooks `settings.local.json` restore --
-        // see `LaboLaboApp::new`).
-        cx.on_action(|_: &Quit, cx| cx.quit());
+            // Quit is a *global* action handler (not a window-scoped
+            // `.on_action` in `LaboLaboApp::render`) so the menu item works
+            // even with no window focused. `cx.quit()` runs the app's
+            // `on_app_quit` cleanup (hooks `settings.local.json` restore --
+            // see `LaboLaboApp::new`).
+            cx.on_action(|_: &Quit, cx| cx.quit());
 
-        // Menu bar (wave 6c §1) -- after `bind_keys` (see above), and after
-        // `rust_i18n::set_locale` above so its labels are already in the
-        // right language on first paint (`menus::app_menus` takes the
-        // locale explicitly -- see that function's doc comment for why).
-        cx.set_menus(menus::app_menus(&rust_i18n::locale()));
+            // Menu bar (wave 6c §1) -- after `bind_keys` (see above), and after
+            // `rust_i18n::set_locale` above so its labels are already in the
+            // right language on first paint (`menus::app_menus` takes the
+            // locale explicitly -- see that function's doc comment for why).
+            cx.set_menus(menus::app_menus(&rust_i18n::locale()));
 
-        // Window bounds restore (wave 6c §3): saved bounds win if they
-        // still intersect a connected display; otherwise (display
-        // unplugged, corrupt value, first run) fall back to centered.
-        // Fullscreen/maximized windows are restored as normal windows in
-        // this first version (README).
-        let display_bounds: Vec<Bounds<Pixels>> = cx
-            .displays()
-            .iter()
-            .map(|display| display.bounds())
-            .collect();
-        let bounds = saved_bounds
-            .and_then(|saved| window_bounds::restore_bounds(saved, &display_bounds))
-            .unwrap_or_else(|| {
-                Bounds::centered(None, size(px(INITIAL_WIDTH), px(INITIAL_HEIGHT)), cx)
-            });
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                ..Default::default()
-            },
-            |window, cx| cx.new(|cx| LaboLaboApp::new(&font_config, &color_config, window, cx)),
-        )
-        .expect("failed to open labolabo-app window");
-        cx.activate(true);
-    });
+            // Window bounds restore (wave 6c §3): saved bounds win if they
+            // still intersect a connected display; otherwise (display
+            // unplugged, corrupt value, first run) fall back to centered.
+            // Fullscreen/maximized windows are restored as normal windows in
+            // this first version (README).
+            let display_bounds: Vec<Bounds<Pixels>> = cx
+                .displays()
+                .iter()
+                .map(|display| display.bounds())
+                .collect();
+            let bounds = saved_bounds
+                .and_then(|saved| window_bounds::restore_bounds(saved, &display_bounds))
+                .unwrap_or_else(|| {
+                    Bounds::centered(None, size(px(INITIAL_WIDTH), px(INITIAL_HEIGHT)), cx)
+                });
+            cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    // Window-integrated toolbar chrome (第13波b §1): macOS hides
+                    // the native titlebar in favor of `crate::titlebar::render`'s
+                    // own top row (traffic lights inlined + drag region + status
+                    // pill); Linux/Windows keep exactly today's native titlebar
+                    // (`titlebar::window_titlebar_options`'s doc comment).
+                    titlebar: titlebar::window_titlebar_options(),
+                    ..Default::default()
+                },
+                |window, cx| cx.new(|cx| LaboLaboApp::new(&font_config, &color_config, window, cx)),
+            )
+            .expect("failed to open labolabo-app window");
+            cx.activate(true);
+        });
 }
