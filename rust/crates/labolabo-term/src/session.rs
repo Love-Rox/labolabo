@@ -106,6 +106,12 @@ pub struct TermSession<B: VtBackend> {
     /// by the worker after every processed PTY byte batch (see
     /// `run_worker`), read non-blockingly by [`Self::bracketed_paste`].
     bracketed_paste: Arc<AtomicBool>,
+    /// Mirrors `VtBackend::kitty_disambiguate` for the caller thread -- same
+    /// refresh cadence/shape as `bracketed_paste` above. Read by
+    /// [`Self::kitty_disambiguate`], which `labolabo-app`'s `keys::
+    /// keystroke_to_bytes` uses to decide whether a modifier-carrying
+    /// Enter/Tab should be re-encoded as a Kitty-protocol `CSI u` sequence.
+    kitty_disambiguate: Arc<AtomicBool>,
     /// Mirrors `VtBackend::alt_screen_active` for the caller thread -- same
     /// refresh cadence and non-blocking read shape as `bracketed_paste`
     /// above, read by [`Self::alt_screen_active`]. `labolabo-app`'s wheel
@@ -298,6 +304,7 @@ impl<B: VtBackend> TermSession<B> {
 
         let latest = Arc::new(Mutex::new(Arc::new(GridSnapshot::blank(cols, rows))));
         let bracketed_paste = Arc::new(AtomicBool::new(false));
+        let kitty_disambiguate = Arc::new(AtomicBool::new(false));
         let alt_screen = Arc::new(AtomicBool::new(false));
         // Defaults `true` -- matches both backends' own documented default
         // for DECSET 1007 (see `VtBackend::alternate_scroll_active`'s doc
@@ -342,6 +349,7 @@ impl<B: VtBackend> TermSession<B> {
             let latest = latest.clone();
             let colors = colors.clone();
             let bracketed_paste = bracketed_paste.clone();
+            let kitty_disambiguate = kitty_disambiguate.clone();
             let alt_screen = alt_screen.clone();
             let alternate_scroll = alternate_scroll.clone();
             let mouse_mode = mouse_mode.clone();
@@ -353,6 +361,7 @@ impl<B: VtBackend> TermSession<B> {
                     writer,
                     latest,
                     bracketed_paste,
+                    kitty_disambiguate,
                     alt_screen,
                     alternate_scroll,
                     mouse_mode,
@@ -371,6 +380,7 @@ impl<B: VtBackend> TermSession<B> {
             master,
             latest,
             bracketed_paste,
+            kitty_disambiguate,
             alt_screen,
             alternate_scroll,
             mouse_mode,
@@ -483,6 +493,18 @@ impl<B: VtBackend> TermSession<B> {
         self.bracketed_paste.load(Ordering::Relaxed)
     }
 
+    /// Whether the running program has enabled the Kitty keyboard
+    /// protocol's "disambiguate escape codes" flag -- a cheap, non-blocking
+    /// read of the flag the worker thread refreshes after every processed
+    /// PTY byte batch (see `run_worker` and `VtBackend::kitty_disambiguate`).
+    /// `labolabo-app`'s `keys::keystroke_to_bytes` uses this to decide
+    /// whether a modifier-carrying Enter/Tab (Shift+Enter, Shift+Tab, ...)
+    /// should be re-encoded as a Kitty-protocol `CSI u` sequence instead of
+    /// its plain legacy byte.
+    pub fn kitty_disambiguate(&self) -> bool {
+        self.kitty_disambiguate.load(Ordering::Relaxed)
+    }
+
     /// Whether the alternate screen buffer is currently active -- a cheap,
     /// non-blocking read of the flag the worker thread refreshes after
     /// every processed PTY byte batch (see `run_worker` and
@@ -593,6 +615,7 @@ fn run_worker<B: VtBackend>(
     writer: SharedWriter,
     latest: Arc<Mutex<Arc<GridSnapshot>>>,
     bracketed_paste: Arc<AtomicBool>,
+    kitty_disambiguate: Arc<AtomicBool>,
     alt_screen: Arc<AtomicBool>,
     alternate_scroll: Arc<AtomicBool>,
     mouse_mode: Arc<AtomicU8>,
@@ -662,6 +685,7 @@ fn run_worker<B: VtBackend>(
                 // they're single cheap bools, and either can change at any
                 // time between frames).
                 bracketed_paste.store(backend.bracketed_paste(), Ordering::Relaxed);
+                kitty_disambiguate.store(backend.kitty_disambiguate(), Ordering::Relaxed);
                 alt_screen.store(backend.alt_screen_active(), Ordering::Relaxed);
                 alternate_scroll.store(backend.alternate_scroll_active(), Ordering::Relaxed);
                 mouse_mode.store(backend.mouse_mode().to_bits(), Ordering::Relaxed);

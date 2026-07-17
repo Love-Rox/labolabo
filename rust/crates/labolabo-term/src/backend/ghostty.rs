@@ -24,6 +24,7 @@
 use std::io::Write;
 
 use anyhow::anyhow;
+use libghostty_vt::key::KittyKeyFlags;
 use libghostty_vt::render::{CellIterator, RenderState, RowIterator};
 use libghostty_vt::screen::Screen;
 use libghostty_vt::style::{RgbColor, Underline};
@@ -299,6 +300,20 @@ impl VtBackend for GhosttyBackend {
 
     fn bracketed_paste(&self) -> bool {
         self.terminal.mode(Mode::BRACKETED_PASTE).unwrap_or(false)
+    }
+
+    fn kitty_disambiguate(&self) -> bool {
+        // `Terminal::kitty_keyboard_flags()` tracks the Kitty keyboard
+        // protocol's mode stack unconditionally (no opt-in config, unlike
+        // the alacritty backend -- see `VtBackend::kitty_disambiguate`'s
+        // doc comment), so this is a direct query with no extra state to
+        // maintain. `unwrap_or(false)` on a query error (transient FFI
+        // failure) treats it the same as "not requested" -- the safe
+        // default, matching this crate's other best-effort mode queries.
+        self.terminal
+            .kitty_keyboard_flags()
+            .map(|flags| flags.contains(KittyKeyFlags::DISAMBIGUATE))
+            .unwrap_or(false)
     }
 
     fn scroll_display(&mut self, delta_lines: i64) {

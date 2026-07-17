@@ -42,8 +42,32 @@
 //! Backspace/Tab/Escape/arrows, and a bare Ctrl-<letter>).
 //! Delete/Home/End/PageUp/PageDown/function keys and modifier combinations
 //! beyond a lone Ctrl are future work.
+//!
+//! ## Kitty keyboard protocol (W15)
+//!
+//! Claude Code's own TUI relies on the Kitty keyboard protocol's
+//! "disambiguate escape codes" progressive-enhancement flag (`CSI > 1 u`,
+//! <https://sw.kovidgoyal.net/kitty/keyboard-protocol/>) to tell Shift+Enter
+//! (insert a newline) apart from a plain Enter (submit) -- both keys, in
+//! the legacy protocol below, always send the exact same `\r` regardless of
+//! modifiers, so a program with no other channel has no way to distinguish
+//! them. Once the running program has requested that flag (queried via
+//! `labolabo_term::TermSession::kitty_disambiguate`, threaded in from
+//! `app::LaboLaboApp::key_down`), a **modifier-carrying** Enter/Tab is
+//! re-encoded as `CSI <code>;<modifier> u` instead -- see
+//! `kitty_disambiguated_bytes` below.
+//!
+//! Deliberately narrow, matching the Kitty spec's own documented exception:
+//! an *unmodified* Enter/Tab still sends its plain legacy byte even with
+//! disambiguate on ("this is to allow the user to type and execute
+//! commands in the shell such as `reset` after a program that sets this
+//! mode crashes without clearing it" -- the spec's own words), so this
+//! change is invisible to every other keystroke this module handles, and
+//! Backspace/Escape are left untouched entirely (out of scope -- nothing
+//! in this app currently binds a modified Backspace/Escape, so there is
+//! no ambiguity to resolve for them yet).
 
-use gpui::Keystroke;
+use gpui::{Keystroke, Modifiers};
 
 /// Translate one key-down event into the bytes to write to the PTY, or
 /// `None` if this keystroke has no *direct* terminal-input meaning here --
@@ -51,12 +75,25 @@ use gpui::Keystroke;
 /// combination (reserved for application-level shortcuts), or plain
 /// printable text/space, which (see this module's doc comment) is now
 /// handled exclusively via the platform's text-input/IME machinery instead.
-pub fn keystroke_to_bytes(keystroke: &Keystroke) -> Option<Vec<u8>> {
+///
+/// `kitty_disambiguate` is the focused pane's live `TermSession::
+/// kitty_disambiguate()` reading (`false` for any caller with no real PTY
+/// behind it, e.g. the app's own text-field input routing -- see this
+/// module's "Kitty keyboard protocol" doc section above) -- when `true`, a
+/// modifier-carrying Enter/Tab is re-encoded as a Kitty `CSI u` sequence
+/// instead of its plain legacy byte.
+pub fn keystroke_to_bytes(keystroke: &Keystroke, kitty_disambiguate: bool) -> Option<Vec<u8>> {
     // Cmd (macOS) / Super (Linux/Windows) combinations are reserved for
     // application-level shortcuts (tab switching, quit, ...), never sent to
     // the terminal.
     if keystroke.modifiers.platform {
         return None;
+    }
+
+    if kitty_disambiguate {
+        if let Some(bytes) = kitty_disambiguated_bytes(keystroke) {
+            return Some(bytes);
+        }
     }
 
     match keystroke.key.as_str() {
@@ -86,6 +123,55 @@ pub fn keystroke_to_bytes(keystroke: &Keystroke) -> Option<Vec<u8>> {
     // characters, ... -- is deliberately left to the input handler (see
     // this module's doc comment).
     None
+}
+
+/// Kitty keyboard protocol `CSI u` encoding for a **modifier-carrying**
+/// Enter/Tab -- see this module's "Kitty keyboard protocol" doc section.
+///
+/// Returns `None` for every keystroke this crate doesn't re-encode: any key
+/// other than Enter/Tab, or an Enter/Tab held with no modifier at all (the
+/// spec's own documented exception -- these still fall through to their
+/// plain legacy byte in the caller's match below, unchanged from before
+/// this function existed).
+fn kitty_disambiguated_bytes(keystroke: &Keystroke) -> Option<Vec<u8>> {
+    // Key codes from the Kitty keyboard protocol's functional-key table
+    // (https://sw.kovidgoyal.net/kitty/keyboard-protocol/#functional-key-definitions).
+    let key_code = match keystroke.key.as_str() {
+        "enter" => 13,
+        "tab" => 9,
+        _ => return None,
+    };
+
+    let modifier = kitty_modifier(&keystroke.modifiers)?;
+    Some(format!("\x1b[{key_code};{modifier}u").into_bytes())
+}
+
+/// The Kitty keyboard protocol's modifier encoding: `1 + sum of active
+/// modifier bits` (shift `1`, alt `2`, ctrl `4`; super/hyper/meta/caps-lock/
+/// num-lock are not tracked by `gpui::Modifiers` and so never contribute
+/// here -- see <https://sw.kovidgoyal.net/kitty/keyboard-protocol/#modifiers>).
+///
+/// `None` when no modifier is held at all -- the caller's signal to leave
+/// the keystroke to its plain legacy encoding instead (see
+/// `kitty_disambiguated_bytes`'s doc comment: an unmodified Enter/Tab is
+/// the protocol's own documented exception, not something this function
+/// ever needs to represent as `1`, the "no modifiers" value a full `CSI u`
+/// sequence would otherwise carry).
+fn kitty_modifier(modifiers: &Modifiers) -> Option<u8> {
+    if !(modifiers.shift || modifiers.alt || modifiers.control) {
+        return None;
+    }
+    let mut value: u8 = 1;
+    if modifiers.shift {
+        value += 1;
+    }
+    if modifiers.alt {
+        value += 2;
+    }
+    if modifiers.control {
+        value += 4;
+    }
+    Some(value)
 }
 
 /// `Some(letter)` iff `key` is exactly one ASCII letter (gpui's `key` field
@@ -121,7 +207,7 @@ mod tests {
         // reach the platform's IME/text-input machinery instead, both so a
         // composition can start and so it isn't double-sent once one does.
         let ks = keystroke("a", Some("a"), Modifiers::none());
-        assert_eq!(keystroke_to_bytes(&ks), None);
+        assert_eq!(keystroke_to_bytes(&ks, false), None);
     }
 
     #[test]
@@ -134,31 +220,31 @@ mod tests {
                 ..Modifiers::none()
             },
         );
-        assert_eq!(keystroke_to_bytes(&ks), None);
+        assert_eq!(keystroke_to_bytes(&ks, false), None);
     }
 
     #[test]
     fn space_is_left_to_the_input_handler() {
         let ks = keystroke("space", Some(" "), Modifiers::none());
-        assert_eq!(keystroke_to_bytes(&ks), None);
+        assert_eq!(keystroke_to_bytes(&ks, false), None);
     }
 
     #[test]
     fn enter_backspace_tab_escape() {
         assert_eq!(
-            keystroke_to_bytes(&keystroke("enter", None, Modifiers::none())),
+            keystroke_to_bytes(&keystroke("enter", None, Modifiers::none()), false),
             Some(vec![b'\r'])
         );
         assert_eq!(
-            keystroke_to_bytes(&keystroke("backspace", None, Modifiers::none())),
+            keystroke_to_bytes(&keystroke("backspace", None, Modifiers::none()), false),
             Some(vec![0x7f])
         );
         assert_eq!(
-            keystroke_to_bytes(&keystroke("tab", None, Modifiers::none())),
+            keystroke_to_bytes(&keystroke("tab", None, Modifiers::none()), false),
             Some(vec![b'\t'])
         );
         assert_eq!(
-            keystroke_to_bytes(&keystroke("escape", None, Modifiers::none())),
+            keystroke_to_bytes(&keystroke("escape", None, Modifiers::none()), false),
             Some(vec![0x1b])
         );
     }
@@ -166,19 +252,19 @@ mod tests {
     #[test]
     fn arrow_keys_send_csi_sequences() {
         assert_eq!(
-            keystroke_to_bytes(&keystroke("up", None, Modifiers::none())),
+            keystroke_to_bytes(&keystroke("up", None, Modifiers::none()), false),
             Some(b"\x1b[A".to_vec())
         );
         assert_eq!(
-            keystroke_to_bytes(&keystroke("down", None, Modifiers::none())),
+            keystroke_to_bytes(&keystroke("down", None, Modifiers::none()), false),
             Some(b"\x1b[B".to_vec())
         );
         assert_eq!(
-            keystroke_to_bytes(&keystroke("right", None, Modifiers::none())),
+            keystroke_to_bytes(&keystroke("right", None, Modifiers::none()), false),
             Some(b"\x1b[C".to_vec())
         );
         assert_eq!(
-            keystroke_to_bytes(&keystroke("left", None, Modifiers::none())),
+            keystroke_to_bytes(&keystroke("left", None, Modifiers::none()), false),
             Some(b"\x1b[D".to_vec())
         );
     }
@@ -190,15 +276,15 @@ mod tests {
             ..Modifiers::none()
         };
         assert_eq!(
-            keystroke_to_bytes(&keystroke("a", Some("a"), ctrl)),
+            keystroke_to_bytes(&keystroke("a", Some("a"), ctrl), false),
             Some(vec![0x01])
         );
         assert_eq!(
-            keystroke_to_bytes(&keystroke("c", Some("c"), ctrl)),
+            keystroke_to_bytes(&keystroke("c", Some("c"), ctrl), false),
             Some(vec![0x03])
         );
         assert_eq!(
-            keystroke_to_bytes(&keystroke("z", Some("z"), ctrl)),
+            keystroke_to_bytes(&keystroke("z", Some("z"), ctrl), false),
             Some(vec![0x1a])
         );
     }
@@ -216,7 +302,7 @@ mod tests {
         // option-a on macOS types "\u{e5}" via the same text-input path a
         // plain letter would.
         let ks = keystroke("a", Some("\u{e5}"), ctrl_alt);
-        assert_eq!(keystroke_to_bytes(&ks), None);
+        assert_eq!(keystroke_to_bytes(&ks, false), None);
     }
 
     #[test]
@@ -225,7 +311,10 @@ mod tests {
             platform: true,
             ..Modifiers::none()
         };
-        assert_eq!(keystroke_to_bytes(&keystroke("t", Some("t"), cmd)), None);
+        assert_eq!(
+            keystroke_to_bytes(&keystroke("t", Some("t"), cmd), false),
+            None
+        );
     }
 
     #[test]
@@ -238,6 +327,208 @@ mod tests {
                 ..Modifiers::none()
             },
         );
-        assert_eq!(keystroke_to_bytes(&ks), None);
+        assert_eq!(keystroke_to_bytes(&ks, false), None);
+    }
+
+    // -- Kitty keyboard protocol (`kitty_disambiguate: true`) --------------
+
+    #[test]
+    fn kitty_off_leaves_every_keystroke_unchanged() {
+        // With the flag off (the default -- no program has requested it),
+        // behavior must be byte-for-byte identical to every test above,
+        // even for a keystroke `kitty_disambiguated_bytes` *would* re-encode
+        // if asked. Spot-checked here with Shift+Enter, which is exactly
+        // the keystroke this feature exists to change when the flag is on.
+        let shift_enter = keystroke(
+            "enter",
+            None,
+            Modifiers {
+                shift: true,
+                ..Modifiers::none()
+            },
+        );
+        assert_eq!(
+            keystroke_to_bytes(&shift_enter, false),
+            Some(vec![b'\r']),
+            "shift+enter must still be plain \\r when kitty_disambiguate is off"
+        );
+    }
+
+    #[test]
+    fn kitty_on_unmodified_enter_and_tab_stay_legacy() {
+        // The Kitty spec's own documented exception: even with disambiguate
+        // on, an unmodified Enter/Tab keeps sending its plain legacy byte
+        // (so `reset<Enter>` still works in a shell after a crashed program
+        // leaves the mode enabled) -- see this module's doc comment.
+        assert_eq!(
+            keystroke_to_bytes(&keystroke("enter", None, Modifiers::none()), true),
+            Some(vec![b'\r'])
+        );
+        assert_eq!(
+            keystroke_to_bytes(&keystroke("tab", None, Modifiers::none()), true),
+            Some(vec![b'\t'])
+        );
+    }
+
+    #[test]
+    fn kitty_on_shift_enter_sends_csi_u() {
+        // The motivating case: Claude Code's TUI distinguishes Shift+Enter
+        // (insert a newline) from a plain Enter (submit) via exactly this
+        // sequence once it has pushed the disambiguate flag.
+        let shift_enter = keystroke(
+            "enter",
+            None,
+            Modifiers {
+                shift: true,
+                ..Modifiers::none()
+            },
+        );
+        assert_eq!(
+            keystroke_to_bytes(&shift_enter, true),
+            Some(b"\x1b[13;2u".to_vec())
+        );
+    }
+
+    #[test]
+    fn kitty_on_alt_and_ctrl_enter_send_csi_u_with_correct_modifier() {
+        let alt_enter = keystroke(
+            "enter",
+            None,
+            Modifiers {
+                alt: true,
+                ..Modifiers::none()
+            },
+        );
+        assert_eq!(
+            keystroke_to_bytes(&alt_enter, true),
+            Some(b"\x1b[13;3u".to_vec()),
+            "alt+enter: modifier = 1 + alt(2) = 3"
+        );
+
+        let ctrl_enter = keystroke(
+            "enter",
+            None,
+            Modifiers {
+                control: true,
+                ..Modifiers::none()
+            },
+        );
+        assert_eq!(
+            keystroke_to_bytes(&ctrl_enter, true),
+            Some(b"\x1b[13;5u".to_vec()),
+            "ctrl+enter: modifier = 1 + ctrl(4) = 5"
+        );
+
+        let ctrl_shift_alt_enter = keystroke(
+            "enter",
+            None,
+            Modifiers {
+                shift: true,
+                alt: true,
+                control: true,
+                ..Modifiers::none()
+            },
+        );
+        assert_eq!(
+            keystroke_to_bytes(&ctrl_shift_alt_enter, true),
+            Some(b"\x1b[13;8u".to_vec()),
+            "ctrl+alt+shift+enter: modifier = 1 + shift(1) + alt(2) + ctrl(4) = 8"
+        );
+    }
+
+    #[test]
+    fn kitty_on_shift_tab_sends_csi_u() {
+        // Shift+Tab ("backtab") -- Claude Code's TUI uses it to cycle modes;
+        // legacy `\t` alone can't be told apart from a plain Tab.
+        let shift_tab = keystroke(
+            "tab",
+            None,
+            Modifiers {
+                shift: true,
+                ..Modifiers::none()
+            },
+        );
+        assert_eq!(
+            keystroke_to_bytes(&shift_tab, true),
+            Some(b"\x1b[9;2u".to_vec())
+        );
+    }
+
+    #[test]
+    fn kitty_on_cmd_combination_still_not_forwarded() {
+        // The Cmd/Super early-return above `kitty_disambiguated_bytes` in
+        // `keystroke_to_bytes` still wins even when the flag is on --
+        // Cmd+Enter (if bound to anything) must never reach the terminal.
+        let cmd_enter = keystroke(
+            "enter",
+            None,
+            Modifiers {
+                platform: true,
+                ..Modifiers::none()
+            },
+        );
+        assert_eq!(keystroke_to_bytes(&cmd_enter, true), None);
+    }
+
+    #[test]
+    fn kitty_on_other_keys_unaffected() {
+        // Only Enter/Tab are in scope -- every other key this module
+        // handles (backspace/escape/arrows/ctrl-letter) is byte-for-byte
+        // unchanged whether the flag is on or off.
+        assert_eq!(
+            keystroke_to_bytes(&keystroke("backspace", None, Modifiers::none()), true),
+            Some(vec![0x7f])
+        );
+        assert_eq!(
+            keystroke_to_bytes(&keystroke("escape", None, Modifiers::none()), true),
+            Some(vec![0x1b])
+        );
+        assert_eq!(
+            keystroke_to_bytes(&keystroke("up", None, Modifiers::none()), true),
+            Some(b"\x1b[A".to_vec())
+        );
+        let ctrl = Modifiers {
+            control: true,
+            ..Modifiers::none()
+        };
+        assert_eq!(
+            keystroke_to_bytes(&keystroke("a", Some("a"), ctrl), true),
+            Some(vec![0x01])
+        );
+    }
+
+    #[test]
+    fn kitty_modifier_matches_spec_formula() {
+        assert_eq!(kitty_modifier(&Modifiers::none()), None);
+        assert_eq!(
+            kitty_modifier(&Modifiers {
+                shift: true,
+                ..Modifiers::none()
+            }),
+            Some(2)
+        );
+        assert_eq!(
+            kitty_modifier(&Modifiers {
+                alt: true,
+                ..Modifiers::none()
+            }),
+            Some(3)
+        );
+        assert_eq!(
+            kitty_modifier(&Modifiers {
+                control: true,
+                ..Modifiers::none()
+            }),
+            Some(5)
+        );
+        assert_eq!(
+            kitty_modifier(&Modifiers {
+                shift: true,
+                alt: true,
+                control: true,
+                ..Modifiers::none()
+            }),
+            Some(8)
+        );
     }
 }
