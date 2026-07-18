@@ -453,6 +453,17 @@ impl<B: VtBackend> TermSession<B> {
             let mouse_mode = mouse_mode.clone();
             let title = title.clone();
             let clipboard = clipboard.clone();
+            // Diagnostic-only label for `LABOLABO_LOG_OSC52` (see
+            // `osc52_log::maybe_log_scanner_detected`) -- pulled from the
+            // same `LABOLABO_PANE` entry the caller already threads through
+            // `env` for the hooks protocol, not a new identity mechanism
+            // this crate otherwise stays agnostic to (see this fn's own
+            // doc comment on `env`). `None` for a caller (e.g. a test) that
+            // spawns without one -- logging then just omits the pane id.
+            let osc52_log_pane = env
+                .iter()
+                .find(|(key, _)| key == "LABOLABO_PANE")
+                .map(|(_, value)| value.clone());
             thread::spawn(move || {
                 run_worker::<B>(
                     cols,
@@ -471,6 +482,7 @@ impl<B: VtBackend> TermSession<B> {
                     child,
                     colors,
                     max_scrollback,
+                    osc52_log_pane,
                 );
             });
         }
@@ -767,6 +779,7 @@ fn run_worker<B: VtBackend>(
     mut child: Box<dyn portable_pty::Child + Send + Sync>,
     colors: ColorScheme,
     max_scrollback: usize,
+    osc52_log_pane: Option<String>,
 ) {
     let mut backend = match B::new(cols, rows, writer, &colors, max_scrollback) {
         Ok(b) => b,
@@ -838,6 +851,10 @@ fn run_worker<B: VtBackend>(
                 // `title` below, and as `Self::take_clipboard_set`'s doc
                 // comment promises.
                 osc52_scanner.feed(&bytes, |text| {
+                    crate::osc52_log::maybe_log_scanner_detected(
+                        osc52_log_pane.as_deref(),
+                        text.len(),
+                    );
                     if let Ok(mut slot) = clipboard.lock() {
                         *slot = Some(text);
                     }
