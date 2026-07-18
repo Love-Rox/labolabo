@@ -187,6 +187,42 @@ pub(crate) fn format_usage_compact(usage: &AgentUsage) -> Option<String> {
     })
 }
 
+/// Sums every pane's [`AgentUsage`] into one Task-level total, for the
+/// sidebar row's usage label (`plans` 第16波 #4: "行右端に使用量"). `None`
+/// if `usages` is empty or every entry is itself empty ([`AgentUsage::
+/// is_empty`]) -- same "nothing observed yet, don't render anything" rule
+/// [`format_usage_compact`] already applies per-pane.
+///
+/// `model` (needed for [`AgentUsage::estimated_cost_usd`]'s pricing lookup)
+/// is taken from the first pane that has one -- a Task's tabs overwhelmingly
+/// run the same agent/model, so this is right in the common case; a Task
+/// mixing genuinely different models would misprice the *combined* total
+/// slightly (pricing a Sonnet pane's tokens at an Opus pane's rate or vice
+/// versa), an accepted approximation for this already-"推定"
+/// (`transcript_usage.rs`'s own module doc comment) display -- exact
+/// per-pane costs remain available via each tab chip's own
+/// [`format_usage_compact`].
+pub(crate) fn aggregate_usage<'a>(
+    usages: impl Iterator<Item = &'a AgentUsage>,
+) -> Option<AgentUsage> {
+    let mut total = AgentUsage::default();
+    for usage in usages {
+        total.input_tokens += usage.input_tokens;
+        total.output_tokens += usage.output_tokens;
+        total.cache_creation_tokens += usage.cache_creation_tokens;
+        total.cache_read_tokens += usage.cache_read_tokens;
+        total.turns += usage.turns;
+        if total.model.is_none() {
+            total.model = usage.model.clone();
+        }
+    }
+    if total.is_empty() {
+        None
+    } else {
+        Some(total)
+    }
+}
+
 /// `1234 -> "1.2k"`, `1_234_567 -> "1.2M"`, else the plain decimal --
 /// deliberately coarse (one decimal place) since this only ever feeds a
 /// space-constrained tab chip, not a precise accounting display (the exact
@@ -546,7 +582,12 @@ pub fn insert_runtime(
 /// container's actual pixel size. Deliberately small (a thin line, not a
 /// wide gutter) to keep the two neighboring panes' content flush most of
 /// the time, matching most desktop split-pane conventions.
-const DIVIDER_HIT_WIDTH: f32 = 6.0;
+///
+/// `pub(crate)` (第16波 #1): `crate::sidebar`'s new sidebar-width divider
+/// reuses this exact thickness/highlight pair rather than redefining its
+/// own -- one "how thick/bright is a draggable divider" answer for the
+/// whole app.
+pub(crate) const DIVIDER_HIT_WIDTH: f32 = 6.0;
 
 /// A pane divider's hover highlight -- `第13波b §4`: lowered from the
 /// previous `0x66` (~40% alpha) to a genuinely low alpha, per the wave's
@@ -555,7 +596,9 @@ const DIVIDER_HIT_WIDTH: f32 = 6.0;
 /// "operate on this" family as a focused pane's border/glow, see
 /// `theme::ACCENT`'s doc comment), only the intensity drops so hovering a
 /// divider reads as a subtle cue rather than a bright accent stripe.
-const DIVIDER_HOVER_COLOR: u32 = theme::with_alpha(theme::ACCENT, 0x2e);
+///
+/// `pub(crate)`: see [`DIVIDER_HIT_WIDTH`]'s doc comment.
+pub(crate) const DIVIDER_HOVER_COLOR: u32 = theme::with_alpha(theme::ACCENT, 0x2e);
 
 /// Recursively render one node of `task_id`'s tile tree -- identical
 /// tree-walk to wave 5b-2's `app::render_tile`, just carrying `task_id`
@@ -1286,26 +1329,33 @@ fn render_pane_tab_bar(
             let status = pane_status.get(&pane_id).copied();
             let status_color = status.and_then(status_dot_color);
             let is_running = status == Some(AgentStatus::Running);
-            let dot_el = runtimes.get(&pane_id).and_then(|runtime| {
-                motion::status_dot_element(
-                    format!("tab-dot-{task_id}-{pane_id:?}"),
-                    status_color,
-                    is_running,
-                    breathing_enabled,
-                    &runtime.dot_anim,
-                )
-            });
-            let usage_label: Option<SharedString> = pane_usage
-                .get(&pane_id)
-                .and_then(format_usage_compact)
-                .map(SharedString::from);
-            // 第10波: タブのカスタム色 (`PaneItem::color`、右クリックの
-            // 色ポップオーバーで設定) -- サイドバーのタスク行と同じ 6px
-            // 色ドットで表現。状態ドット(エージェント状態)とは別物。
+            // 第10波のタブカスタム色 (`PaneItem::color`、右クリックの色
+            // ポップオーバーで設定) -- 第16波 #2 で状態ドットと統合する
+            // (このすぐ下の `dot_el`)ため、先に計算しておく。
             let tab_color = pane
                 .color
                 .as_deref()
                 .and_then(crate::color_picker::parse_hex_rgb);
+            // 統合ドット (`plans` 第16波 #2): 外輪=カスタム色・中の塗り=
+            // 状態色。以前の「カスタム色 6px ドット」+「状態ドット」の
+            // 2 個表示を統合 -- `sidebar.rs`のタスク行と同じ
+            // `motion::unified_dot_element`。`runtimes.get(&pane_id)` は
+            // Files/Diff/Commits 系タブ(PTY を持たないので `PaneRuntime`
+            // が無い)では `None` -- `dot_anim` 無しでも呼べる
+            // `unified_dot_element`(第16波follow-up)にそのまま `None` を
+            // 渡し、カスタム色の輪だけは同じく描けるようにする。
+            let dot_el = motion::unified_dot_element(
+                format!("tab-dot-{task_id}-{pane_id:?}"),
+                status_color,
+                tab_color,
+                is_running,
+                breathing_enabled,
+                runtimes.get(&pane_id).map(|runtime| &runtime.dot_anim),
+            );
+            let usage_label: Option<SharedString> = pane_usage
+                .get(&pane_id)
+                .and_then(format_usage_compact)
+                .map(SharedString::from);
             let color_menu_task_id = task_id.to_string();
             // `.id(..)` promotes this chip to `Stateful<Div>`, the only
             // element kind `.on_drag` (`StatefulInteractiveElement`) is
@@ -1345,16 +1395,6 @@ fn render_pane_tab_bar(
                         this.open_tab_color_menu(&color_menu_task_id, pane_id, event.position, cx);
                     }),
                 )
-                .when_some(tab_color, |el, color| {
-                    el.child(
-                        div()
-                            .w(px(6.0))
-                            .h(px(6.0))
-                            .rounded_full()
-                            .flex_shrink_0()
-                            .bg(rgb(color)),
-                    )
-                })
                 .children(dot_el)
                 .when_some(usage_label, |el, label| {
                     el.child(
@@ -1635,5 +1675,60 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(format_usage_compact(&usage).as_deref(), Some("0 tok"));
+    }
+
+    // MARK: - aggregate_usage (第16波 #4: サイドバー行の使用量集計)
+
+    #[test]
+    fn aggregate_usage_of_no_panes_is_none() {
+        let usages: [AgentUsage; 0] = [];
+        assert_eq!(aggregate_usage(usages.iter()), None);
+    }
+
+    #[test]
+    fn aggregate_usage_of_only_empty_panes_is_none() {
+        let usages = [AgentUsage::default(), AgentUsage::default()];
+        assert_eq!(aggregate_usage(usages.iter()), None);
+    }
+
+    #[test]
+    fn aggregate_usage_sums_token_fields_across_panes() {
+        let usages = [
+            AgentUsage {
+                input_tokens: 100,
+                output_tokens: 20,
+                turns: 1,
+                ..Default::default()
+            },
+            AgentUsage {
+                input_tokens: 50,
+                cache_read_tokens: 10,
+                turns: 2,
+                ..Default::default()
+            },
+        ];
+        let total = aggregate_usage(usages.iter()).expect("non-empty total");
+        assert_eq!(total.input_tokens, 150);
+        assert_eq!(total.output_tokens, 20);
+        assert_eq!(total.cache_read_tokens, 10);
+        assert_eq!(total.turns, 3);
+    }
+
+    #[test]
+    fn aggregate_usage_picks_the_first_available_model() {
+        let usages = [
+            AgentUsage {
+                input_tokens: 1,
+                model: None,
+                ..Default::default()
+            },
+            AgentUsage {
+                input_tokens: 1,
+                model: Some("claude-sonnet-4-5".to_string()),
+                ..Default::default()
+            },
+        ];
+        let total = aggregate_usage(usages.iter()).expect("non-empty total");
+        assert_eq!(total.model.as_deref(), Some("claude-sonnet-4-5"));
     }
 }

@@ -431,6 +431,30 @@ impl TaskDatabase {
         self.set_app_state(Some(json), Self::KEY_WINDOW_BOUNDS)
     }
 
+    // MARK: - App state (sidebar width, 第16波 #1)
+
+    /// `appState` key backing the sidebar's drag-resizable width. Stored as
+    /// a plain decimal string (`f32::to_string`/`str::parse`), same shape
+    /// as [`Self::KEY_SCROLLBACK_LINES`] -- unlike `KEY_WINDOW_BOUNDS` this
+    /// is a single scalar, no JSON object needed. Clamping into
+    /// `labolabo-app`'s `sidebar::{MIN,MAX}_SIDEBAR_WIDTH` range is that
+    /// crate's job (this store, as usual, only round-trips the raw text).
+    const KEY_SIDEBAR_WIDTH: &'static str = "sidebarWidth";
+
+    /// `None` if never set, or if the stored text isn't a valid `f32`
+    /// (treated the same as "never set" -- this crate's usual
+    /// "unknown/invalid persisted data degrades gracefully" posture).
+    pub fn sidebar_width(&self) -> StoreResult<Option<f32>> {
+        Ok(self
+            .app_state(Self::KEY_SIDEBAR_WIDTH)?
+            .and_then(|v| v.parse().ok())
+            .filter(|w: &f32| w.is_finite()))
+    }
+
+    pub fn set_sidebar_width(&self, width: f32) -> StoreResult<()> {
+        self.set_app_state(Some(&width.to_string()), Self::KEY_SIDEBAR_WIDTH)
+    }
+
     // MARK: - App state (UI language, wave 6f)
 
     /// `appState` key backing the settings screen's language picker
@@ -884,6 +908,28 @@ mod tests {
         db.set_app_state(Some("not-a-number"), TaskDatabase::KEY_SCROLLBACK_LINES)
             .unwrap();
         assert_eq!(db.scrollback_lines().unwrap(), None);
+    }
+
+    #[test]
+    fn sidebar_width_round_trips_and_defaults_to_none() {
+        let db = TaskDatabase::open_in_memory().unwrap();
+        assert_eq!(db.sidebar_width().unwrap(), None);
+        db.set_sidebar_width(260.5).unwrap();
+        assert_eq!(db.sidebar_width().unwrap(), Some(260.5));
+        // Overwrite keeps a single value (upsert), not a history.
+        db.set_sidebar_width(300.0).unwrap();
+        assert_eq!(db.sidebar_width().unwrap(), Some(300.0));
+    }
+
+    #[test]
+    fn sidebar_width_ignores_unparseable_or_non_finite_stored_text() {
+        let db = TaskDatabase::open_in_memory().unwrap();
+        db.set_app_state(Some("not-a-number"), TaskDatabase::KEY_SIDEBAR_WIDTH)
+            .unwrap();
+        assert_eq!(db.sidebar_width().unwrap(), None);
+        db.set_app_state(Some("NaN"), TaskDatabase::KEY_SIDEBAR_WIDTH)
+            .unwrap();
+        assert_eq!(db.sidebar_width().unwrap(), None);
     }
 
     #[test]

@@ -40,6 +40,17 @@ pub const OVERLAY_EXIT: Duration = Duration::from_millis(120);
 /// `sidebar.rs` の 2 箇所で重複させないためここに集約。
 pub const STATUS_DOT_SIZE: f32 = 6.0;
 
+/// 統合ドット (`plans` 第16波 #2) の外輪の太さ。カスタム色を持つタスク/
+/// タブだけに描く -- [`unified_dot_element`] のドキュメント参照。
+pub const DOT_RING_WIDTH: f32 = 1.5;
+
+/// 統合ドット全体(外輪込み)の一辺 -- [`STATUS_DOT_SIZE`] の中身を
+/// [`DOT_RING_WIDTH`] の輪が両側から囲む分だけ大きい。呼び出し側
+/// (`task_workspace.rs`/`sidebar.rs`)はカスタム色の有無に関わらずこの
+/// サイズで行内の割り付け枠を確保する -- 行によって輪の有無でドットの
+/// 占有幅が変わり、隣接要素がガタつくのを防ぐため。
+pub const DOT_RING_SIZE: f32 = STATUS_DOT_SIZE + DOT_RING_WIDTH * 2.0;
+
 /// `LABOLABO_REDUCE_MOTION=1` を見て有効化する簡易 Reduce Motion フック。
 /// gpui 0.2 には macOS の「視差効果を減らす」設定を直接読む API が無い
 /// (`NSWorkspace`/`defaults` を自前で読むのはこの用途には過剰) ので、
@@ -305,6 +316,121 @@ pub fn status_dot_element(
     }
 }
 
+/// 統合ドット (`plans` 第16波 #2) の描画パラメータ -- 「状態ドット + カスタム
+/// 色ドット」の 2 個表示を 1 個に統合する設計の核: **外輪 = カスタム色、
+/// 中の塗り = 状態色**という写像を、gpui 抜きの純関数として
+/// [`unified_dot_params`] に切り出してある(ユニットテストの対象はこちら --
+/// 実際の要素組み立ては [`unified_dot_element`] 参照)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnifiedDotParams {
+    /// `Some(color)` なら [`DOT_RING_WIDTH`] 幅の輪をこの色で描く(タスク/
+    /// タブのカスタム色)。`None` は「輪なし」-- 色未設定のタスク/タブは
+    /// 第16波以前と見た目が変わらない(現状ドットのまま)。
+    pub ring_color: Option<u32>,
+    /// 中の塗り(状態ドット)へそのまま渡す `target` -- クロスフェード/
+    /// 呼吸を含む挙動は [`status_dot_element`] 側の既存ロジックを完全に
+    /// 再利用する(この構造体はどの色を塗るかを渡すだけ)。
+    pub fill_target: Option<u32>,
+}
+
+/// (状態色, カスタム色) -> [`UnifiedDotParams`]。外輪は常にカスタム色を
+/// そのまま、中の塗りは常に状態色をそのまま渡すだけの写像だが、「統合」の
+/// 契約(輪と塗りが互いに独立で、どちらの入力がどちらの見た目に効くか)を
+/// 一箇所に固定し、[`unified_dot_element`] からもテストからも同じ答えを
+/// 参照できるようにするために関数として切り出している。
+pub fn unified_dot_params(
+    status_color: Option<u32>,
+    custom_color: Option<u32>,
+) -> UnifiedDotParams {
+    UnifiedDotParams {
+        ring_color: custom_color,
+        fill_target: status_color,
+    }
+}
+
+/// [`status_dot_element`] を包み、カスタム色があれば [`DOT_RING_WIDTH`]
+/// 幅の輪を追加で描く、`task_workspace.rs`/`sidebar.rs` 共用のヘルパー
+/// (`plans` 第16波 #2)。
+///
+/// - カスタム色が無ければ [`status_dot_element`]/[`static_dot_fill`] の
+///   結果をそのまま返す(輪の分のラッパーすら作らない -- 色未設定タスクは
+///   第16波以前と完全に同じ描画・同じコスト)。
+/// - カスタム色があれば、中の塗りが `None`(= まだ一度も状態が付いたことが
+///   ない)であっても輪だけは必ず描く -- 「状態 None かつ色ありはリングの
+///   み(中は透明)」という設計どおり、中身は単に何も描かない(背景を
+///   `bg()` しない)ので、行/チップ自身の背景が透けて見える。
+/// - 呼吸(M2)は中の塗り(`status_dot_element`)にだけ掛かる -- 輪は
+///   `.border_color`の静的な style で、`with_animation` の対象外(呼び出し
+///   側が追加のアニメーションを組む必要はない)。
+///
+/// `anim` は `Option` (第16波follow-up の実バグ修正): 一度も選択されて
+/// いない Task は `TaskWorkspace` 自体が無く、`app::LaboLaboApp::
+/// task_dot_anim` は `None` を返す -- これまではその場合 `dot_el` ごと
+/// `None` になり、カスタム色の輪も行内の幅確保も消えて他行とタイトルの
+/// 開始位置がガタつく実バグがあった。`anim` が `None` の間は
+/// [`status_dot_element`]のクロスフェード/呼吸を使わず
+/// [`static_dot_fill`]の単発描画にフォールバックする(状態が変わった
+/// 瞬間の色遷移アニメーションは、そもそもまだロードされていない
+/// Task には無縁なので、フォールバックしても実害は無い)ことで、
+/// カスタム色の輪だけは(状態が無くても)従来どおり描ける。行内の幅
+/// 確保自体は呼び出し側(`sidebar.rs`/`task_workspace.rs`)が
+/// [`DOT_RING_SIZE`]固定の枠を**無条件に**確保する側の責務 -- この関数の
+/// 戻り値が `None` でも枠だけは残る。
+pub fn unified_dot_element(
+    id_base: impl std::fmt::Display,
+    status_color: Option<u32>,
+    custom_color: Option<u32>,
+    is_running: bool,
+    breathing_enabled: bool,
+    anim: Option<&Cell<DotAnimState>>,
+) -> Option<AnyElement> {
+    let params = unified_dot_params(status_color, custom_color);
+    let fill_el = match anim {
+        Some(anim) => status_dot_element(
+            id_base,
+            params.fill_target,
+            is_running,
+            breathing_enabled,
+            anim,
+        ),
+        None => static_dot_fill(params.fill_target),
+    };
+    let Some(ring_color) = params.ring_color else {
+        return fill_el;
+    };
+    Some(
+        div()
+            .w(px(DOT_RING_SIZE))
+            .h(px(DOT_RING_SIZE))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_full()
+            .border(px(DOT_RING_WIDTH))
+            .border_color(rgb(ring_color))
+            .children(fill_el)
+            .into_any_element(),
+    )
+}
+
+/// A plain, unanimated [`STATUS_DOT_SIZE`] fill dot at `target`'s color --
+/// [`unified_dot_element`]'s fallback when there's no live [`DotAnimState`]
+/// to crossfade/breathe against (see that function's doc comment for when
+/// this is reached). `None` (no element at all, same as
+/// [`status_dot_element`]'s own "nothing observed yet" case) when `target`
+/// itself is `None`.
+fn static_dot_fill(target: Option<u32>) -> Option<AnyElement> {
+    target.map(|color| {
+        div()
+            .w(px(STATUS_DOT_SIZE))
+            .h(px(STATUS_DOT_SIZE))
+            .rounded_full()
+            .bg(rgb(color))
+            .into_any_element()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -485,6 +611,35 @@ mod tests {
         let faded = advance_dot(&anim, None);
         assert_eq!(faded.from, Some(0x30d158));
         assert_eq!(faded.to, None);
+    }
+
+    // MARK: - unified_dot_params (第16波 #2)
+
+    #[test]
+    fn unified_dot_params_ring_always_tracks_custom_color_regardless_of_status() {
+        assert_eq!(
+            unified_dot_params(None, Some(0x30d158)).ring_color,
+            Some(0x30d158)
+        );
+        assert_eq!(
+            unified_dot_params(Some(0xffd60a), Some(0x30d158)).ring_color,
+            Some(0x30d158)
+        );
+    }
+
+    #[test]
+    fn unified_dot_params_no_custom_color_means_no_ring() {
+        assert_eq!(unified_dot_params(Some(0xffd60a), None).ring_color, None);
+        assert_eq!(unified_dot_params(None, None).ring_color, None);
+    }
+
+    #[test]
+    fn unified_dot_params_fill_always_tracks_status_regardless_of_custom_color() {
+        assert_eq!(
+            unified_dot_params(Some(0xffd60a), Some(0x30d158)).fill_target,
+            Some(0xffd60a)
+        );
+        assert_eq!(unified_dot_params(None, Some(0x30d158)).fill_target, None);
     }
 
     // MARK: - reduce_motion

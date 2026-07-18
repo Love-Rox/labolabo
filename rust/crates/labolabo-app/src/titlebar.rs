@@ -47,13 +47,15 @@ use rust_i18n::t;
 use labolabo_core::TaskKind;
 
 use crate::icons::{self, Icon};
+use crate::pr_status;
 use crate::theme;
 
 /// Height of the app-drawn top chrome row -- both the macOS custom-titlebar
 /// row and (on every platform) the plain toolbar row below the OS's own
 /// titlebar. Same "just a constant, no resize handle" simplification
-/// `sidebar::SIDEBAR_WIDTH`/`git_pane::GIT_PANE_WIDTH` already made for
-/// their own fixed dimension.
+/// `git_pane::GIT_PANE_WIDTH` still has for its own fixed dimension (the
+/// sidebar's width grew a drag handle as of `plans` 第16波 #1, but this
+/// row's height has no such need).
 pub const HEIGHT: f32 = 38.0;
 
 /// macOS only: horizontal space reserved at the row's left edge so its own
@@ -111,19 +113,40 @@ pub struct PillData {
     /// (`status?.branch ?? fallbackBranch ?? "—"`).
     pub branch: String,
     pub changed_count: usize,
+    /// The selected Task's PR (`plans` 第16波 #3) -- `None` for an
+    /// `attached`-kind Task, or a worktree Task with no fetched PR yet
+    /// (`LaboLaboApp::task_pr_info`). Mirrors `crate::sidebar`'s row badge
+    /// content (same "worktree Task の owner/repo#number" info), just
+    /// rendered as a third pill segment here instead of an inline badge.
+    pub pr: Option<PrPillData>,
+}
+
+/// The titlebar pill's PR segment (`plans` 第16波 #3) -- just enough to
+/// render `#<number>` + a state label; the color/label text themselves are
+/// resolved in [`render_pill`] (same split `PillData::build`'s other
+/// fields already have: this struct carries raw data, [`render_pill`] owns
+/// theme/i18n lookups), so this struct's own equality/tests don't need a
+/// locale or gpui `Context` on hand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrPillData {
+    pub number: u64,
+    pub state: pr_status::PrState,
 }
 
 impl PillData {
     /// Builds the pill's data from raw inputs: the selected Task's title +
     /// kind, its Git pane's branch (`None` while still loading, or for a
-    /// non-repo `attached` Task), and its changed-file count. The only
-    /// "logic" here -- the branch fallback -- mirrors Swift's own
-    /// `branchLabel` computed property (see this struct's doc comment).
+    /// non-repo `attached` Task), its changed-file count, and its PR
+    /// (`plans` 第16波 #3, `None` for anything without one -- see
+    /// [`PrPillData`]'s doc comment). The only "logic" here -- the branch
+    /// fallback -- mirrors Swift's own `branchLabel` computed property (see
+    /// this struct's doc comment).
     pub fn build(
         task_title: &str,
         is_worktree: bool,
         branch: Option<&str>,
         changed_count: usize,
+        pr: Option<PrPillData>,
     ) -> Self {
         let branch = branch
             .map(str::trim)
@@ -135,6 +158,7 @@ impl PillData {
             is_worktree,
             branch,
             changed_count,
+            pr,
         }
     }
 }
@@ -290,7 +314,41 @@ fn render_pill(data: PillData) -> impl IntoElement {
                 .child(icons::icon_colored(changes_icon, 11.0, changes_color))
                 .child(SharedString::from(changes_label)),
         )
+        .when_some(data.pr, |el, pr| {
+            let color = pr_status::badge_color(pr.state);
+            let state_label = pr_state_label(pr.state);
+            el.child(pill_divider()).child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .text_color(rgb(color))
+                    .child(
+                        div()
+                            .w(px(5.0))
+                            .h(px(5.0))
+                            .flex_shrink_0()
+                            .rounded_full()
+                            .bg(rgb(color)),
+                    )
+                    .child(SharedString::from(format!("#{} {state_label}", pr.number))),
+            )
+        })
         .into_any_element()
+}
+
+/// [`pr_status::PrState`] -> the titlebar pill's localized state label
+/// (`crate::sidebar`'s row badge doesn't need one of its own -- the color +
+/// `#number` alone reads fine at that smaller size, and the tooltip already
+/// carries the PR's title; the titlebar pill has room for a word too).
+fn pr_state_label(state: pr_status::PrState) -> String {
+    match state {
+        pr_status::PrState::Draft => t!("titlebar.pr_draft").to_string(),
+        pr_status::PrState::Open => t!("titlebar.pr_open").to_string(),
+        pr_status::PrState::Merged => t!("titlebar.pr_merged").to_string(),
+        pr_status::PrState::Closed => t!("titlebar.pr_closed").to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -301,16 +359,17 @@ mod tests {
 
     #[test]
     fn a_present_branch_is_used_verbatim() {
-        let data = PillData::build("my-task", true, Some("feature/x"), 0);
+        let data = PillData::build("my-task", true, Some("feature/x"), 0, None);
         assert_eq!(data.branch, "feature/x");
         assert_eq!(data.task_title, "my-task");
         assert!(data.is_worktree);
         assert_eq!(data.changed_count, 0);
+        assert_eq!(data.pr, None);
     }
 
     #[test]
     fn no_branch_falls_back_to_a_dash() {
-        let data = PillData::build("my-task", false, None, 3);
+        let data = PillData::build("my-task", false, None, 3, None);
         assert_eq!(data.branch, "-");
         assert!(!data.is_worktree);
         assert_eq!(data.changed_count, 3);
@@ -323,8 +382,18 @@ mod tests {
         // lean on that -- mirrors the same defensiveness
         // `git_pane::render_branch_bar`'s `unwrap_or_else(|| "-".to_string())`
         // already has for the (separate) fixed-pane branch label.
-        assert_eq!(PillData::build("t", true, Some(""), 0).branch, "-");
-        assert_eq!(PillData::build("t", true, Some("   "), 0).branch, "-");
+        assert_eq!(PillData::build("t", true, Some(""), 0, None).branch, "-");
+        assert_eq!(PillData::build("t", true, Some("   "), 0, None).branch, "-");
+    }
+
+    #[test]
+    fn build_carries_the_pr_data_through_verbatim() {
+        let pr = PrPillData {
+            number: 42,
+            state: pr_status::PrState::Open,
+        };
+        let data = PillData::build("t", true, Some("b"), 0, Some(pr));
+        assert_eq!(data.pr, Some(pr));
     }
 
     #[test]
