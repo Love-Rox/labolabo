@@ -103,6 +103,27 @@ pub fn claude_resume_command(resume_id: Option<&str>) -> String {
     }
 }
 
+/// Like [`claude_resume_command`], but launches `binary_path` (an absolute
+/// path, typically resolved via `labolabo_core::ToolLocator::locate("claude")`)
+/// instead of the bare `claude` name. Exists because this command is handed
+/// to `/bin/sh -c` (`labolabo_term::TermSession::spawn_with_scrollback_
+/// options`'s `Some(command)` branch), which only sees the *spawning*
+/// process's inherited `PATH` -- for a GUI app launched from Dock/Finder
+/// that's `launchd`'s minimal default (`/usr/bin:/bin:/usr/sbin:/sbin`), so
+/// a bare `claude` (typically installed under `~/.local/bin` or Homebrew)
+/// resolves to "command not found" there even though a real terminal
+/// session would find it fine. `binary_path` is shell-quoted just like
+/// `resume_id` is -- an install path is unlikely to contain a single quote,
+/// but nothing about this function's contract rules it out.
+pub fn claude_resume_command_with_binary(binary_path: &str, resume_id: Option<&str>) -> String {
+    match resume_id {
+        Some(id) if !id.is_empty() => {
+            format!("{} --resume {}", shell_quote(binary_path), shell_quote(id))
+        }
+        _ => shell_quote(binary_path),
+    }
+}
+
 /// The per-session AF_UNIX socket path (docs/hooks-protocol.md §4.1):
 /// `<base_dir>/<first 10 lowercase hex chars of uuid, hyphens stripped>.sock`.
 /// `base_dir`'s trailing slash (if any) is stripped before joining, so
@@ -298,6 +319,36 @@ mod tests {
         assert_eq!(
             claude_resume_command(Some("a'b")),
             "claude --resume 'a'\\''b'"
+        );
+    }
+
+    // MARK: - claude_resume_command_with_binary
+
+    #[test]
+    fn claude_resume_command_with_binary_without_id_is_quoted_binary_path() {
+        assert_eq!(
+            claude_resume_command_with_binary("/opt/homebrew/bin/claude", None),
+            "'/opt/homebrew/bin/claude'"
+        );
+        assert_eq!(
+            claude_resume_command_with_binary("/opt/homebrew/bin/claude", Some("")),
+            "'/opt/homebrew/bin/claude'"
+        );
+    }
+
+    #[test]
+    fn claude_resume_command_with_binary_with_id_appends_quoted_resume_flag() {
+        assert_eq!(
+            claude_resume_command_with_binary("/opt/homebrew/bin/claude", Some("sess-42")),
+            "'/opt/homebrew/bin/claude' --resume 'sess-42'"
+        );
+    }
+
+    #[test]
+    fn claude_resume_command_with_binary_shell_quotes_both_the_path_and_the_id() {
+        assert_eq!(
+            claude_resume_command_with_binary("/tmp/it's/claude", Some("a'b")),
+            "'/tmp/it'\\''s/claude' --resume 'a'\\''b'"
         );
     }
 
