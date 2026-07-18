@@ -43,7 +43,7 @@ settings:
     footer: "Automatically resumes the previous session when you reopen a restored task."
   git_pane_default_visible:
     label: "Show Git pane by default"
-    footer: "Default visibility of the Git pane for newly opened tasks (doesn't affect tasks already open)."
+    footer: "Default visibility for tasks whose Git pane has never been toggled (tasks you've already shown or hidden it for remember that choice, unaffected by this setting)."
   scrollback:
     label: "Scrollback lines"
     footer: "Changes apply to tabs opened after this point (existing tabs are unaffected)."

@@ -339,6 +339,15 @@ impl TaskDatabase {
     pub fn delete_task(&self, id: &str) -> StoreResult<()> {
         self.conn
             .execute("DELETE FROM task WHERE id = ?1", params![id])?;
+        // Also drop this task's per-task `appState` memory (today: only
+        // `gitPaneVisible:<id>`, `plans` wave 19) -- otherwise the row would
+        // just accumulate forever, and a future task created with the same
+        // id (unlikely but not impossible for externally-supplied ids)
+        // would inherit a stale value.
+        self.conn.execute(
+            "DELETE FROM appState WHERE key = ?1",
+            params![Self::git_pane_visible_key(id)],
+        )?;
         Ok(())
     }
 
@@ -392,6 +401,37 @@ impl TaskDatabase {
 
     pub fn set_git_pane_default_visible(&self, visible: bool) -> StoreResult<()> {
         self.set_app_state(Some(bool_flag(visible)), Self::KEY_GIT_PANE_DEFAULT_VISIBLE)
+    }
+
+    // MARK: - App state (per-task Git pane visibility, `plans` wave 19)
+    //
+    // Unlike `KEY_GIT_PANE_DEFAULT_VISIBLE` above (one app-wide default),
+    // this remembers each Task's *own* last Git-pane visibility, keyed by
+    // task id -- the first per-task-keyed `appState` entry in this store
+    // (Swift precedent: `SessionStore.paneLayout(for:)`'s `"paneLayout:" +
+    // id.uuidString` key shape). The caller (`ensure_workspace_loaded`)
+    // prefers this over `git_pane_default_visible` whenever it's `Some`,
+    // falling back to the app-wide default only for a Task that has never
+    // had its Git pane toggled.
+
+    fn git_pane_visible_key(task_id: &str) -> String {
+        format!("gitPaneVisible:{task_id}")
+    }
+
+    /// `None` if this Task's Git pane has never been toggled (fresh Task,
+    /// or one from before this wave) -- caller should apply
+    /// `git_pane_default_visible` instead.
+    pub fn task_git_pane_visible(&self, task_id: &str) -> StoreResult<Option<bool>> {
+        Ok(self
+            .app_state(&Self::git_pane_visible_key(task_id))?
+            .map(|v| v != "0"))
+    }
+
+    pub fn set_task_git_pane_visible(&self, task_id: &str, visible: bool) -> StoreResult<()> {
+        self.set_app_state(
+            Some(bool_flag(visible)),
+            &Self::git_pane_visible_key(task_id),
+        )
     }
 
     /// `None` if never set, or if the stored text somehow isn't a valid
@@ -851,6 +891,22 @@ mod tests {
     }
 
     #[test]
+    fn delete_task_clears_its_git_pane_visible_memory_but_not_another_tasks() {
+        let db = TaskDatabase::open_in_memory().unwrap();
+        let a = sample_task(0);
+        let b = Task::new_attached("k", "r", "n", "/tmp/b", TileLayout::default(), 1);
+        db.upsert_task(&a).unwrap();
+        db.upsert_task(&b).unwrap();
+        db.set_task_git_pane_visible(&a.id, false).unwrap();
+        db.set_task_git_pane_visible(&b.id, false).unwrap();
+
+        db.delete_task(&a.id).unwrap();
+
+        assert_eq!(db.task_git_pane_visible(&a.id).unwrap(), None);
+        assert_eq!(db.task_git_pane_visible(&b.id).unwrap(), Some(false));
+    }
+
+    #[test]
     fn next_sort_order_is_max_plus_one() {
         let db = TaskDatabase::open_in_memory().unwrap();
         db.upsert_task(&sample_task(0)).unwrap();
@@ -888,6 +944,27 @@ mod tests {
         assert_eq!(db.git_pane_default_visible().unwrap(), Some(false));
         db.set_git_pane_default_visible(true).unwrap();
         assert_eq!(db.git_pane_default_visible().unwrap(), Some(true));
+    }
+
+    // MARK: - App state (per-task Git pane visibility, `plans` wave 19)
+
+    #[test]
+    fn task_git_pane_visible_defaults_to_none_until_set() {
+        let db = TaskDatabase::open_in_memory().unwrap();
+        assert_eq!(db.task_git_pane_visible("t1").unwrap(), None);
+        db.set_task_git_pane_visible("t1", false).unwrap();
+        assert_eq!(db.task_git_pane_visible("t1").unwrap(), Some(false));
+        db.set_task_git_pane_visible("t1", true).unwrap();
+        assert_eq!(db.task_git_pane_visible("t1").unwrap(), Some(true));
+    }
+
+    #[test]
+    fn task_git_pane_visible_is_scoped_per_task() {
+        let db = TaskDatabase::open_in_memory().unwrap();
+        db.set_task_git_pane_visible("t1", false).unwrap();
+        assert_eq!(db.task_git_pane_visible("t1").unwrap(), Some(false));
+        // A different task id has its own, independent memory.
+        assert_eq!(db.task_git_pane_visible("t2").unwrap(), None);
     }
 
     #[test]
@@ -1038,6 +1115,40 @@ mod tests {
         {
             let db = TaskDatabase::open(&db_path).unwrap();
             assert_eq!(db.all_tasks().unwrap().len(), 1);
+        }
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Same "real file, reopened" shape as
+    /// `open_creates_parent_directory_and_persists_across_reopen`, but for
+    /// `task_git_pane_visible` specifically -- the in-memory-only tests
+    /// above (`task_git_pane_visible_defaults_to_none_until_set` etc.)
+    /// prove the SQL is right, but not that it survives an actual
+    /// close-and-reopen of the same on-disk file, i.e. an app restart.
+    #[test]
+    fn task_git_pane_visible_persists_across_a_real_file_reopen() {
+        let dir = std::env::temp_dir().join(format!(
+            "labolabo-task-store-test-{}-{:x}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos() as u64
+        ));
+        let db_path = dir.join("tasks.db");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        {
+            let db = TaskDatabase::open(&db_path).unwrap();
+            db.set_task_git_pane_visible("t1", false).unwrap();
+        }
+        {
+            // A fresh `TaskDatabase::open` of the same file -- exactly
+            // what `LaboLaboApp::new`'s restart-resume path does -- must
+            // still see the memory written by the previous "process".
+            let db = TaskDatabase::open(&db_path).unwrap();
+            assert_eq!(db.task_git_pane_visible("t1").unwrap(), Some(false));
         }
 
         std::fs::remove_dir_all(&dir).unwrap();
