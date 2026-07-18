@@ -28,9 +28,9 @@ use futures::channel::mpsc;
 use futures::StreamExt;
 use gpui::{
     canvas, div, prelude::*, px, relative, rgb, rgba, Animation, AnimationExt, AnyElement, Bounds,
-    Context, CursorStyle, DragMoveEvent, ElementInputHandler, ExternalPaths, FocusHandle,
-    IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render,
-    ScrollWheelEvent, SharedString, Task as GpuiTask, Window,
+    ClipboardItem, Context, CursorStyle, DragMoveEvent, ElementInputHandler, ExternalPaths,
+    FocusHandle, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
+    Render, ScrollWheelEvent, SharedString, Task as GpuiTask, Window,
 };
 
 use labolabo_core::{
@@ -489,6 +489,13 @@ pub fn spawn_redraw_bridge(
 ) -> GpuiTask<()> {
     let (notify_tx, mut notify_rx) = mpsc::unbounded::<BridgeMsg>();
 
+    // Cloned before `session` moves into the reader thread below: OSC 52
+    // clipboard-set writes (`Terminal::take_clipboard_set`) are polled from
+    // *this* gpui-side async task instead of that thread, since writing to
+    // the system clipboard (`cx.write_to_clipboard`) needs a live `Context`
+    // -- see the `take_clipboard_set` poll in the loop below.
+    let clipboard_session = session.clone();
+
     thread::spawn(move || loop {
         match session.recv_event(EVENT_POLL_TIMEOUT) {
             Some(TermEvent::Wakeup) => {
@@ -553,6 +560,29 @@ pub fn spawn_redraw_bridge(
         while let Some(msg) = notify_rx.next().await {
             let mut exited = matches!(msg, BridgeMsg::Exit);
             exited |= drain(&mut notify_rx);
+
+            // A drained batch may have carried an OSC 52 clipboard-set
+            // (`labolabo_term`'s backend-independent scanner, refreshed on
+            // the worker thread alongside every snapshot this bridge's
+            // `Wakeup`s announce -- see `TermSession::take_clipboard_set`'s
+            // doc comment) -- forward it to the system clipboard, the same
+            // API `LaboLaboApp::action_copy`'s Cmd+C handler already uses.
+            // One-shot by construction: `take_clipboard_set` never returns
+            // the same write twice, so this can't double-deliver even if a
+            // later `Wakeup` in the same pane's lifetime finds nothing new.
+            // Applied regardless of which pane currently has focus, same as
+            // Ghostty's own OSC 52 handling.
+            if let Some(text) = clipboard_session.take_clipboard_set() {
+                if this
+                    .update(cx, |_, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(text))
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+
             if exited {
                 let _ = this.update(cx, |app, cx| app.handle_pane_exit(&task_id, pane_id, cx));
                 break;
