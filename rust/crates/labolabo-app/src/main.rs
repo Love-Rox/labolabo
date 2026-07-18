@@ -40,6 +40,7 @@ mod missing_dir;
 mod motion;
 mod mouse_report;
 mod new_task;
+mod osc52_log;
 mod paste;
 mod path_abbrev;
 mod pr_status;

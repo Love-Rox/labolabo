@@ -42,10 +42,12 @@ use rust_i18n::t;
 
 use crate::app::{LaboLaboApp, PreeditState};
 use crate::commit_pane;
+use crate::empty_state;
 use crate::git_pane::{self, GitPaneState};
 use crate::grid;
 use crate::icons::{self, Icon};
 use crate::motion::{self, DotAnimState};
+use crate::osc52_log;
 use crate::render::RenderSpec;
 use crate::selection::Selection;
 use crate::theme;
@@ -573,6 +575,7 @@ pub fn spawn_redraw_bridge(
             // Applied regardless of which pane currently has focus, same as
             // Ghostty's own OSC 52 handling.
             if let Some(text) = clipboard_session.take_clipboard_set() {
+                osc52_log::maybe_log_app_writing_to_clipboard(&task_id, pane_id, text.len());
                 if this
                     .update(cx, |_, cx| {
                         cx.write_to_clipboard(ClipboardItem::new_string(text))
@@ -996,7 +999,12 @@ fn render_leaf(
         // capture of `task_id` since `cx.listener` closures can't share one.
         let click_target = selected_id;
         let mousedown_task_id = task_id.to_string();
-        let canvas_area = div().flex_1().w_full().on_mouse_down(
+        // `.relative()` -- the dead-pane overlay below (appended as this
+        // div's last child, when `runtime` is `None`) positions itself
+        // `.absolute().inset_0()` against this, not the whole `leaf`
+        // (which would also cover the tab bar -- switching tabs on a dead
+        // pane's leaf should keep working normally).
+        let canvas_area = div().relative().flex_1().w_full().on_mouse_down(
             MouseButton::Left,
             cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                 if let Some(id) = click_target {
@@ -1106,6 +1114,56 @@ fn render_leaf(
         ));
 
         let canvas_area = canvas_area.child(canvas_el);
+
+        // Dead-pane overlay (第22波): `runtime` is `None` when this leaf's
+        // selected tab's child process already exited naturally but the
+        // tab itself stays open (`app::LaboLaboApp::remove_pane`'s doc
+        // comment -- the pane's id is kept as a recoverable anchor rather
+        // than closed outright, precisely so this state is reachable and
+        // recoverable). Covers just this canvas (not `render_pane_tab_bar`
+        // above -- switching to another, live tab in the same leaf must
+        // keep working) with the shared empty-state tone and a click that
+        // respawns a plain shell into the same pane, same tab.
+        let dead_pane_task_id = task_id.to_string();
+        let canvas_area = canvas_area.when_some(
+            click_target.filter(|_| runtime.is_none()),
+            |el, dead_pane_id| {
+                let overlay_animation_id: SharedString =
+                    format!("dead-pane-overlay-{dead_pane_task_id}-{dead_pane_id:?}").into();
+                el.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(rgb(theme::surface::ROOT))
+                        .cursor(CursorStyle::PointingHand)
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                                this.respawn_dead_pane(
+                                    &dead_pane_task_id,
+                                    dead_pane_id,
+                                    window,
+                                    cx,
+                                );
+                            }),
+                        )
+                        .child(empty_state::render_message(
+                            Icon::Warning,
+                            t!("pane_exited.message").to_string(),
+                        ))
+                        .with_animation(
+                            overlay_animation_id,
+                            Animation::new(motion::OVERLAY_ENTER)
+                                .with_easing(motion::ease_out_strong()),
+                            |el, t| el.opacity(t),
+                        ),
+                )
+            },
+        );
+
         canvas_area.into_any_element()
     } else {
         render_git_kind_body(task_id, selected_kind, selected_id, git_state, spec, cx)

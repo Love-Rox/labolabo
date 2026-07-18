@@ -1799,7 +1799,7 @@ impl LaboLaboApp {
         );
 
         for pane_id in pane_ids {
-            self.spawn_runtime_for_task(task_id, pane_id, cols, rows, None, cx);
+            self.spawn_runtime_for_task(task_id, pane_id, cols, rows, None, false, cx);
         }
     }
 
@@ -1859,6 +1859,12 @@ impl LaboLaboApp {
     /// (docs/control-protocol.md §5.1) is this wave's only caller that
     /// passes one; every other caller passes `None` (unchanged wave
     /// 5b-2/5b-3 behavior).
+    ///
+    /// `force_plain_shell: true` skips the resume-at-spawn check outright
+    /// (same effect as `auto_resume_enabled` being off, but scoped to this
+    /// one call) -- `respawn_dead_pane` is the only caller that passes
+    /// `true`; every other caller passes `false`.
+    #[allow(clippy::too_many_arguments)]
     fn spawn_runtime_for_task(
         &mut self,
         task_id: &str,
@@ -1866,6 +1872,7 @@ impl LaboLaboApp {
         cols: u16,
         rows: u16,
         override_command: Option<String>,
+        force_plain_shell: bool,
         cx: &mut Context<Self>,
     ) -> Option<String> {
         let task = self.tasks.iter().find(|t| t.id == task_id)?;
@@ -1883,7 +1890,15 @@ impl LaboLaboApp {
                 .cloned()
         });
         let command = override_command.or_else(|| {
-            if !auto_resume_enabled {
+            // `force_plain_shell` (only ever `true` from `respawn_dead_pane`)
+            // skips the resume-at-spawn check below entirely -- an
+            // interactive default shell (`command: None` all the way
+            // through to `Terminal::spawn_with_scrollback_options`), same
+            // as auto-resume being disabled, but scoped to this one call
+            // instead of the whole app's setting. See `respawn_dead_pane`'s
+            // doc comment for why a user-triggered respawn deliberately
+            // never re-runs `claude --resume`.
+            if force_plain_shell || !auto_resume_enabled {
                 return None;
             }
             pane_snapshot.as_ref().and_then(|pane| {
@@ -2327,6 +2342,7 @@ impl LaboLaboApp {
             DEFAULT_PANE_COLS,
             DEFAULT_PANE_ROWS,
             command,
+            false,
             cx,
         );
         if let Some(workspace) = self.workspaces.get_mut(task_id) {
@@ -2366,6 +2382,7 @@ impl LaboLaboApp {
             DEFAULT_PANE_COLS,
             DEFAULT_PANE_ROWS,
             None,
+            false,
             cx,
         );
         if let Some(workspace) = self.workspaces.get_mut(task_id) {
@@ -2519,6 +2536,63 @@ impl LaboLaboApp {
         // Closing the last Files/Diff/Commits-kind tile might mean nothing
         // on screen needs this Task's Git state anymore (`plans` W6d).
         self.sync_git_pane_activation(task_id, cx);
+        cx.notify();
+    }
+
+    /// Respawns a plain shell into `pane_id` after its previous child
+    /// process exited naturally, reusing the *same* `PaneId` -- the same
+    /// tab, and (unlike `PaneTilingModel::close`) the same `PaneItem`, so
+    /// its `agent_session_id`/`agent_transcript_path` (if any) are left
+    /// exactly as they were. User-triggered only: a click on the dead-pane
+    /// overlay (`task_workspace::render_leaf`'s `runtime.is_none()` branch,
+    /// the "プロセスは終了しました" state `remove_pane`'s doc comment
+    /// describes a dead terminal leaf rendering). Deliberately never
+    /// automatic -- same "no auto-respawn" rationale as `remove_pane`
+    /// itself (an immediately-exiting shell would respawn-loop with no way
+    /// to stop); a single click-driven respawn can't loop the way an
+    /// automatic one could.
+    ///
+    /// Always spawns a plain interactive shell (`spawn_runtime_for_task`'s
+    /// `force_plain_shell: true`), never `claude --resume`, even if this
+    /// pane's `PaneItem` still carries a resumable Claude session -- an
+    /// explicit "start a new shell here" click shouldn't silently turn into
+    /// a resume the user didn't ask for. The session id/transcript path
+    /// stay on the `PaneItem` untouched either way, so a manual `claude
+    /// --resume <id>` (or a future explicit "resume" affordance) still
+    /// works afterward.
+    ///
+    /// No-op if `pane_id` isn't currently a dead pane (already has a live
+    /// `PaneRuntime`, or isn't in `task_id`'s tree at all) -- guards
+    /// against a stale click racing a fresh spawn that already landed
+    /// through some other path (e.g. the pane exited again the instant
+    /// after this click's spawn, and a second click event was already
+    /// queued).
+    pub(crate) fn respawn_dead_pane(
+        &mut self,
+        task_id: &str,
+        pane_id: PaneId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workspace) = self.workspaces.get(task_id) else {
+            return;
+        };
+        if workspace.model.root.find_leaf(pane_id).is_none() {
+            return;
+        }
+        if workspace.runtimes.contains_key(&pane_id) {
+            return;
+        }
+        self.spawn_runtime_for_task(
+            task_id,
+            pane_id,
+            DEFAULT_PANE_COLS,
+            DEFAULT_PANE_ROWS,
+            None,
+            true,
+            cx,
+        );
+        window.focus(&self.focus_handle);
         cx.notify();
     }
 

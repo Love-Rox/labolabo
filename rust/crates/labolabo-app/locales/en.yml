@@ -212,3 +212,10 @@ titlebar:
   pr_open: "Open"
   pr_merged: "Merged"
   pr_closed: "Closed"
+
+# Wave 22 (dead-pane UX): the overlay shown over a terminal pane whose
+# child process exited naturally but stays open as a tab
+# (`crate::task_workspace::render_leaf`'s `runtime.is_none()` branch).
+# Appended at the end, same rationale as the wave-8d/10/13b blocks above.
+pane_exited:
+  message: "Process exited — click to start a new shell"

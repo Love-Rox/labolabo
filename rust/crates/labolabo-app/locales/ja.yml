@@ -209,3 +209,10 @@ titlebar:
   pr_open: "オープン"
   pr_merged: "マージ済み"
   pr_closed: "クローズ済み"
+
+# 第22波 (終了ペインの UX): 子プロセスが自然終了した後もタブとして残る
+# ターミナルペイン (`crate::task_workspace::render_leaf` の
+# `runtime.is_none()` 分岐) に重ねるオーバーレイの文言。第8波d/第10波/
+# 第13波b ブロックと同じ理由でファイル末尾へ追記。
+pane_exited:
+  message: "プロセスは終了しました — クリックで新しいシェルを起動"
