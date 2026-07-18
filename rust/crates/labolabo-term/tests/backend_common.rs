@@ -117,6 +117,57 @@ fn term_program_env_is_ghostty_for_every_spawned_child() {
     );
 }
 
+/// `TERM_PROGRAM_VERSION` is always set alongside `TERM_PROGRAM` -- real
+/// Ghostty never sets one without the other (see `session.rs`'s
+/// `spawn_with_scrollback_options` doc comment) -- pinned here to the exact
+/// value that comment documents, so a future edit to either the pinned
+/// `GHOSTTY_COMMIT` or this string without updating the other is caught.
+#[test]
+fn term_program_version_env_is_set_alongside_term_program() {
+    let term = Terminal::spawn_with_command(
+        80,
+        24,
+        Some("printf '%s' \"$TERM_PROGRAM_VERSION\"; sleep 0.2"),
+        &[],
+    )
+    .expect("spawn");
+    let snap = term.wait_for(TIMEOUT, |g| g.contains_text("1.3.2-dev"));
+    assert!(
+        snap.is_some(),
+        "expected TERM_PROGRAM_VERSION=1.3.2-dev in the child's environment, got:\n{}",
+        term.snapshot().to_text()
+    );
+}
+
+/// The default `TERM_PROGRAM`/`TERM_PROGRAM_VERSION` pair is an *overridable
+/// default*, not a hardcoded fact -- `session.rs`'s doc comment documents
+/// this as an intentional escape hatch: a caller-supplied `env` entry wins
+/// over the default, since `cmd.env(key, value)` for the caller's `env`
+/// slice runs after the two defaults are set (`portable-pty`'s
+/// `CommandBuilder::env` is last-write-wins). Pins that ordering directly,
+/// so it can't silently regress if the two blocks are ever reordered.
+#[test]
+fn caller_env_can_override_term_program_identity() {
+    let env = vec![
+        ("TERM_PROGRAM".to_string(), "not-ghostty".to_string()),
+        ("TERM_PROGRAM_VERSION".to_string(), "0.0.0".to_string()),
+    ];
+    let term = Terminal::spawn_with_command(
+        80,
+        24,
+        Some("printf '%s/%s' \"$TERM_PROGRAM\" \"$TERM_PROGRAM_VERSION\"; sleep 0.2"),
+        &env,
+    )
+    .expect("spawn");
+    let snap = term.wait_for(TIMEOUT, |g| g.contains_text("not-ghostty/0.0.0"));
+    assert!(
+        snap.is_some(),
+        "expected caller-supplied env to override the TERM_PROGRAM/\
+         TERM_PROGRAM_VERSION defaults, got:\n{}",
+        term.snapshot().to_text()
+    );
+}
+
 /// Resizing updates the reported grid dimensions.
 #[test]
 fn resize_changes_grid_dimensions() {
@@ -469,6 +520,86 @@ fn kitty_disambiguate_reflects_csi_push_pop() {
     assert!(
         wait_for_kitty_disambiguate(&term, TIMEOUT, false),
         "expected kitty_disambiguate to turn back off after CSI < u (pop)"
+    );
+}
+
+/// Kitty spec: "report all keys as escape codes" (flag `8`, `REPORT_ALL` in
+/// `libghostty-vt`'s `KittyKeyFlags` / `REPORT_ALL_KEYS_AS_ESC` in
+/// `alacritty_terminal`'s `TermMode`) "implies all keys are automatically
+/// disambiguated as well, since they are represented in their canonical
+/// escape code form" -- so a program that pushes *only* that flag (without
+/// also setting `DISAMBIGUATE`, flag `1`) must still see
+/// `Terminal::kitty_disambiguate()` report `true`. Regression coverage for
+/// both backends' `kitty_disambiguate` (`backend/ghostty.rs`,
+/// `backend/alacritty.rs`), which used to check the `DISAMBIGUATE` bit
+/// alone and so would incorrectly report `false` for a `CSI > 8 u`-only
+/// push.
+///
+/// Same "block on `read` between writes" hardening as
+/// [`kitty_disambiguate_reflects_csi_push_pop`] above -- see this file's
+/// module doc comment.
+#[test]
+fn kitty_disambiguate_reflects_report_all_keys_flag_alone() {
+    let term = Terminal::spawn_with_command(
+        80,
+        24,
+        Some(r#"printf '\033[>8u'; read _sync; printf '\033[<u'; sleep 0.2"#),
+        &[],
+    )
+    .expect("spawn");
+    assert!(
+        wait_for_kitty_disambiguate(&term, TIMEOUT, true),
+        "expected kitty_disambiguate to turn on after CSI > 8 u (report-all-keys push, no DISAMBIGUATE bit set)"
+    );
+    // Only unblock the child's second `printf` (the pop) once the ON state
+    // was actually observed, so the OFF write can never land in the same
+    // worker batch as the ON one -- see the doc comment above.
+    term.write_input(b"\n");
+    assert!(
+        wait_for_kitty_disambiguate(&term, TIMEOUT, false),
+        "expected kitty_disambiguate to turn back off after CSI < u (pop)"
+    );
+}
+
+/// Regression test for the vendored `alacritty_terminal` patch (see
+/// `vendor/alacritty_terminal/README.md`): upstream's `push_keyboard_mode`
+/// used to panic (`Vec::remove(0)` on the still-empty `title_stack`) once
+/// its keyboard-mode stack reached `KEYBOARD_MODE_STACK_MAX_DEPTH` (4096)
+/// pushes with no intervening pop -- exactly what 4100 back-to-back
+/// `CSI > 1 u` sequences with no `CSI < u` in between produce. Before the
+/// vendored fix, that panic unwound the worker thread
+/// (`labolabo_term::session::run_worker`) mid-`feed()`, which has no
+/// `catch_unwind`, so the thread simply exits: no more snapshots are ever
+/// published again, and the marker text this test waits for below would
+/// never appear -- the test would hang until `TIMEOUT` and fail. With the
+/// fix, the worker survives and keeps processing normally, so the marker
+/// lands like any other echoed text.
+///
+/// This exercises the alacritty backend's actual bug (the ghostty backend
+/// has no equivalent stack-trimming code at all), but runs unchanged under
+/// `--features backend-ghostty-vt` too, same as every other test in this
+/// file -- there it's simply a (trivially passing) sanity check that
+/// libghostty-vt tolerates the same push storm.
+#[test]
+fn keyboard_mode_stack_survives_pushes_past_max_depth() {
+    let term = Terminal::spawn_with_command(
+        80,
+        24,
+        Some(
+            r#"i=0; while [ $i -lt 4100 ]; do printf '\033[>1u'; i=$((i+1)); done; echo SURVIVED_DEPTH_LIMIT; sleep 0.2"#,
+        ),
+        &[],
+    )
+    .expect("spawn");
+    let snap = term.wait_for(TIMEOUT, |g| g.contains_text("SURVIVED_DEPTH_LIMIT"));
+    assert!(
+        snap.is_some(),
+        "expected the worker thread to survive pushing the keyboard-mode \
+         stack past its max depth (4096) with no intervening pop -- if this \
+         times out, the vendored `alacritty_terminal` patch (see \
+         vendor/alacritty_terminal/README.md) has regressed and the worker \
+         thread panicked mid-`feed()`; got:\n{}",
+        term.snapshot().to_text()
     );
 }
 

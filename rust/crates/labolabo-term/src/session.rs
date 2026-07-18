@@ -315,6 +315,48 @@ impl<B: VtBackend> TermSession<B> {
         // (virtually nothing outside terminal-identity feature-detection
         // reads `TERM_PROGRAM`, unlike `TERM`).
         cmd.env("TERM_PROGRAM", "ghostty");
+        // `TERM_PROGRAM_VERSION` -- set unconditionally alongside
+        // `TERM_PROGRAM`, never left unset: real Ghostty always sets both
+        // together (confirmed by reading its `src/termio/Exec.zig`: `env.put
+        // ("TERM_PROGRAM", "ghostty"); env.put("TERM_PROGRAM_VERSION",
+        // build_config.version_string);`, back to back, no code path that
+        // sets one without the other), so a `TERM_PROGRAM=ghostty` with no
+        // paired version at all would itself be a tell to anything that
+        // actually inspects it that this isn't a real Ghostty.
+        //
+        // Value chosen to match what a real Ghostty build near this crate's
+        // own VT engine would report, not picked arbitrarily: both
+        // `vendor/libghostty-vt-sys/build.rs`'s auto-fetched default
+        // (`GHOSTTY_COMMIT`, used whenever `GHOSTTY_SOURCE_DIR` is unset) and
+        // the `vancluever/ghostty` zig-0.16 fork this workspace's own CI/dev
+        // docs point `GHOSTTY_SOURCE_DIR` at instead (`rust/README.md`, this
+        // crate's own doc comment, `.github/workflows/ci.yml`'s
+        // `rust-term-ghostty` job) declare the identical `build.zig.zon`
+        // `.version = "1.3.2-dev"` (confirmed by reading both directly) --
+        // a pre-release snapshot, not a tagged release, which is honest:
+        // neither tree is pinned to a tagged commit either. This is a
+        // best-effort compatibility declaration, not a strict build-
+        // provenance fact -- an arbitrary future `GHOSTTY_SOURCE_DIR`
+        // override could in principle disagree, same as it could already
+        // disagree on VT behavior itself; re-check this string (`rg
+        // '"version"' build.zig.zon` in whichever tree is current) if either
+        // pin above ever moves. (The alacritty backend has no analogous "own
+        // version" to report, so it inherits this same string too --
+        // consistent with `TERM_PROGRAM`'s own reasoning just above: both
+        // backends commit to the same Ghostty-compatibility claim.)
+        cmd.env("TERM_PROGRAM_VERSION", "1.3.2-dev");
+        // Deliberately *after* the two `cmd.env` calls above, not before:
+        // `portable-pty`'s `CommandBuilder::env` is last-write-wins, so a
+        // caller-supplied `env` entry for `TERM_PROGRAM`/`TERM_PROGRAM_VERSION`
+        // silently overrides the defaults set above. This is an intentional
+        // escape hatch, not incidental ordering -- it's what lets a caller
+        // that genuinely knows better (e.g. a future test double, or a
+        // caller embedding this crate inside something that isn't
+        // Ghostty-compatible) opt out of the Ghostty-identity claim entirely,
+        // without this function needing a dedicated parameter for it. Pinned
+        // by `term_program_version_env_is_set_alongside_term_program` (the
+        // default) and `caller_env_can_override_term_program_identity` (the
+        // override) in `tests/backend_common.rs`.
         for (key, value) in env {
             cmd.env(key, value);
         }
