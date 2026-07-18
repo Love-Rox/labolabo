@@ -37,6 +37,7 @@ use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, Pt
 use crate::backend::VtBackend;
 use crate::color::ColorScheme;
 use crate::mouse::MouseMode;
+use crate::osc52::Osc52Scanner;
 use crate::snapshot::GridSnapshot;
 
 /// Shared, mutex-guarded PTY writer. Both the caller's [`TermSession::
@@ -137,6 +138,16 @@ pub struct TermSession<B: VtBackend> {
     /// bit-packed flag, since a title isn't representable in one atomic word.
     /// Read by [`Self::title`].
     title: Arc<Mutex<Option<String>>>,
+    /// The most recent OSC `52` clipboard-*set* payload, decoded to text --
+    /// refreshed by the worker thread alongside `title`/`bracketed_paste`/
+    /// etc. above (see `run_worker` and [`crate::osc52::Osc52Scanner`]), but
+    /// **one-shot** rather than an always-current mirror: [`Self::
+    /// take_clipboard_set`] takes the value out, leaving `None` behind, so
+    /// the same clipboard write is never forwarded to the caller twice.
+    /// `Some` only ever appears here transiently, between the worker storing
+    /// it and the caller thread next polling -- unlike `title`, there's no
+    /// meaningful "current" clipboard-set value to keep displaying.
+    clipboard: Arc<Mutex<Option<String>>>,
     /// A kill handle split off the child (`Child::clone_killer`) so
     /// [`Self::shutdown`] can signal it even though the `Child` itself is
     /// owned by (and reaped on) the worker thread.
@@ -400,6 +411,7 @@ impl<B: VtBackend> TermSession<B> {
         let alternate_scroll = Arc::new(AtomicBool::new(true));
         let mouse_mode = Arc::new(AtomicU8::new(MouseMode::OFF.to_bits()));
         let title = Arc::new(Mutex::new(None));
+        let clipboard = Arc::new(Mutex::new(None));
         let (event_tx, event_rx) = mpsc::channel::<TermEvent>();
         let (worker_tx, worker_rx) = mpsc::channel::<WorkerMsg>();
 
@@ -440,6 +452,7 @@ impl<B: VtBackend> TermSession<B> {
             let alternate_scroll = alternate_scroll.clone();
             let mouse_mode = mouse_mode.clone();
             let title = title.clone();
+            let clipboard = clipboard.clone();
             thread::spawn(move || {
                 run_worker::<B>(
                     cols,
@@ -452,6 +465,7 @@ impl<B: VtBackend> TermSession<B> {
                     alternate_scroll,
                     mouse_mode,
                     title,
+                    clipboard,
                     worker_rx,
                     event_tx,
                     child,
@@ -471,6 +485,7 @@ impl<B: VtBackend> TermSession<B> {
             alternate_scroll,
             mouse_mode,
             title,
+            clipboard,
             events: Mutex::new(event_rx),
             worker_tx: Mutex::new(worker_tx),
             killer: Mutex::new(killer),
@@ -645,6 +660,46 @@ impl<B: VtBackend> TermSession<B> {
         }
     }
 
+    /// The most recent OSC `52` clipboard-*set* payload the running program
+    /// has requested (`ESC ] 52 ; c ; <base64> BEL`, or the empty-selection
+    /// `ESC ] 52 ; ; <base64> BEL` -- either terminator, `BEL` or `ESC \`;
+    /// see [`crate::osc52`]'s module doc comment for the full grammar this
+    /// accepts/rejects), already base64-decoded to text.
+    ///
+    /// **One-shot**, unlike every other mirrored flag on this type
+    /// (`title`, `bracketed_paste`, ...): returns `Some` exactly once per
+    /// write -- taking the value out and leaving `None` behind -- rather
+    /// than continuing to report the same value on every call. Two writes
+    /// that land before this is ever polled collapse to just the second
+    /// (last-write-wins; see `run_worker`), same as `title`'s own
+    /// "replaces, doesn't append" semantics.
+    ///
+    /// `labolabo-app`'s redraw bridge polls this after every [`TermEvent::
+    /// Wakeup`] and forwards a `Some` straight to the system clipboard --
+    /// the mechanism that makes a plain mouse-drag selection in a
+    /// clipboard-aware program (Claude Code's own TUI is the motivating
+    /// case) copy to the system clipboard without an explicit Cmd+C, the
+    /// same behavior Ghostty and other OSC-52-aware terminals provide.
+    ///
+    /// Backend-independent by construction -- scans the raw PTY byte stream
+    /// directly rather than going through either `VtBackend`'s own OSC
+    /// handling (neither exposes OSC 52 through its public API; see
+    /// [`crate::osc52`]'s module doc comment for why), so this works
+    /// identically regardless of which backend is active.
+    ///
+    /// Deliberately write-only: a clipboard *read* request (`Pd == "?"`) is
+    /// recognized and silently dropped by the scanner -- it never reaches
+    /// this method, and this crate never writes a reply back to the PTY.
+    /// Responding would let the child program read whatever was last on the
+    /// system clipboard, a real information leak this crate does not opt
+    /// into.
+    pub fn take_clipboard_set(&self) -> Option<String> {
+        match self.clipboard.lock() {
+            Ok(mut slot) => slot.take(),
+            Err(poisoned) => poisoned.into_inner().take(),
+        }
+    }
+
     /// Wait up to `timeout` for the next [`TermEvent`], or `None` on timeout.
     pub fn recv_event(&self, timeout: Duration) -> Option<TermEvent> {
         let rx = self.events.lock().ok()?;
@@ -706,6 +761,7 @@ fn run_worker<B: VtBackend>(
     alternate_scroll: Arc<AtomicBool>,
     mouse_mode: Arc<AtomicU8>,
     title: Arc<Mutex<Option<String>>>,
+    clipboard: Arc<Mutex<Option<String>>>,
     rx: Receiver<WorkerMsg>,
     event_tx: Sender<TermEvent>,
     mut child: Box<dyn portable_pty::Child + Send + Sync>,
@@ -739,6 +795,14 @@ fn run_worker<B: VtBackend>(
     // with zero new messages.
     let mut dirty = false;
 
+    // Backend-independent OSC 52 recognizer -- fed the same raw PTY bytes
+    // as `backend.feed` below, in parallel, not instead of it (see
+    // `crate::osc52`'s module doc comment for why this can't just be read
+    // off `backend` the way `title`/`bracketed_paste`/etc. are). Owned by
+    // this thread alone; only the decoded text it finds crosses to the
+    // caller thread, through `clipboard`.
+    let mut osc52_scanner = Osc52Scanner::default();
+
     loop {
         let msg = if dirty {
             let remaining = FRAME_INTERVAL.saturating_sub(last_snapshot.elapsed());
@@ -766,6 +830,18 @@ fn run_worker<B: VtBackend>(
         match msg {
             WorkerMsg::Bytes(bytes) => {
                 backend.feed(&bytes);
+                // Scan the same raw bytes for OSC 52 clipboard-set requests
+                // -- see `crate::osc52` and this fn's `osc52_scanner`
+                // binding above. Last write wins if more than one lands in
+                // this batch (later `on_clipboard_set` calls simply
+                // overwrite `clipboard`'s slot) -- same semantics as
+                // `title` below, and as `Self::take_clipboard_set`'s doc
+                // comment promises.
+                osc52_scanner.feed(&bytes, |text| {
+                    if let Ok(mut slot) = clipboard.lock() {
+                        *slot = Some(text);
+                    }
+                });
                 // Refresh the bracketed-paste/alt-screen flags on every
                 // processed batch (unlike the snapshot, not throttled --
                 // they're single cheap bools, and either can change at any

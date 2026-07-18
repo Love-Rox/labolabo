@@ -37,6 +37,7 @@
 pub mod backend;
 pub mod color;
 pub mod mouse;
+mod osc52;
 pub mod session;
 pub mod snapshot;
 

@@ -1108,6 +1108,182 @@ fn title_updates_on_second_osc_sequence() {
     );
 }
 
+/// OSC `52` (clipboard set), BEL-terminated -- `take_clipboard_set()` is
+/// `None` before the child ever sends it, then reflects the decoded text.
+/// Also exercises the one-shot contract: a second call right after the
+/// first must return `None` (the value was taken, not merely mirrored --
+/// see `TermSession::take_clipboard_set`'s doc comment, unlike `title()`
+/// above).
+///
+/// Payload `bGFib2xhYm8gb3NjNTI=` is the base64 encoding of `labolabo
+/// osc52` (computed once, hardcoded here rather than shelling out to a
+/// `base64` binary -- keeps this test's expectations independent of
+/// whatever `base64` CLI, if any, happens to be on a given CI runner's
+/// `PATH`).
+#[test]
+fn clipboard_set_reflects_osc_52_bel_terminated() {
+    let term = Terminal::spawn_with_command(
+        80,
+        24,
+        Some(r#"printf '\033]52;c;bGFib2xhYm8gb3NjNTI=\007'; sleep 0.3"#),
+        &[],
+    )
+    .expect("spawn");
+    assert_eq!(
+        term.take_clipboard_set(),
+        None,
+        "no clipboard set should be pending before the child runs"
+    );
+    assert!(
+        wait_for_clipboard_set(&term, TIMEOUT, "labolabo osc52"),
+        "expected clipboard set 'labolabo osc52' after OSC 52, got {:?}",
+        term.take_clipboard_set()
+    );
+    assert_eq!(
+        term.take_clipboard_set(),
+        None,
+        "take_clipboard_set should be one-shot: a second call must return None"
+    );
+}
+
+/// OSC `52`, ST-terminated (`ESC \` rather than BEL) -- the other legal
+/// terminator real programs use, same as `title_reflects_osc_0_st_
+/// terminated` above.
+#[test]
+fn clipboard_set_reflects_osc_52_st_terminated() {
+    let term = Terminal::spawn_with_command(
+        80,
+        24,
+        Some("printf '\\033]52;c;c2Vjb25kIGNsaXA=\\033\\\\'; sleep 0.3"),
+        &[],
+    )
+    .expect("spawn");
+    assert!(
+        wait_for_clipboard_set(&term, TIMEOUT, "second clip"),
+        "expected clipboard set 'second clip' after OSC 52 (ST-terminated), got {:?}",
+        term.take_clipboard_set()
+    );
+}
+
+/// The OSC sequence arrives split across two separate PTY writes -- same
+/// "a `sleep` between two `printf`s all but guarantees two distinct
+/// `read()`s" reasoning as `title_reflects_osc_sequence_split_across_
+/// writes` above, proving the scanner (not a VT parser here -- see
+/// `crate::osc52`'s module doc comment) resumes correctly mid-sequence
+/// rather than losing or mangling a chunk boundary that lands mid-base64.
+#[test]
+fn clipboard_set_reflects_split_osc_sequence() {
+    let term = Terminal::spawn_with_command(
+        80,
+        24,
+        Some(r#"printf '\033]52;c;bGFib2'; sleep 0.2; printf 'xhYm8gb3NjNTI=\007'; sleep 0.3"#),
+        &[],
+    )
+    .expect("spawn");
+    assert!(
+        wait_for_clipboard_set(&term, TIMEOUT, "labolabo osc52"),
+        "expected clipboard set after a split OSC write, got {:?}",
+        term.take_clipboard_set()
+    );
+}
+
+/// Two OSC 52 writes emitted back-to-back with no intervening `sleep`/
+/// `read` -- almost certain to land in the same `WorkerMsg::Bytes` batch
+/// (see `session.rs`'s reader/worker split) -- must leave only the later
+/// write's text behind ("last write wins", matching `run_worker`'s doc
+/// comment on `osc52_scanner`).
+#[test]
+fn clipboard_set_keeps_last_write_when_two_land_in_one_batch() {
+    let term = Terminal::spawn_with_command(
+        80,
+        24,
+        Some(
+            r#"printf '\033]52;c;bGFib2xhYm8gb3NjNTI=\007\033]52;c;c2Vjb25kIGNsaXA=\007'; sleep 0.3"#,
+        ),
+        &[],
+    )
+    .expect("spawn");
+    assert!(
+        wait_for_clipboard_set(&term, TIMEOUT, "second clip"),
+        "expected the later of two same-batch OSC 52 writes to win, got {:?}",
+        term.take_clipboard_set()
+    );
+}
+
+/// A clipboard *read* request (`Pd == "?"`) must never be reported --
+/// answering it would leak the system clipboard's prior contents to the
+/// child program (see `crate::osc52`'s module doc comment and
+/// `TermSession::take_clipboard_set`'s doc comment). The child prints
+/// `DONE` afterward purely so the test has something to `wait_for` on the
+/// grid -- proof the child kept running (didn't block waiting on a reply
+/// that never comes) -- before asserting nothing was ever reported.
+#[test]
+fn clipboard_read_request_is_never_reported() {
+    let term = Terminal::spawn_with_command(
+        80,
+        24,
+        Some(r#"printf '\033]52;c;?\007DONE'; sleep 0.3"#),
+        &[],
+    )
+    .expect("spawn");
+    let done = term.wait_for(TIMEOUT, |g| g.contains_text("DONE"));
+    assert!(
+        done.is_some(),
+        "expected the child to finish, got:\n{}",
+        term.snapshot().to_text()
+    );
+    assert_eq!(
+        term.take_clipboard_set(),
+        None,
+        "a clipboard read request ('?') must never be reported as a set"
+    );
+}
+
+/// A selection other than `c` (here: `p`, the primary/X11 selection) must
+/// not be reported -- this crate only ever forwards writes to the system
+/// clipboard (see `crate::osc52`'s module doc comment).
+#[test]
+fn clipboard_set_ignores_non_c_selection() {
+    let term = Terminal::spawn_with_command(
+        80,
+        24,
+        Some(r#"printf '\033]52;p;bGFib2xhYm8gb3NjNTI=\007DONE'; sleep 0.3"#),
+        &[],
+    )
+    .expect("spawn");
+    let done = term.wait_for(TIMEOUT, |g| g.contains_text("DONE"));
+    assert!(
+        done.is_some(),
+        "expected the child to finish, got:\n{}",
+        term.snapshot().to_text()
+    );
+    assert_eq!(
+        term.take_clipboard_set(),
+        None,
+        "a non-`c` selection (here: primary, `p`) must not be reported"
+    );
+}
+
+/// A UTF-8 (Japanese) payload decodes correctly -- `44GT44KT44Gr44Gh44Gv`
+/// is the base64 encoding of `こんにちは`'s UTF-8 bytes (computed once,
+/// hardcoded -- same rationale as `clipboard_set_reflects_osc_52_bel_
+/// terminated`'s doc comment).
+#[test]
+fn clipboard_set_decodes_japanese_utf8_payload() {
+    let term = Terminal::spawn_with_command(
+        80,
+        24,
+        Some(r#"printf '\033]52;c;44GT44KT44Gr44Gh44Gv\007'; sleep 0.3"#),
+        &[],
+    )
+    .expect("spawn");
+    assert!(
+        wait_for_clipboard_set(&term, TIMEOUT, "こんにちは"),
+        "expected Japanese UTF-8 clipboard payload to decode, got {:?}",
+        term.take_clipboard_set()
+    );
+}
+
 /// Find the first cell whose text matches `needle` (a single grapheme, as
 /// printed by the tests above -- there's no ambiguity to resolve).
 fn find_cell<'a>(
@@ -1225,6 +1401,29 @@ fn wait_for_title(
         };
         if term.recv_event(remaining.min(Duration::from_millis(50))) == Some(TermEvent::Exit) {
             return pred(&term.title());
+        }
+    }
+}
+
+/// Poll `term.take_clipboard_set()` until it returns `Some(expected)` --
+/// same deadline-polling shape as `wait_for_title`/`wait_for_bracketed_
+/// paste` above (no dedicated event of its own), except each poll *takes*
+/// the value out (`take_clipboard_set`'s one-shot contract -- see its own
+/// doc comment), so a `Some` that doesn't match `expected` is treated as a
+/// definitive failure (return `false` immediately) rather than something to
+/// keep polling for: it's already gone, and nothing but a fresh OSC 52
+/// write would ever produce another one.
+fn wait_for_clipboard_set(term: &Terminal, timeout: Duration, expected: &str) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if let Some(text) = term.take_clipboard_set() {
+            return text == expected;
+        }
+        let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else {
+            return false;
+        };
+        if term.recv_event(remaining.min(Duration::from_millis(50))) == Some(TermEvent::Exit) {
+            return term.take_clipboard_set().as_deref() == Some(expected);
         }
     }
 }

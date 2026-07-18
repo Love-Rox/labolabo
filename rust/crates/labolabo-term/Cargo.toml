@@ -21,6 +21,13 @@ backend-ghostty-vt = ["dep:libghostty-vt"]
 # Shared across both backends -- always compiled.
 anyhow = "1"
 portable-pty = "0.9"
+# Decodes OSC 52 clipboard-set payloads (`src/osc52.rs`) -- backend-
+# independent (neither VT core exposes OSC 52 through its public API, see
+# that module's doc comment), so this is unconditional like the deps above,
+# not gated behind a backend feature. Same version `vendor/alacritty_terminal`
+# already pulls in for its own (unrelated, not reused here) OSC 52 handling,
+# so this adds no new version to the dependency graph.
+base64 = "0.22"
 
 # Backend-specific VT cores -- each gated behind its feature.
 alacritty_terminal = { version = "0.26", optional = true }
