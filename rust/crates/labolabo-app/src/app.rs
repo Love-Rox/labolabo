@@ -1789,9 +1789,13 @@ impl LaboLaboApp {
             .map(|p| p.id)
             .collect();
 
+        let git_pane_visible = resolve_git_pane_visible(
+            self.db.task_git_pane_visible(task_id).ok().flatten(),
+            self.settings.git_pane_default_visible,
+        );
         self.workspaces.insert(
             task_id.to_string(),
-            TaskWorkspace::new(model, self.settings.git_pane_default_visible),
+            TaskWorkspace::new(model, git_pane_visible),
         );
 
         for pane_id in pane_ids {
@@ -3844,6 +3848,12 @@ impl LaboLaboApp {
     /// watch outright anymore (`plans` W6d) -- a Files/Diff/Commits tile
     /// pane elsewhere in the same Task's tree can still need it; that
     /// decision is [`Self::git_pane_state_needed`]'s job.
+    ///
+    /// Persists the new value as `task_id`'s own memory (`plans` wave 19,
+    /// `TaskDatabase::set_task_git_pane_visible`), so it's restored as-is
+    /// the next time this Task's workspace is loaded --
+    /// [`Self::ensure_workspace_loaded`] prefers this memory over
+    /// `settings.git_pane_default_visible`.
     pub(crate) fn set_git_pane_visible(
         &mut self,
         task_id: &str,
@@ -3857,6 +3867,9 @@ impl LaboLaboApp {
             return;
         }
         workspace.git.visible = visible;
+        if let Err(err) = self.db.set_task_git_pane_visible(task_id, visible) {
+            eprintln!("labolabo-app: failed to persist task_git_pane_visible: {err}");
+        }
         cx.notify();
         self.sync_git_pane_activation(task_id, cx);
     }
@@ -4266,11 +4279,12 @@ impl LaboLaboApp {
     }
 
     /// Toggles "Git ペインを既定で表示" and persists it -- seeds `GitPaneState::
-    /// visible` for every Task workspace loaded *after* this call
-    /// (`ensure_workspace_loaded` reads `self.settings.git_pane_default_visible`
-    /// fresh); already-loaded workspaces are unaffected (use `Cmd+Shift+G`
-    /// or the pane's own close button for those, same as before this
-    /// setting existed).
+    /// visible` for every Task workspace loaded *after* this call that has
+    /// no per-task memory of its own yet (`ensure_workspace_loaded` prefers
+    /// `TaskDatabase::task_git_pane_visible` over this default whenever
+    /// it's `Some`, `plans` wave 19); already-loaded workspaces are
+    /// unaffected (use `Cmd+Shift+G` or the pane's own close button for
+    /// those, same as before this setting existed).
     pub(crate) fn set_git_pane_default_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
         if self.settings.git_pane_default_visible == visible {
             return;
@@ -4436,6 +4450,17 @@ impl LaboLaboApp {
         self.open_git_tile_pane(task_id, PaneKind::Diff, window, cx);
         self.set_git_pane_visible(task_id, false, cx);
     }
+}
+
+/// Pure decision behind [`LaboLaboApp::ensure_workspace_loaded`]'s Git pane
+/// seeding (`plans` wave 19): a Task's own remembered visibility
+/// (`TaskDatabase::task_git_pane_visible`) wins whenever it exists,
+/// otherwise fall back to the app-wide `settings.git_pane_default_visible`.
+/// Split out purely so this priority rule is unit-testable without a real
+/// `TaskDatabase`/`LaboLaboApp`, the same way [`git_pane_needed`] and
+/// [`compute_task_conflicts`] are.
+fn resolve_git_pane_visible(memory: Option<bool>, default_visible: bool) -> bool {
+    memory.unwrap_or(default_visible)
 }
 
 /// Pure decision behind [`LaboLaboApp::git_pane_state_needed`]: is `task_id`'s
@@ -5124,6 +5149,20 @@ mod tests {
     #[test]
     fn empty_tasks_yields_no_conflicts() {
         assert!(compute_task_conflicts(&[], &HashMap::new(), "a").is_empty());
+    }
+
+    // MARK: - resolve_git_pane_visible (`plans` wave 19 per-task memory)
+
+    #[test]
+    fn remembered_value_wins_over_the_default_either_way() {
+        assert!(!resolve_git_pane_visible(Some(false), true));
+        assert!(resolve_git_pane_visible(Some(true), false));
+    }
+
+    #[test]
+    fn falls_back_to_the_default_when_never_remembered() {
+        assert!(resolve_git_pane_visible(None, true));
+        assert!(!resolve_git_pane_visible(None, false));
     }
 
     // MARK: - git_pane_needed (`plans` W6d watch-visibility generalization)
