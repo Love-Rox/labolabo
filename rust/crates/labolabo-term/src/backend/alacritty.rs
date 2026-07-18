@@ -272,7 +272,17 @@ impl VtBackend for AlacrittyBackend {
     }
 
     fn kitty_disambiguate(&self) -> bool {
-        self.term.mode().contains(TermMode::DISAMBIGUATE_ESC_CODES)
+        // `intersects`, not `contains(DISAMBIGUATE_ESC_CODES)` alone -- the
+        // Kitty spec states flag `8` ("report all keys as escape codes")
+        // "implies all keys are automatically disambiguated as well, since
+        // they are represented in their canonical escape code form", so a
+        // program that pushed only `REPORT_ALL_KEYS_AS_ESC` still expects
+        // this crate's Kitty-`CSI u` re-encoding (see `labolabo-app`'s
+        // `keys::keystroke_to_bytes`) to kick in -- see the ghostty
+        // backend's `kitty_disambiguate` for the identical reasoning.
+        self.term
+            .mode()
+            .intersects(TermMode::DISAMBIGUATE_ESC_CODES | TermMode::REPORT_ALL_KEYS_AS_ESC)
     }
 
     fn scroll_display(&mut self, delta_lines: i64) {

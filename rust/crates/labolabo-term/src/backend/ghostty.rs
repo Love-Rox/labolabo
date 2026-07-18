@@ -310,9 +310,18 @@ impl VtBackend for GhosttyBackend {
         // maintain. `unwrap_or(false)` on a query error (transient FFI
         // failure) treats it the same as "not requested" -- the safe
         // default, matching this crate's other best-effort mode queries.
+        //
+        // Checked as `intersects(DISAMBIGUATE | REPORT_ALL)`, not a bare
+        // `contains(DISAMBIGUATE)` -- the Kitty spec states flag `8`
+        // ("report all keys as escape codes") "implies all keys are
+        // automatically disambiguated as well, since they are represented
+        // in their canonical escape code form", so a program that pushed
+        // only `REPORT_ALL` (without also setting `DISAMBIGUATE`) still
+        // expects this crate's Kitty-`CSI u` re-encoding (see
+        // `labolabo-app`'s `keys::keystroke_to_bytes`) to kick in.
         self.terminal
             .kitty_keyboard_flags()
-            .map(|flags| flags.contains(KittyKeyFlags::DISAMBIGUATE))
+            .map(|flags| flags.intersects(KittyKeyFlags::DISAMBIGUATE | KittyKeyFlags::REPORT_ALL))
             .unwrap_or(false)
     }
 

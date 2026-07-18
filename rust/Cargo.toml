@@ -28,5 +28,19 @@ edition = "2021"
 # a live risk for the Linux/macOS release bundles (native-CPU code shipped
 # to end users with unknown CPUs). Drop this patch once a fix lands upstream
 # (https://github.com/uzaaft/libghostty-rs).
+
+# LOCAL PATCH (LaboLabo, W17): pin `alacritty_terminal` to a vendored copy
+# with a one-line `term/mod.rs` fix. See vendor/alacritty_terminal/README.md
+# for the full rationale -- summary: upstream's `push_keyboard_mode` panics
+# (`Vec::remove(0)` on an empty `Vec`) once its mode stack hits 4096 pushes
+# with no intervening pop, because a copy-pasted bound-check branch trims
+# the wrong stack (`title_stack` instead of `keyboard_mode_stack`). This
+# workspace's own `AlacrittyBackend::new` (`crates/labolabo-term/src/
+# backend/alacritty.rs`) sets `kitty_keyboard: true`, which is what makes
+# the buggy branch reachable at all -- unwinding the worker thread that owns
+# the VT core (`labolabo-term::session::run_worker`) permanently freezes
+# that pane. Drop this patch once a fix lands upstream
+# (https://github.com/alacritty/alacritty).
 [patch.crates-io]
 libghostty-vt-sys = { path = "vendor/libghostty-vt-sys" }
+alacritty_terminal = { path = "vendor/alacritty_terminal" }
