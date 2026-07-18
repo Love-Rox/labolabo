@@ -37,6 +37,23 @@
 //!    GitHub-releases check (`LaboLaboApp::new`); the `LABOLABO_NO_
 //!    UPDATE_CHECK` env var is a separate, settings-independent kill switch
 //!    (`update_check::update_check_disabled`) for smoke-testing/CI.
+//! 6. **テキスト選択を優先** (`AppSettings::prefer_local_selection`, wave
+//!    20) -- a mouse-tracking-aware program running in a pane (e.g. Claude
+//!    Code's own TUI, which enables DECSET `1000`/`1002`/`1003`/`1006`)
+//!    normally captures every click/drag, so this app only falls back to
+//!    its own local text selection when Shift is held (Ghostty's own
+//!    `mouse-shift-capture` convention -- see `crate::mouse_report::
+//!    is_click_reporting_active`'s doc comment). Some users want the
+//!    opposite: a plain drag always selects text locally (so `⌘C` copies
+//!    it), and Shift is what forwards to the program instead. Default
+//!    `false` (Ghostty's convention, this port's pre-existing behavior);
+//!    a whole-app toggle rather than a per-program heuristic, since this
+//!    port has no notion of "which program is running in this pane" to
+//!    key a smarter default off of. Deliberately does **not** affect
+//!    scroll-wheel forwarding (`mouse_report::is_scroll_reporting_active`
+//!    takes no such parameter) -- inverting wheel scroll too would break
+//!    scrolling inside the very programs (like Claude Code) this setting
+//!    exists for.
 //!
 //! **Deliberately not here**: font/color settings -- the project's own
 //! policy (`CLAUDE.md` for this wave) is that Ghostty config remains the
@@ -100,6 +117,10 @@ pub struct AppSettings {
     /// `crate::update_check`'s once-per-launch background check. See this
     /// module's doc comment, item 5.
     pub update_check_enabled: bool,
+    /// "テキスト選択を優先" (wave 20) -- inverts the Shift/local-selection
+    /// tie-break in `crate::mouse_report::is_click_reporting_active`. See
+    /// this module's doc comment, item 6.
+    pub prefer_local_selection: bool,
 }
 
 impl Default for AppSettings {
@@ -111,7 +132,9 @@ impl Default for AppSettings {
     /// to `Auto`, matching this port's pre-i18n-wave behavior for a `ja*`
     /// system (everything was hardcoded Japanese). `update_check_enabled`
     /// defaults to `true` -- same "opt-out, not opt-in" posture as Swift's
-    /// own `checkUpdatesOnLaunch` default.
+    /// own `checkUpdatesOnLaunch` default. `prefer_local_selection` defaults
+    /// to `false` -- Ghostty's own convention, and this port's behavior
+    /// before this setting existed.
     fn default() -> Self {
         Self {
             auto_resume_enabled: true,
@@ -119,6 +142,7 @@ impl Default for AppSettings {
             scrollback_lines: DEFAULT_SCROLLBACK_LINES,
             locale: LocaleSetting::Auto,
             update_check_enabled: true,
+            prefer_local_selection: false,
         }
     }
 }
@@ -154,6 +178,11 @@ impl AppSettings {
                 .ok()
                 .flatten()
                 .unwrap_or(defaults.update_check_enabled),
+            prefer_local_selection: db
+                .prefer_local_selection()
+                .ok()
+                .flatten()
+                .unwrap_or(defaults.prefer_local_selection),
         }
     }
 }
@@ -306,6 +335,20 @@ pub fn render_settings_overlay(
                 MouseButton::Left,
                 cx.listener(|this, _: &MouseDownEvent, _window, cx| {
                     this.set_update_check_enabled(!this.settings().update_check_enabled, cx);
+                }),
+            ),
+        )
+        .child(
+            toggle_row(
+                "prefer-local-selection",
+                t!("settings.prefer_local_selection.label").to_string(),
+                t!("settings.prefer_local_selection.footer").to_string(),
+                settings.prefer_local_selection,
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseDownEvent, _window, cx| {
+                    this.set_prefer_local_selection(!this.settings().prefer_local_selection, cx);
                 }),
             ),
         );
@@ -574,6 +617,7 @@ mod tests {
         assert_eq!(defaults.scrollback_lines, DEFAULT_SCROLLBACK_LINES);
         assert_eq!(defaults.locale, LocaleSetting::Auto);
         assert!(defaults.update_check_enabled);
+        assert!(!defaults.prefer_local_selection);
     }
 
     #[test]
@@ -590,6 +634,7 @@ mod tests {
         db.set_scrollback_lines(5000).unwrap();
         db.set_locale("ja").unwrap();
         db.set_update_check_enabled(false).unwrap();
+        db.set_prefer_local_selection(true).unwrap();
 
         let loaded = AppSettings::load(&db);
         assert_eq!(
@@ -600,6 +645,7 @@ mod tests {
                 scrollback_lines: 5000,
                 locale: LocaleSetting::Ja,
                 update_check_enabled: false,
+                prefer_local_selection: true,
             }
         );
     }
@@ -616,6 +662,7 @@ mod tests {
         assert!(loaded.git_pane_default_visible);
         assert_eq!(loaded.scrollback_lines, 42);
         assert!(loaded.update_check_enabled);
+        assert!(!loaded.prefer_local_selection);
     }
 
     // MARK: - adjust_scrollback_lines

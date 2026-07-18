@@ -3329,14 +3329,14 @@ impl LaboLaboApp {
 
     /// Begin (or restart) a left-button gesture in `pane_id`'s canvas at
     /// `event.position`: either starts SGR-encoding it and forwarding to
-    /// the child program's PTY (when the child has requested mouse
-    /// tracking and Shift isn't held -- see `mouse_report::
-    /// is_click_reporting_active`), or begins local text selection (the
+    /// the child program's PTY, or begins local text selection (the
     /// pre-existing behavior, now click-count-aware -- a double-click
     /// selects the word under the mouse, a triple-click the whole line;
     /// see `selection::selection_for_click`). Which of the two applies is
     /// decided once here and held fixed for the rest of this one gesture
-    /// (see `PaneRuntime::reporting_drag`'s doc comment for why). Called
+    /// (see `PaneRuntime::reporting_drag`'s doc comment for why) -- see
+    /// `mouse_report::is_click_reporting_active` for exactly how Shift and
+    /// `AppSettings::prefer_local_selection` combine to decide it. Called
     /// alongside (not instead of) `select_pane` from `render_leaf`'s
     /// mouse-down handler, so starting a gesture also focuses the pane
     /// it's in, same as before either behavior existed.
@@ -3350,6 +3350,7 @@ impl LaboLaboApp {
         let Some(pos) = self.pane_cell_at(task_id, pane_id, event.position) else {
             return;
         };
+        let prefer_local_selection = self.settings().prefer_local_selection;
         let Some(runtime) = self
             .workspaces
             .get_mut(task_id)
@@ -3358,7 +3359,11 @@ impl LaboLaboApp {
             return;
         };
         let mouse_mode = runtime.session.mouse_mode();
-        let reporting = mouse_report::is_click_reporting_active(mouse_mode, event.modifiers.shift);
+        let reporting = mouse_report::is_click_reporting_active(
+            mouse_mode,
+            event.modifiers.shift,
+            prefer_local_selection,
+        );
         runtime.reporting_drag = reporting;
         if reporting {
             runtime.selection = None;
@@ -3482,11 +3487,11 @@ impl LaboLaboApp {
 
     /// Reports a right- or middle-button press to `pane_id`'s child
     /// program via SGR mouse encoding, if it has requested mouse tracking
-    /// and Shift isn't held (`mouse_report::is_click_reporting_active`) --
-    /// a silent no-op otherwise. Right/middle clicks have no *local*
-    /// behavior in this app (no context menu, no paste-on-middle-click,
-    /// unlike the left button's text-selection fallback), so there is
-    /// nothing else for this to fall back to.
+    /// and `mouse_report::is_click_reporting_active` says this gesture
+    /// should forward -- a silent no-op otherwise. Right/middle clicks have
+    /// no *local* behavior in this app (no context menu, no
+    /// paste-on-middle-click, unlike the left button's text-selection
+    /// fallback), so there is nothing else for this to fall back to.
     pub(crate) fn report_mouse_click(
         &mut self,
         task_id: &str,
@@ -3498,6 +3503,7 @@ impl LaboLaboApp {
         let Some(pos) = self.pane_cell_at(task_id, pane_id, event.position) else {
             return;
         };
+        let prefer_local_selection = self.settings().prefer_local_selection;
         let Some(runtime) = self
             .workspaces
             .get_mut(task_id)
@@ -3506,7 +3512,11 @@ impl LaboLaboApp {
             return;
         };
         let mouse_mode = runtime.session.mouse_mode();
-        if !mouse_report::is_click_reporting_active(mouse_mode, event.modifiers.shift) {
+        if !mouse_report::is_click_reporting_active(
+            mouse_mode,
+            event.modifiers.shift,
+            prefer_local_selection,
+        ) {
             return;
         }
         let Some(bytes) = mouse_report::encode_sgr(
@@ -3538,6 +3548,7 @@ impl LaboLaboApp {
         let Some(pos) = self.pane_cell_at(task_id, pane_id, event.position) else {
             return;
         };
+        let prefer_local_selection = self.settings().prefer_local_selection;
         let Some(runtime) = self
             .workspaces
             .get_mut(task_id)
@@ -3546,7 +3557,11 @@ impl LaboLaboApp {
             return;
         };
         let mouse_mode = runtime.session.mouse_mode();
-        if !mouse_report::is_click_reporting_active(mouse_mode, event.modifiers.shift) {
+        if !mouse_report::is_click_reporting_active(
+            mouse_mode,
+            event.modifiers.shift,
+            prefer_local_selection,
+        ) {
             return;
         }
         if let Some(bytes) = mouse_report::encode_sgr(
@@ -4347,6 +4362,26 @@ impl LaboLaboApp {
         self.settings.update_check_enabled = enabled;
         if let Err(err) = self.db.set_update_check_enabled(enabled) {
             eprintln!("labolabo-app: failed to persist update_check_enabled: {err}");
+        }
+        cx.notify();
+    }
+
+    /// Toggles "テキスト選択を優先" (wave 20) and persists it immediately.
+    /// Read fresh by `Self::begin_selection`/`report_mouse_click`/
+    /// `report_mouse_release` on every new click, so this applies to the
+    /// very next click anywhere -- unlike most settings in this module,
+    /// there is no "next pane spawn"/"next launch" delay, since it doesn't
+    /// feed anything that's only captured once at spawn time. Any gesture
+    /// already in progress (`PaneRuntime::reporting_drag`) keeps whichever
+    /// mode it started in, same as toggling Shift mid-drag has never
+    /// retroactively changed an in-progress gesture either.
+    pub(crate) fn set_prefer_local_selection(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.settings.prefer_local_selection == enabled {
+            return;
+        }
+        self.settings.prefer_local_selection = enabled;
+        if let Err(err) = self.db.set_prefer_local_selection(enabled) {
+            eprintln!("labolabo-app: failed to persist prefer_local_selection: {err}");
         }
         cx.notify();
     }

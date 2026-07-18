@@ -56,6 +56,9 @@ settings:
   update_check:
     label: "Automatically check for updates"
     footer: "Checks for a new version in the background at launch."
+  prefer_local_selection:
+    label: "Prefer text selection (Shift to send mouse to the app)"
+    footer: "A plain drag selects text locally -- so ⌘C works -- even inside apps that capture the mouse (e.g. Claude Code). Hold Shift while dragging to send mouse events to the app instead."
 
 update:
   available:
