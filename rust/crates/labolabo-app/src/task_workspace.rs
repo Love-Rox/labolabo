@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures::channel::mpsc;
 use futures::StreamExt;
@@ -58,6 +58,17 @@ const EVENT_POLL_TIMEOUT: Duration = Duration::from_millis(250);
 /// See `app::FRAME_INTERVAL`'s Wave 5b-2 doc comment (unchanged): minimum
 /// gap between two `cx.notify()` calls for the same pane.
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
+
+/// How soon after spawn a pane's child exiting counts as a "quick" (almost
+/// certainly a spawn failure, not real work) exit -- see
+/// `app::LaboLaboApp::remove_pane`'s doc comment for why that distinction
+/// matters (a Dock/Finder-launched app's minimal `PATH` making the resume
+/// command's `claude` immediately fail as "command not found" must not
+/// auto-close the tab and lose the pane's resume metadata). A real shell
+/// dying this fast would be unusual on its own, so this threshold is
+/// deliberately generous rather than tuned tight -- `plans`/team guidance
+/// specifies "目安 3 秒以内" (~3s), which this matches exactly.
+pub(crate) const QUICK_EXIT_GRACE: Duration = Duration::from_secs(3);
 
 /// Accent color for the focused pane's frame border.
 const FOCUS_BORDER_COLOR: u32 = theme::ACCENT;
@@ -367,6 +378,16 @@ pub struct PaneRuntime {
     /// reason as `last_size`/`last_bounds` above (see `motion::
     /// status_dot_element`'s doc comment for the full mechanism).
     pub dot_anim: Cell<DotAnimState>,
+    /// When this pane's session was spawned (`Instant::now()` at
+    /// [`insert_runtime`] call time) -- `LaboLaboApp::remove_pane` reads
+    /// this to tell a spawn that failed almost immediately (e.g. `sh:
+    /// claude: command not found` under a Dock/Finder launch's minimal
+    /// `PATH`, see `app::resolve_claude_resume_command`'s doc comment) apart
+    /// from a normal exit long after the pane was actually used, so it can
+    /// keep the tab (and its resume metadata) around instead of silently
+    /// auto-closing it -- see that method's doc comment for the full
+    /// rationale.
+    pub spawned_at: Instant,
     /// Keeps the redraw-bridge task alive for the pane's lifetime; dropping
     /// it (on pane close) is the signal the bridge thread uses to stop.
     _redraw_task: GpuiTask<()>,
@@ -570,6 +591,7 @@ pub fn insert_runtime(
             pending_scroll: 0.0,
             pane_uuid,
             dot_anim: Cell::new(DotAnimState::default()),
+            spawned_at: Instant::now(),
             _redraw_task: redraw_task,
         },
     );

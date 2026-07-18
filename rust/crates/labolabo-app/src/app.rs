@@ -52,6 +52,7 @@ use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use gpui::{
     actions, div, point, prelude::*, px, rgb, size, Bounds, ClipboardItem, Context, DragMoveEvent,
@@ -61,10 +62,11 @@ use gpui::{
 };
 
 use labolabo_core::{
-    claude_resume_command, cross_session_conflicts, quote_dropped_paths, reorder_task_ids,
-    shell_quote, AgentBindings, AgentStatus, AgentStatusEvent, AgentUsage, ControlCommand,
-    ControlResponse, DropEdge, PaneId, PaneItem, PaneKind, PaneTilingModel, Task, TaskDatabase,
-    TaskKind, TaskStatus, TileNode, TileOrientation,
+    claude_resume_command, claude_resume_command_with_binary, cross_session_conflicts,
+    quote_dropped_paths, reorder_task_ids, shell_quote, AgentBindings, AgentStatus,
+    AgentStatusEvent, AgentUsage, ControlCommand, ControlResponse, DropEdge, PaneId, PaneItem,
+    PaneKind, PaneTilingModel, Task, TaskDatabase, TaskKind, TaskStatus, TileNode, TileOrientation,
+    ToolLocating, ToolLocator,
 };
 use labolabo_term::{ColorScheme, Terminal};
 use rust_i18n::t;
@@ -371,6 +373,42 @@ pub(crate) struct PreeditState {
     pub(crate) task_id: String,
     pub(crate) pane_id: PaneId,
     pub(crate) text: String,
+}
+
+/// The resume-at-spawn launch command for `resume_id` (see
+/// `LaboLaboApp::spawn_runtime_for_task`'s doc comment): `claude_resume_
+/// command_with_binary` against `locator`'s resolved absolute path for
+/// `claude`, or the bare-name `claude_resume_command` if `locator` can't
+/// find one (matches this crate's existing degrade-to-bare-name behavior
+/// for other external tools -- e.g. `pr_status::RealGhPrLister` degrading
+/// to "no PR info" when `gh` isn't found, rather than failing outright).
+///
+/// Takes `locator: &dyn ToolLocating` (not the real `ToolLocator`
+/// directly) so tests can inject a fake resolver instead of depending on
+/// the calling machine's actual `PATH`/install layout -- same rationale as
+/// `tool_locator::ToolLocating`'s own doc comment and `pr_status::
+/// GhPrLister`'s trait-injected `gh` lookup.
+fn resolve_claude_resume_command(locator: &dyn ToolLocating, resume_id: Option<&str>) -> String {
+    match locator.locate("claude") {
+        Some(path) => claude_resume_command_with_binary(&path.to_string_lossy(), resume_id),
+        None => claude_resume_command(resume_id),
+    }
+}
+
+/// Whether a pane's child exiting counts as a "quick" exit for
+/// `LaboLaboApp::remove_pane`'s tab-preservation special case (see that
+/// method's doc comment) -- `!shutdown_child` (a natural exit, not a user-
+/// driven "x"/Cmd+W) and `elapsed_since_spawn` under `task_workspace::
+/// QUICK_EXIT_GRACE`.
+///
+/// Pulled out of `remove_pane` as its own pure function specifically to be
+/// unit-testable: `remove_pane` itself takes `&mut self` and `Context<Self>`
+/// (this crate has no gpui end-to-end test harness to drive that with), but
+/// this threshold comparison -- the one part of the new behavior with real
+/// off-by-one risk -- has no such dependency once the elapsed duration is
+/// passed in rather than computed from `Instant::now()` here.
+fn is_quick_exit(shutdown_child: bool, elapsed_since_spawn: Duration) -> bool {
+    !shutdown_child && elapsed_since_spawn < task_workspace::QUICK_EXIT_GRACE
 }
 
 impl LaboLaboApp {
@@ -1793,7 +1831,17 @@ impl LaboLaboApp {
     ///   ready yet" race that approach has to guard against). Gated on
     ///   `self.settings.auto_resume_enabled` (`plans` wave 5i §3's settings
     ///   screen) -- when disabled, every pane spawns a plain shell
-    ///   regardless of what's recorded, app-wide rather than per-call.
+    ///   regardless of what's recorded, app-wide rather than per-call. The
+    ///   `claude` this spawns is resolved to an absolute path via
+    ///   [`resolve_claude_resume_command`]/[`ToolLocator`] rather than left
+    ///   as a bare name: this command runs as `/bin/sh -c "<command>"`
+    ///   (`TermSession::spawn_with_scrollback_options`), which only sees
+    ///   *this process's own* inherited `PATH` -- for a Dock/Finder-launched
+    ///   GUI app that's `launchd`'s minimal default
+    ///   (`/usr/bin:/bin:/usr/sbin:/sbin`), under which a bare `claude`
+    ///   (typically installed under `~/.local/bin` or Homebrew) fails with
+    ///   "command not found" even though a real terminal session would find
+    ///   it fine.
     /// - **Scrollback cap**: every pane spawns with
     ///   `self.settings.scrollback_lines` (`plans` wave 5i §3), not the VT
     ///   backends' own hardcoded default -- see `labolabo_term::TermSession::
@@ -1840,8 +1888,9 @@ impl LaboLaboApp {
                     .as_deref()
                     .map(|path| Path::new(path).exists())
                     .unwrap_or(false);
-                pane.is_resumable(transcript_exists)
-                    .then(|| claude_resume_command(pane.agent_session_id.as_deref()))
+                pane.is_resumable(transcript_exists).then(|| {
+                    resolve_claude_resume_command(&ToolLocator, pane.agent_session_id.as_deref())
+                })
             })
         });
 
@@ -2361,6 +2410,23 @@ impl LaboLaboApp {
     ///   be closed normally. Auto-respawning a fresh shell into the dead
     ///   pane was deliberately not done: an immediately-exiting shell (bad
     ///   `$SHELL`, broken rc file) would respawn-loop with no way to stop.
+    /// - A natural exit within `task_workspace::QUICK_EXIT_GRACE` (~3s) of
+    ///   spawn is treated the same as the last-pane case above -- runtime
+    ///   dropped, pane kept as a recoverable anchor -- **even when it isn't
+    ///   the Task's last pane**, instead of the ordinary not-last-pane path
+    ///   below's `PaneTilingModel::close`. This matters because `close`
+    ///   drops the `PaneItem` (and with it its `agent_session_id`/
+    ///   `agent_transcript_path`) from the tree entirely: an exit this fast
+    ///   is the signature of a spawn that failed outright -- most notably
+    ///   `sh: claude: command not found` when a Dock/Finder-launched app's
+    ///   resume-at-spawn `claude` can't be found under `launchd`'s minimal
+    ///   `PATH` (see `resolve_claude_resume_command`'s doc comment) -- not a
+    ///   shell that actually ran and was later closed by the user, so
+    ///   auto-closing the tab here would silently and permanently lose the
+    ///   very resume target the pane was trying to resume. A **user**-
+    ///   driven close (`shutdown_child: true`) is exempt from this check --
+    ///   an explicit "x"/Cmd+W always closes the tab, even one that just
+    ///   quick-exited.
     fn remove_pane(
         &mut self,
         task_id: &str,
@@ -2376,9 +2442,13 @@ impl LaboLaboApp {
         }
         let is_last_pane_in_task = workspace.model.panes().len() == 1;
         let was_focused = workspace.focused_pane == pane_id;
+        let quick_exit = workspace
+            .runtimes
+            .get(&pane_id)
+            .is_some_and(|runtime| is_quick_exit(shutdown_child, runtime.spawned_at.elapsed()));
 
-        if is_last_pane_in_task {
-            if self.tasks.len() == 1 {
+        if is_last_pane_in_task || quick_exit {
+            if is_last_pane_in_task && self.tasks.len() == 1 {
                 // Quit path: tear the runtime down (signaling the child on a
                 // user-driven close) and quit, like wave 5b-2.
                 if let Some(workspace) = self.workspaces.get_mut(task_id) {
@@ -2393,13 +2463,18 @@ impl LaboLaboApp {
                 cx.quit();
                 return;
             }
-            if shutdown_child {
+            if is_last_pane_in_task && shutdown_child {
                 // User close of a Task's last pane: refused (see doc
                 // comment). The shell was not signaled and keeps running.
                 return;
             }
-            // Natural exit of a Task's last pane's shell: drop the dead
-            // runtime, keep the pane as a recoverable anchor.
+            // Natural exit of a Task's last pane's shell, or a quick-exit
+            // (near-certain spawn failure) of any pane: drop the dead
+            // runtime, keep the pane as a recoverable anchor -- see doc
+            // comment. Note `quick_exit` already implies `!shutdown_child`,
+            // so a user-driven close of a non-last pane never lands here --
+            // it always falls through to the ordinary close-from-tree path
+            // below, same as before this case was added.
             if let Some(workspace) = self.workspaces.get_mut(task_id) {
                 workspace.pane_status.remove(&pane_id);
                 if let Some(runtime) = workspace.runtimes.remove(&pane_id) {
@@ -4903,6 +4978,78 @@ fn render_missing_task_placeholder(task: &Task, cx: &mut Context<LaboLaboApp>) -
 mod tests {
     use super::*;
     use labolabo_core::TileLayout;
+
+    // MARK: - resolve_claude_resume_command (Dock/Finder-launch minimal-PATH
+    // resume fix)
+
+    /// A [`ToolLocating`] fake that always resolves (or always fails to
+    /// resolve) to a fixed path, so these tests don't depend on the test
+    /// machine's actual `PATH`/install layout.
+    struct FakeToolLocator(Option<&'static str>);
+
+    impl ToolLocating for FakeToolLocator {
+        fn locate(&self, _name: &str) -> Option<PathBuf> {
+            self.0.map(PathBuf::from)
+        }
+    }
+
+    #[test]
+    fn resolve_claude_resume_command_uses_resolved_absolute_path_when_found() {
+        let locator = FakeToolLocator(Some("/opt/homebrew/bin/claude"));
+        assert_eq!(
+            resolve_claude_resume_command(&locator, Some("sess-42")),
+            "'/opt/homebrew/bin/claude' --resume 'sess-42'"
+        );
+    }
+
+    #[test]
+    fn resolve_claude_resume_command_falls_back_to_bare_claude_when_not_found() {
+        let locator = FakeToolLocator(None);
+        assert_eq!(
+            resolve_claude_resume_command(&locator, Some("sess-42")),
+            "claude --resume 'sess-42'"
+        );
+    }
+
+    #[test]
+    fn resolve_claude_resume_command_with_no_resume_id() {
+        assert_eq!(
+            resolve_claude_resume_command(&FakeToolLocator(Some("/usr/local/bin/claude")), None),
+            "'/usr/local/bin/claude'"
+        );
+        assert_eq!(
+            resolve_claude_resume_command(&FakeToolLocator(None), Some("")),
+            "claude"
+        );
+    }
+
+    // MARK: - is_quick_exit (spawn-failure tab-preservation gate, see
+    // `LaboLaboApp::remove_pane`'s doc comment)
+
+    #[test]
+    fn is_quick_exit_true_for_a_natural_exit_well_within_the_grace_window() {
+        assert!(is_quick_exit(false, Duration::from_millis(1)));
+        assert!(is_quick_exit(false, Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn is_quick_exit_false_once_the_grace_window_has_elapsed() {
+        assert!(!is_quick_exit(
+            false,
+            task_workspace::QUICK_EXIT_GRACE + Duration::from_millis(1)
+        ));
+        // The boundary itself (`elapsed == GRACE`) is exclusive -- "under",
+        // not "under or equal to", matches `is_quick_exit`'s `<` comparison.
+        assert!(!is_quick_exit(false, task_workspace::QUICK_EXIT_GRACE));
+    }
+
+    #[test]
+    fn is_quick_exit_false_for_a_user_driven_close_no_matter_how_fast() {
+        // A user's "x"/Cmd+W (`shutdown_child: true`) always closes the tab
+        // normally, even one that would otherwise look like a quick exit.
+        assert!(!is_quick_exit(true, Duration::from_millis(1)));
+        assert!(!is_quick_exit(true, Duration::ZERO));
+    }
 
     // MARK: - compute_task_conflicts (cross-session conflict detection,
     // `plans` wave 5i §2)

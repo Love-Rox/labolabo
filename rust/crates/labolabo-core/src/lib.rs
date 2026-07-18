@@ -203,8 +203,9 @@ pub mod branch_naming;
 pub mod hook_settings;
 
 pub use hook_settings::{
-    claude_resume_command, hook_command, hook_pipe_name_from_uuid, merge_hooks,
-    quote_dropped_paths, shell_quote, socket_path_from_uuid, MergedSettings, HOOK_EVENTS,
+    claude_resume_command, claude_resume_command_with_binary, hook_command,
+    hook_pipe_name_from_uuid, merge_hooks, quote_dropped_paths, shell_quote, socket_path_from_uuid,
+    MergedSettings, HOOK_EVENTS,
 };
 
 // `store::agent_bindings`: the Task-level (docs/hooks-protocol.md §6(a))
