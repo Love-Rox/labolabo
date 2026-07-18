@@ -403,4 +403,428 @@ mod tests {
         let bytes = b"hello \x1b[31mred\x1b[0m world\r\n".to_vec();
         assert!(scan_whole(&bytes).is_empty());
     }
+
+    // MARK: - CAN/SUB and 8-bit C1 handling
+    //
+    // Real xterm-family terminals treat CAN (0x18) and SUB (0x1A) as
+    // aborting whatever OSC/DCS/... string is in progress. This scanner
+    // deliberately does *not* special-case either byte (see `State::Osc`'s
+    // `step` match: neither appears as a distinct arm, so both are just
+    // buffered like any other payload byte, or silently dropped once
+    // `OscOverflow` is reached). The tests below -- plus the fuzz/soak test
+    // further down -- exist to pin down whether that difference from real
+    // VT behavior can ever cost this scanner a *later*, well-formed OSC 52
+    // it should have found (the failure mode a stuck/wedged scanner would
+    // produce). It cannot: every state this module's `step` function can be
+    // in reacts to a fresh `ESC` byte *before* any other per-state check
+    // (including the `OscOverflow` length gate), and `esc_transition`
+    // always turns a following `]` into a brand new, empty `State::Osc`
+    // buffer -- so a literal `ESC ] 52;...` occurring anywhere in the byte
+    // stream, no matter what preceded it (including an in-flight CAN/SUB-
+    // laden unterminated OSC), is always recognized. These tests encode
+    // that invariant as regression coverage; the fuzz test below stress-
+    // tests it at scale instead of just these handful of hand-picked
+    // shapes.
+
+    #[test]
+    fn can_byte_inside_an_unterminated_osc_does_not_block_the_next_real_osc52() {
+        // "ESC ] 0 ; <CAN byte, never a terminator>", no BEL/ST at all --
+        // then a real OSC 52 starts immediately after. A real xterm would
+        // have aborted the OSC 0 the instant it saw CAN; this scanner
+        // instead just keeps buffering CAN as an ordinary payload byte
+        // until the *next* `ESC` -- which is exactly the `ESC` that starts
+        // the real OSC 52 below, so it's still found correctly.
+        let mut bytes = b"\x1b]0;".to_vec();
+        bytes.push(0x18); // CAN
+        bytes.extend_from_slice(b"more bogus title text, still never terminated");
+        bytes.extend(osc52_bel("c", "after an embedded CAN"));
+        assert_eq!(
+            scan_whole(&bytes),
+            vec!["after an embedded CAN".to_string()]
+        );
+    }
+
+    #[test]
+    fn sub_byte_inside_an_unterminated_osc_does_not_block_the_next_real_osc52() {
+        let mut bytes = b"\x1b]8;;http://example.invalid/".to_vec();
+        bytes.push(0x1A); // SUB
+        bytes.extend_from_slice(b"still no terminator");
+        bytes.extend(osc52_st("c", "after an embedded SUB"));
+        assert_eq!(
+            scan_whole(&bytes),
+            vec!["after an embedded SUB".to_string()]
+        );
+    }
+
+    #[test]
+    fn can_and_sub_bytes_do_not_desync_a_run_of_several_real_osc52s() {
+        // A denser version of the two tests above: CAN/SUB scattered both
+        // inside and between several genuine OSC 52 sequences, none of
+        // which should be lost or corrupted by the stray bytes.
+        let mut bytes = Vec::new();
+        bytes.push(0x18);
+        bytes.extend(osc52_bel("c", "first"));
+        bytes.push(0x1A);
+        bytes.extend_from_slice(b"\x1b]133;A"); // unterminated shell-integration OSC
+        bytes.push(0x18);
+        bytes.extend(osc52_st("c", "second"));
+        bytes.push(0x1A);
+        bytes.push(0x18);
+        bytes.extend(osc52_bel("c", "third"));
+        assert_eq!(
+            scan_whole(&bytes),
+            vec![
+                "first".to_string(),
+                "second".to_string(),
+                "third".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn c1_8bit_osc_introducer_is_ignored_and_does_not_desync_a_following_real_osc52() {
+        // 0x9D is the single-byte C1 form of the OSC introducer (`ESC ]`'s
+        // 8-bit equivalent). This scanner only recognizes the 7-bit `ESC ]`
+        // form, so a bare 0x9D followed by what *looks* like a clipboard-set
+        // body must be ignored outright (never fires, and the "52;c;...''
+        // text is simply Ground-state noise) -- then a real 7-bit OSC 52
+        // right after must still be found.
+        let mut bytes = vec![0x9D];
+        bytes.extend_from_slice(b"52;c;aGVsbG8=\x07"); // would decode to "hello" if 0x9D counted
+        bytes.extend(osc52_bel("c", "after a C1 OSC introducer"));
+        let found = scan_whole(&bytes);
+        assert_eq!(found, vec!["after a C1 OSC introducer".to_string()]);
+    }
+
+    #[test]
+    fn c1_8bit_st_terminator_is_ignored_inside_a_payload_and_scanner_recovers() {
+        // 0x9C is the single-byte C1 form of ST (`ESC \`'s 8-bit
+        // equivalent). Embedded inside an otherwise well-formed OSC 52
+        // payload, it must *not* terminate the sequence -- this scanner
+        // only recognizes the 7-bit `ESC \` (or bare BEL) forms. The 0x9C
+        // byte ends up as literal (invalid-base64) payload content, so this
+        // one sequence correctly fails to decode -- but the real BEL later
+        // in the same buffered payload still finds it, and the scanner
+        // still recovers cleanly for whatever comes after.
+        let mut bytes = b"\x1b]52;c;aGVsbG8=".to_vec();
+        bytes.push(0x9C); // inert -- not a recognized terminator
+        bytes.extend_from_slice(b"aGVsbG8=\x07"); // now-corrupted payload, BEL-terminated
+        bytes.extend(osc52_bel("c", "recovered after a C1 ST byte"));
+        let found = scan_whole(&bytes);
+        assert_eq!(found, vec!["recovered after a C1 ST byte".to_string()]);
+    }
+
+    // MARK: - Overflow-boundary self-healing
+    //
+    // `State::Osc`'s `step` arm checks `byte == ESC` *before* the
+    // `buf.len() >= MAX_PAYLOAD_LEN` overflow gate, so an `ESC` byte is
+    // never one of the bytes silently discarded by that gate, regardless of
+    // how long the in-progress buffer already is. These tests place a real
+    // OSC 52 sequence's introducer at (and just around) the exact byte
+    // offset where an in-progress non-52 OSC would overflow, to pin that
+    // property down empirically rather than relying only on reading the
+    // match arms.
+
+    #[test]
+    fn real_osc52_starting_exactly_at_the_overflow_boundary_is_still_found() {
+        for pad in [
+            MAX_PAYLOAD_LEN - 1,
+            MAX_PAYLOAD_LEN,
+            MAX_PAYLOAD_LEN + 1,
+            MAX_PAYLOAD_LEN + 2,
+        ] {
+            let mut bytes = b"\x1b]0;".to_vec();
+            bytes.extend(std::iter::repeat_n(b'x', pad));
+            bytes.extend(osc52_bel("c", "found past the overflow boundary"));
+            assert_eq!(
+                scan_whole(&bytes),
+                vec!["found past the overflow boundary".to_string()],
+                "pad={pad}"
+            );
+        }
+    }
+
+    // MARK: - Fuzz/soak: megabytes of adversarial noise around known-good
+    // markers
+    //
+    // No `rand` dependency -- a tiny, self-contained deterministic PRNG
+    // (fixed seeds) keeps this reproducible across runs/CI machines while
+    // still exercising far more shapes than the hand-written tests above.
+    mod fuzz {
+        use super::*;
+
+        /// A dependency-free xorshift64* PRNG. Not cryptographic -- only
+        /// used to generate test fixtures.
+        struct Rng(u64);
+
+        impl Rng {
+            fn new(seed: u64) -> Self {
+                Self(seed | 1) // avoid the all-zero fixed point
+            }
+
+            fn next_u64(&mut self) -> u64 {
+                let mut x = self.0;
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                self.0 = x;
+                x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+            }
+
+            fn next_u8(&mut self) -> u8 {
+                (self.next_u64() & 0xFF) as u8
+            }
+
+            /// Uniform-ish over `[0, bound)`. `0` if `bound == 0`.
+            fn below(&mut self, bound: usize) -> usize {
+                if bound == 0 {
+                    return 0;
+                }
+                (self.next_u64() % bound as u64) as usize
+            }
+        }
+
+        fn push_random_bytes(rng: &mut Rng, out: &mut Vec<u8>, n: usize) {
+            for _ in 0..n {
+                out.push(rng.next_u8());
+            }
+        }
+
+        /// A non-52 OSC left deliberately unterminated -- exercises the
+        /// long-buffering path without ever looking like a real
+        /// clipboard-set (`52` is never used as the OSC number here).
+        fn push_unterminated_osc(rng: &mut Rng, out: &mut Vec<u8>) {
+            const NUMBERS: [&str; 8] = ["0", "1", "2", "4", "7", "8", "9", "133"];
+            out.push(ESC);
+            out.push(b']');
+            out.extend_from_slice(NUMBERS[rng.below(NUMBERS.len())].as_bytes());
+            out.push(b';');
+            let len = rng.below(64);
+            push_random_bytes(rng, out, len);
+            // deliberately no terminator
+        }
+
+        /// A CSI fragment (`ESC [ <params> <final>`), fully valid and
+        /// self-terminating -- ordinary noise a shell prompt or `ls
+        /// --color` produces constantly.
+        fn push_csi_fragment(rng: &mut Rng, out: &mut Vec<u8>) {
+            out.push(ESC);
+            out.push(b'[');
+            let len = rng.below(6);
+            for _ in 0..len {
+                out.push(b'0' + (rng.next_u8() % 10));
+            }
+            const FINALS: &[u8] = b"mHJKABCD";
+            out.push(FINALS[rng.below(FINALS.len())]);
+        }
+
+        /// A byte that is never `ESC` -- used inside DCS/APC payload
+        /// filler below so each helper's own `ESC \` terminator stays
+        /// unambiguous (a coincidental embedded `ESC` is exercised plenty
+        /// by `push_unterminated_osc` and the raw random-byte filler
+        /// instead).
+        fn non_esc_byte(rng: &mut Rng) -> u8 {
+            let mut b = rng.next_u8();
+            while b == ESC {
+                b = rng.next_u8();
+            }
+            b
+        }
+
+        /// A DCS fragment (`ESC P ... ESC \`) -- a sequence family this
+        /// scanner doesn't special-case at all, collected as Ground-state
+        /// noise until its own terminator closes it.
+        fn push_dcs_fragment(rng: &mut Rng, out: &mut Vec<u8>) {
+            out.push(ESC);
+            out.push(b'P');
+            let len = rng.below(32);
+            for _ in 0..len {
+                out.push(non_esc_byte(rng));
+            }
+            out.push(ESC);
+            out.push(b'\\');
+        }
+
+        /// An APC fragment (`ESC _ ... ESC \`) -- same shape as DCS, a
+        /// different introducer.
+        fn push_apc_fragment(rng: &mut Rng, out: &mut Vec<u8>) {
+            out.push(ESC);
+            out.push(b'_');
+            let len = rng.below(32);
+            for _ in 0..len {
+                out.push(non_esc_byte(rng));
+            }
+            out.push(ESC);
+            out.push(b'\\');
+        }
+
+        /// A lone CAN (0x18) or SUB (0x1A) -- see this module's `mod
+        /// tests` doc comment block above for why these are deliberately
+        /// inert here.
+        fn push_can_or_sub(rng: &mut Rng, out: &mut Vec<u8>) {
+            out.push(if rng.next_u8() & 1 == 0 { 0x18 } else { 0x1A });
+        }
+
+        /// A bare 8-bit C1 OSC (0x9D) or ST (0x9C) byte -- never
+        /// recognized by this scanner (only the 7-bit `ESC ]`/`ESC \`
+        /// forms are).
+        fn push_c1_osc_or_st(rng: &mut Rng, out: &mut Vec<u8>) {
+            out.push(if rng.next_u8() & 1 == 0 { 0x9D } else { 0x9C });
+        }
+
+        /// A genuine OSC 52 clipboard-set, BEL- or ST-terminated (picked
+        /// by `rng`), with a payload unique enough (a marker index plus
+        /// Japanese text) that it can never collide with anything the
+        /// noise generators above could produce by chance.
+        fn push_real_osc52(rng: &mut Rng, out: &mut Vec<u8>, marker: usize) -> String {
+            let payload = format!("fuzz-marker-{marker}-日本語ペイロード-☃");
+            let bytes = if rng.next_u8() & 1 == 0 {
+                osc52_st("c", &payload)
+            } else {
+                osc52_bel("c", &payload)
+            };
+            out.extend_from_slice(&bytes);
+            payload
+        }
+
+        /// Feeds `bytes` to a fresh scanner in randomly sized chunks
+        /// (1..=4096 bytes each -- the worst case for a scanner that must
+        /// resume mid-sequence across `feed` calls), returning every
+        /// payload reported, in order.
+        fn scan_in_random_chunks(rng: &mut Rng, bytes: &[u8]) -> Vec<String> {
+            let mut scanner = Osc52Scanner::default();
+            let mut out = Vec::new();
+            let mut pos = 0;
+            while pos < bytes.len() {
+                let remaining = bytes.len() - pos;
+                let chunk = 1 + rng.below(remaining.min(4096));
+                scanner.feed(&bytes[pos..pos + chunk], |text| out.push(text));
+                pos += chunk;
+            }
+            out
+        }
+
+        /// Builds a stream of `noise_actions` random noise fragments
+        /// (random bytes, unterminated OSCs, CSI/DCS/APC fragments,
+        /// CAN/SUB, 8-bit C1 OSC/ST) with `marker_count` genuine OSC 52
+        /// sequences evenly interleaved throughout -- not all front- or
+        /// back-loaded -- returning `(stream, expected_payloads_in_order)`.
+        /// Guarantees exactly `marker_count` markers regardless of how the
+        /// randomness elsewhere falls (a trailing loop places any that
+        /// weren't reached by a checkpoint).
+        fn build_fuzz_stream(
+            rng: &mut Rng,
+            noise_actions: usize,
+            marker_count: usize,
+        ) -> (Vec<u8>, Vec<String>) {
+            let mut out = Vec::new();
+            let mut expected = Vec::new();
+            let mut placed = 0usize;
+            let interval = (noise_actions / marker_count.max(1)).max(1);
+            for step in 0..noise_actions {
+                match rng.below(7) {
+                    0 => {
+                        let n = 1 + rng.below(96);
+                        push_random_bytes(rng, &mut out, n);
+                    }
+                    1 => push_unterminated_osc(rng, &mut out),
+                    2 => push_csi_fragment(rng, &mut out),
+                    3 => push_dcs_fragment(rng, &mut out),
+                    4 => push_apc_fragment(rng, &mut out),
+                    5 => push_can_or_sub(rng, &mut out),
+                    _ => push_c1_osc_or_st(rng, &mut out),
+                }
+                if placed < marker_count && step % interval == interval - 1 {
+                    expected.push(push_real_osc52(rng, &mut out, placed));
+                    placed += 1;
+                }
+            }
+            while placed < marker_count {
+                expected.push(push_real_osc52(rng, &mut out, placed));
+                placed += 1;
+            }
+            (out, expected)
+        }
+
+        #[test]
+        fn fuzz_soak_finds_every_embedded_osc52_amid_megabytes_of_adversarial_noise() {
+            // Several independent seeds, each generating a several-MiB
+            // adversarial stream -- fixed seeds, so this is a reproducible
+            // regression test, not a flaky property test. Chunk sizes for
+            // feeding the scanner are themselves randomized (see
+            // `scan_in_random_chunks`), so a failure here is deterministic
+            // for its seed but the exact byte-batching that triggered it
+            // varies run to run only if the seed list below changes.
+            let mut failures = Vec::new();
+            for seed in [0x5EED_0001_u64, 0x5EED_0002, 0x5EED_0003] {
+                let mut rng = Rng::new(seed);
+                let (stream, expected) = build_fuzz_stream(&mut rng, 150_000, 1_500);
+                let found = scan_in_random_chunks(&mut rng, &stream);
+                if found != expected {
+                    // Report a diff instead of the full (huge) vectors --
+                    // first mismatching index plus counts, enough to
+                    // diagnose without dumping megabytes of test output.
+                    let first_mismatch = found
+                        .iter()
+                        .zip(expected.iter())
+                        .position(|(a, b)| a != b)
+                        .unwrap_or(found.len().min(expected.len()));
+                    failures.push(format!(
+                        "seed {seed:#x}: stream len {} bytes, found {} of {} expected markers, first mismatch at index {first_mismatch}",
+                        stream.len(),
+                        found.len(),
+                        expected.len()
+                    ));
+                }
+            }
+            assert!(
+                failures.is_empty(),
+                "scanner lost/misordered embedded OSC 52 sequences amid adversarial noise:\n{}",
+                failures.join("\n")
+            );
+        }
+
+        #[test]
+        fn fuzz_soak_survives_can_sub_heavy_noise_without_losing_markers() {
+            // A second run biased heavily toward CAN/SUB and C1 8-bit
+            // OSC/ST noise specifically (the two behaviors this scanner
+            // deliberately doesn't special-case, per this module's `mod
+            // tests` doc comment) -- the general-purpose fuzz above mixes
+            // these in at only ~2/7 of noise steps; this run makes them the
+            // overwhelming majority, maximizing the chance of surfacing any
+            // "next real OSC 52 gets lost" desync specifically attributable
+            // to them.
+            let mut rng = Rng::new(0xCA5B_0001);
+            let mut out = Vec::new();
+            let mut expected = Vec::new();
+            let noise_actions = 400_000;
+            let marker_count = 1_000;
+            let interval = noise_actions / marker_count;
+            let mut placed = 0usize;
+            for step in 0..noise_actions {
+                if rng.below(10) < 8 {
+                    push_can_or_sub(&mut rng, &mut out);
+                    push_c1_osc_or_st(&mut rng, &mut out);
+                } else {
+                    push_unterminated_osc(&mut rng, &mut out);
+                }
+                if placed < marker_count && step % interval == interval - 1 {
+                    expected.push(push_real_osc52(&mut rng, &mut out, placed));
+                    placed += 1;
+                }
+            }
+            while placed < marker_count {
+                expected.push(push_real_osc52(&mut rng, &mut out, placed));
+                placed += 1;
+            }
+            let found = scan_in_random_chunks(&mut rng, &out);
+            assert_eq!(
+                found,
+                expected,
+                "CAN/SUB/C1-heavy noise (stream len {}) lost or reordered an embedded OSC 52 -- \
+                 this would confirm the scanner *can* get stuck on this class of input",
+                out.len()
+            );
+        }
+    }
 }
