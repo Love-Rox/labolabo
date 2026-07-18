@@ -1339,17 +1339,19 @@ fn render_pane_tab_bar(
             // 統合ドット (`plans` 第16波 #2): 外輪=カスタム色・中の塗り=
             // 状態色。以前の「カスタム色 6px ドット」+「状態ドット」の
             // 2 個表示を統合 -- `sidebar.rs`のタスク行と同じ
-            // `motion::unified_dot_element`。
-            let dot_el = runtimes.get(&pane_id).and_then(|runtime| {
-                motion::unified_dot_element(
-                    format!("tab-dot-{task_id}-{pane_id:?}"),
-                    status_color,
-                    tab_color,
-                    is_running,
-                    breathing_enabled,
-                    &runtime.dot_anim,
-                )
-            });
+            // `motion::unified_dot_element`。`runtimes.get(&pane_id)` は
+            // Files/Diff/Commits 系タブ(PTY を持たないので `PaneRuntime`
+            // が無い)では `None` -- `dot_anim` 無しでも呼べる
+            // `unified_dot_element`(第16波follow-up)にそのまま `None` を
+            // 渡し、カスタム色の輪だけは同じく描けるようにする。
+            let dot_el = motion::unified_dot_element(
+                format!("tab-dot-{task_id}-{pane_id:?}"),
+                status_color,
+                tab_color,
+                is_running,
+                breathing_enabled,
+                runtimes.get(&pane_id).map(|runtime| &runtime.dot_anim),
+            );
             let usage_label: Option<SharedString> = pane_usage
                 .get(&pane_id)
                 .and_then(format_usage_compact)

@@ -227,26 +227,25 @@ pub fn group_tasks_by_repo(tasks: &[Task]) -> Vec<RepoGroup<'_>> {
 /// Task in the sidebar row -- the wave's "title + kind の別が分かる程度の
 /// 最小表示" bar, nothing more. Worktree gets the branch icon (第13波b §2,
 /// `crate::icons::Icon::Branch` -- previously the "⎇-ish" `\u{2387}`
-/// glyph); attached keeps its plain filled dot ("in place"), now drawn as a
-/// `div` circle rather than a Unicode `\u{25CF}` glyph so both arms render
-/// via the same explicit-`text_color` mechanism instead of mixing a font
-/// glyph with an SVG icon. `color` is passed in (rather than relying on the
-/// caller's ambient `.text_color(..)`) so this marker tracks the same
-/// missing/normal dimming its two call sites already apply to the rest of
-/// their row.
+/// glyph); attached gets [`Icon::Folder`] ("in place", a directory).
+///
+/// 第16波follow-up: attached used to draw a plain filled dot here, which
+/// (once 第16波 #2 added the unified status/color dot right next to it)
+/// visually doubled up as "two dots in a row" for every attached Task's
+/// row/tab -- exactly the "まだ白いドットと色付きの丸が別々に表示されて
+/// いる" feedback. Swapping it for the same kind of glyph [`Icon::Branch`]
+/// already is (a small SVG, not a dot) restores the "exactly one dot per
+/// row" contract the unified dot was supposed to establish.
+///
+/// `color` is passed in (rather than relying on the caller's ambient
+/// `.text_color(..)`) so this marker tracks the same missing/normal
+/// dimming its two call sites already apply to the rest of their row.
 fn kind_marker(kind: &TaskKind, color: u32) -> gpui::AnyElement {
-    match kind {
-        TaskKind::Worktree { .. } => {
-            icons::icon_colored(Icon::Branch, 11.0, color).into_any_element()
-        }
-        TaskKind::Attached { .. } => div()
-            .w(px(5.0))
-            .h(px(5.0))
-            .flex_shrink_0()
-            .rounded_full()
-            .bg(gpui::rgb(color))
-            .into_any_element(),
-    }
+    let icon = match kind {
+        TaskKind::Worktree { .. } => Icon::Branch,
+        TaskKind::Attached { .. } => Icon::Folder,
+    };
+    icons::icon_colored(icon, 11.0, color).into_any_element()
 }
 
 /// A small square icon button + native tooltip -- the sidebar's "start a
@@ -436,22 +435,28 @@ pub fn render(
             // 統合ドット (`plans` 第16波 #2): 外輪=カスタム色・中の塗り=
             // 状態色。以前は「状態ドット」と「カスタム色ドット」の 2 個を
             // 別々に描いていたが、`motion::unified_dot_element` に一本化 --
-            // 詳細はその doc コメント参照。
-            let dot_el = app.task_dot_anim(&task.id).and_then(|anim| {
-                motion::unified_dot_element(
-                    format!("sidebar-dot-{}", task.id),
-                    status_color,
-                    custom_color,
-                    is_running,
-                    breathing_enabled,
-                    anim,
-                )
-            });
-            // PR 状態バッジ (`plans` 第16波 #3): worktree タスクだけブランチ
-            // が分かるので対象。`gh` 未導入/未認証や PR 未作成は静かに
-            // バッジ非表示 -- `LaboLaboApp::task_pr_info`のキャッシュは
-            // "取得済みで PR なし"/"未取得"のどちらも`None`に潰れるので、
-            // ここでの分岐に違いは出ない(バッジを出さないだけ)。
+            // 詳細はその doc コメント参照。`app.task_dot_anim(&task.id)` は
+            // 一度も選択されていない Task(`TaskWorkspace` 未ロード)では
+            // `None` -- `dot_anim` 無しでも呼べる `unified_dot_element`
+            // (第16波follow-up の実バグ修正)にそのまま `None` を渡し、
+            // カスタム色の輪だけは(状態が無くても)描けるようにする。行内の
+            // 幅確保は呼び出し側(この下の `row` 構築)が無条件に行う。
+            let dot_el = motion::unified_dot_element(
+                format!("sidebar-dot-{}", task.id),
+                status_color,
+                custom_color,
+                is_running,
+                breathing_enabled,
+                app.task_dot_anim(&task.id),
+            );
+            // PR 状態バッジ (`plans` 第16波 #3、attached タスクへの対応は
+            // follow-up): worktree タスクは常にブランチが分かる、attached
+            // タスクは Git 状態取得済み(現在のチェックアウトブランチが
+            // 判明済み)なら対象 -- `LaboLaboApp::task_branch_for_pr_lookup`
+            // 参照。`gh` 未導入/未認証・PR 未作成・ブランチ未取得はすべて
+            // 静かにバッジ非表示 -- `LaboLaboApp::task_pr_info`のキャッシュ
+            // は "取得済みで PR なし"/"未取得" のどちらも `None` に潰れる
+            // ので、ここでの分岐に違いは出ない(バッジを出さないだけ)。
             let pr_info = app.task_pr_info(&task.id).cloned();
             // 使用量 (第16波 #4: 行右端に集約表示) -- タブチップ側の
             // `format_usage_compact` をそのまま再利用し、複数タブぶんを
@@ -618,10 +623,13 @@ pub fn render(
                 // 統合ドット (`plans` 第16波 #2): 外輪=カスタム色/中の塗り=
                 // 状態色を 1 個で表現する(以前の「カスタム色 6px ドット」+
                 // 「状態ドット」の 2 個表示はここで統合・廃止)。
-                // `motion::DOT_RING_SIZE` 固定の枠に中央揃え -- 輪の有無で
-                // 行内の占有幅がガタつかないよう、輪なしの行でも同じ枠を
-                // 確保する。
-                .children(dot_el.map(|el| {
+                // `motion::DOT_RING_SIZE` 固定の枠は**無条件に**確保する
+                // (第16波follow-up の実バグ修正 -- 以前は `dot_el` が
+                // `None`(未ロード Task)のときこの枠ごと消え、カスタム色の
+                // 輪も行内の幅確保も失われてタイトルの開始位置が行ごとに
+                // ガタついていた)。枠の中身(`dot_el`)だけが Task ごとに
+                // 有無する。
+                .child(
                     div()
                         .w(px(motion::DOT_RING_SIZE))
                         .h(px(motion::DOT_RING_SIZE))
@@ -629,8 +637,8 @@ pub fn render(
                         .items_center()
                         .justify_center()
                         .flex_shrink_0()
-                        .child(el)
-                }))
+                        .children(dot_el),
+                )
                 // PR 状態バッジ (`plans` 第16波 #3): ドットのすぐ右、タイトル
                 // より前 -- 「行の左に状態・PR が凝縮される」情報密度の高い
                 // 並び (第16波 #4)。
@@ -760,6 +768,15 @@ pub fn render(
         .flex()
         .flex_col()
         .w(px(app.sidebar_width()))
+        // 第16波follow-up の実バグ修正: `content_row`(親、`app.rs`)は
+        // `.flex_row()` で sidebar/workspace/Git ペインを並べる -- `.w(..)`
+        // だけでは gpui のデフォルトの `flex_shrink: 1` が効き、ウィンドウ
+        // 幅が足りないと兄弟(ワークスペース側)に押されてこの `.w(..)` の
+        // 指定値より縮む(実測: `sidebarWidth=320` 保存時に起動直後
+        // 174px まで潰れる = `MIN_SIDEBAR_WIDTH`(180px)すら下回る)。
+        // `.flex_shrink_0()` で「サイドバーは指定幅を維持し、狭いウィンドウ
+        // ではワークスペース側が縮む」という意図どおりの挙動に固定する。
+        .flex_shrink_0()
         .h_full()
         .bg(rgb(theme::surface::SUNKEN))
         .border_1()

@@ -352,9 +352,9 @@ pub fn unified_dot_params(
 /// 幅の輪を追加で描く、`task_workspace.rs`/`sidebar.rs` 共用のヘルパー
 /// (`plans` 第16波 #2)。
 ///
-/// - カスタム色が無ければ [`status_dot_element`] の結果をそのまま返す
-///   (輪の分のラッパーすら作らない -- 色未設定タスクは第16波以前と
-///   完全に同じ描画・同じコスト)。
+/// - カスタム色が無ければ [`status_dot_element`]/[`static_dot_fill`] の
+///   結果をそのまま返す(輪の分のラッパーすら作らない -- 色未設定タスクは
+///   第16波以前と完全に同じ描画・同じコスト)。
 /// - カスタム色があれば、中の塗りが `None`(= まだ一度も状態が付いたことが
 ///   ない)であっても輪だけは必ず描く -- 「状態 None かつ色ありはリングの
 ///   み(中は透明)」という設計どおり、中身は単に何も描かない(背景を
@@ -362,22 +362,39 @@ pub fn unified_dot_params(
 /// - 呼吸(M2)は中の塗り(`status_dot_element`)にだけ掛かる -- 輪は
 ///   `.border_color`の静的な style で、`with_animation` の対象外(呼び出し
 ///   側が追加のアニメーションを組む必要はない)。
+///
+/// `anim` は `Option` (第16波follow-up の実バグ修正): 一度も選択されて
+/// いない Task は `TaskWorkspace` 自体が無く、`app::LaboLaboApp::
+/// task_dot_anim` は `None` を返す -- これまではその場合 `dot_el` ごと
+/// `None` になり、カスタム色の輪も行内の幅確保も消えて他行とタイトルの
+/// 開始位置がガタつく実バグがあった。`anim` が `None` の間は
+/// [`status_dot_element`]のクロスフェード/呼吸を使わず
+/// [`static_dot_fill`]の単発描画にフォールバックする(状態が変わった
+/// 瞬間の色遷移アニメーションは、そもそもまだロードされていない
+/// Task には無縁なので、フォールバックしても実害は無い)ことで、
+/// カスタム色の輪だけは(状態が無くても)従来どおり描ける。行内の幅
+/// 確保自体は呼び出し側(`sidebar.rs`/`task_workspace.rs`)が
+/// [`DOT_RING_SIZE`]固定の枠を**無条件に**確保する側の責務 -- この関数の
+/// 戻り値が `None` でも枠だけは残る。
 pub fn unified_dot_element(
     id_base: impl std::fmt::Display,
     status_color: Option<u32>,
     custom_color: Option<u32>,
     is_running: bool,
     breathing_enabled: bool,
-    anim: &Cell<DotAnimState>,
+    anim: Option<&Cell<DotAnimState>>,
 ) -> Option<AnyElement> {
     let params = unified_dot_params(status_color, custom_color);
-    let fill_el = status_dot_element(
-        id_base,
-        params.fill_target,
-        is_running,
-        breathing_enabled,
-        anim,
-    );
+    let fill_el = match anim {
+        Some(anim) => status_dot_element(
+            id_base,
+            params.fill_target,
+            is_running,
+            breathing_enabled,
+            anim,
+        ),
+        None => static_dot_fill(params.fill_target),
+    };
     let Some(ring_color) = params.ring_color else {
         return fill_el;
     };
@@ -395,6 +412,23 @@ pub fn unified_dot_element(
             .children(fill_el)
             .into_any_element(),
     )
+}
+
+/// A plain, unanimated [`STATUS_DOT_SIZE`] fill dot at `target`'s color --
+/// [`unified_dot_element`]'s fallback when there's no live [`DotAnimState`]
+/// to crossfade/breathe against (see that function's doc comment for when
+/// this is reached). `None` (no element at all, same as
+/// [`status_dot_element`]'s own "nothing observed yet" case) when `target`
+/// itself is `None`.
+fn static_dot_fill(target: Option<u32>) -> Option<AnyElement> {
+    target.map(|color| {
+        div()
+            .w(px(STATUS_DOT_SIZE))
+            .h(px(STATUS_DOT_SIZE))
+            .rounded_full()
+            .bg(rgb(color))
+            .into_any_element()
+    })
 }
 
 #[cfg(test)]

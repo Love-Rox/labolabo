@@ -3976,17 +3976,42 @@ impl LaboLaboApp {
         }
     }
 
-    /// Kicks off a background `gh pr list` fetch for `task_id`'s branch
-    /// (`plans` 第16波 #3, `crate::pr_status`), throttled to at most once
-    /// per `pr_status::REFRESH_INTERVAL` per Task (`pr_status::
-    /// should_refresh`) -- called from `select_task` and `apply_git_refresh`
-    /// (see those call sites), never from a bare timer, so a Task that's
-    /// never selected/refreshed never spends a background thread on this.
-    /// A no-op for: an `Attached`-kind Task (no branch to look up), a repo
-    /// whose `repo_name` doesn't look like a GitHub `owner/repo` slug
-    /// (`pr_status::looks_like_github_slug` -- avoids a doomed `gh` spawn
-    /// for a Task with no GitHub remote at all), or while a fetch for this
-    /// Task is already in flight (`pr_fetch_in_flight`).
+    /// `task_id`'s current branch, for [`Self::maybe_refresh_pr_status`]'s
+    /// `gh pr list --head <branch>` lookup: a `worktree`-kind Task's own
+    /// `TaskKind::Worktree::branch` (known unconditionally, it never
+    /// changes independent of Git state), or -- 第16波follow-up, extending
+    /// the PR badge to `attached`-kind Tasks too -- an `attached`-kind
+    /// Task's *currently checked-out* branch, read from the same
+    /// already-fetched `TaskWorkspace::git.status.branch` the titlebar pill
+    /// and Git pane's own branch bar already display. `None` whenever that
+    /// isn't known yet (workspace never loaded, or its first Git refresh
+    /// hasn't landed) -- the PR badge simply stays hidden until it is,
+    /// exactly like it already does for a worktree Task with no fetched PR.
+    fn task_branch_for_pr_lookup(&self, task_id: &str, task: &Task) -> Option<String> {
+        match &task.kind {
+            TaskKind::Worktree { branch, .. } => Some(branch.clone()),
+            TaskKind::Attached { .. } => self
+                .workspaces
+                .get(task_id)
+                .and_then(|w| w.git.status.as_ref())
+                .and_then(|status| status.branch.as_deref())
+                .map(str::to_string),
+        }
+    }
+
+    /// Kicks off a background `gh pr list` fetch for `task_id`'s current
+    /// branch (`plans` 第16波 #3, `crate::pr_status`;
+    /// [`Self::task_branch_for_pr_lookup`] resolves it for both Task
+    /// kinds), throttled to at most once per `pr_status::
+    /// REFRESH_INTERVAL` per Task (`pr_status::should_refresh`) -- called
+    /// from `select_task` and `apply_git_refresh` (see those call sites),
+    /// never from a bare timer, so a Task that's never selected/refreshed
+    /// never spends a background thread on this. A no-op for: a Task with
+    /// no currently-known branch yet (see `task_branch_for_pr_lookup`'s doc
+    /// comment), a repo whose `repo_name` doesn't look like a GitHub
+    /// `owner/repo` slug (`pr_status::looks_like_github_slug` -- avoids a
+    /// doomed `gh` spawn for a Task with no GitHub remote at all), or while
+    /// a fetch for this Task is already in flight (`pr_fetch_in_flight`).
     pub(crate) fn maybe_refresh_pr_status(&mut self, task_id: &str, cx: &mut Context<Self>) {
         if self.pr_fetch_in_flight.contains(task_id) {
             return;
@@ -3994,12 +4019,12 @@ impl LaboLaboApp {
         let Some(task) = self.tasks.iter().find(|t| t.id == task_id) else {
             return;
         };
-        let TaskKind::Worktree { branch, .. } = &task.kind else {
-            return;
-        };
         if !pr_status::looks_like_github_slug(&task.repo_name) {
             return;
         }
+        let Some(branch) = self.task_branch_for_pr_lookup(task_id, task) else {
+            return;
+        };
         let now = std::time::Instant::now();
         let elapsed = self
             .pr_cache
@@ -4010,7 +4035,6 @@ impl LaboLaboApp {
         }
 
         self.pr_fetch_in_flight.insert(task_id.to_string());
-        let branch = branch.clone();
         let repo = task.repo_name.clone();
         let task_id = task_id.to_string();
         cx.spawn(async move |this, cx| {

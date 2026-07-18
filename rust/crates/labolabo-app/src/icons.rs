@@ -49,6 +49,11 @@ pub enum Icon {
     Plus,
     /// "⎇" replacement -- worktree Task kind marker, Git pane branch bar.
     Branch,
+    /// `sidebar::kind_marker`'s attached-Task counterpart to [`Icon::Branch`]
+    /// (`plans` 第16波follow-up: replaces a plain filled dot, which visually
+    /// doubled up with the unified status/color dot right next to it --
+    /// see that function's doc comment).
+    Folder,
     /// "⚠" replacement -- sidebar cross-session conflict badge.
     Warning,
     /// "∅" replacement -- sidebar missing-worktree badge.
@@ -87,6 +92,7 @@ impl Icon {
         match self {
             Icon::Plus => "icons/plus.svg",
             Icon::Branch => "icons/branch.svg",
+            Icon::Folder => "icons/folder.svg",
             Icon::Warning => "icons/warning.svg",
             Icon::NotFound => "icons/not-found.svg",
             Icon::Chevron => "icons/chevron.svg",
@@ -108,9 +114,10 @@ impl Icon {
     /// an exact variant), hence the `allow` -- a real, documented part of
     /// this type's API, not dead code to delete.
     #[allow(dead_code)]
-    pub const ALL: [Icon; 14] = [
+    pub const ALL: [Icon; 15] = [
         Icon::Plus,
         Icon::Branch,
+        Icon::Folder,
         Icon::Warning,
         Icon::NotFound,
         Icon::Chevron,
@@ -180,6 +187,7 @@ impl AssetSource for Assets {
         let bytes: &'static [u8] = match path {
             "icons/plus.svg" => include_bytes!("../icons/plus.svg"),
             "icons/branch.svg" => include_bytes!("../icons/branch.svg"),
+            "icons/folder.svg" => include_bytes!("../icons/folder.svg"),
             "icons/warning.svg" => include_bytes!("../icons/warning.svg"),
             "icons/not-found.svg" => include_bytes!("../icons/not-found.svg"),
             "icons/chevron.svg" => include_bytes!("../icons/chevron.svg"),
