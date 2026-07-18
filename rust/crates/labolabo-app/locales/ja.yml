@@ -56,6 +56,9 @@ settings:
   update_check:
     label: "アップデートを自動確認"
     footer: "起動時にバックグラウンドで新しいバージョンを確認します。"
+  prefer_local_selection:
+    label: "テキスト選択を優先（アプリへのマウス送信は Shift）"
+    footer: "マウス操作を捕捉するアプリ（Claude Code など）の中でも、通常のドラッグでこのアプリのテキスト選択を行い、⌘C でコピーできるようにします。アプリへマウス操作を送るには Shift を押しながら操作してください。"
 
 update:
   available:

@@ -203,19 +203,48 @@ pub fn encode_sgr(
 /// click/drag should be SGR-encoded and forwarded to the pane's PTY right
 /// now, instead of driving this app's own local text-selection behavior.
 /// Requires both an active tracking mode *and* SGR (DECSET `1006`) -- see
-/// this module's doc comment for why SGR-less tracking is out of scope --
-/// and Shift held forces local selection regardless of tracking, matching
-/// real Ghostty's own default `mouse-shift-capture` behavior (confirmed by
-/// reading the vendored Ghostty source's `Surface.zig`:
-/// `mouseButtonCallback` gates its mouse-report branch on
-/// `!(self.mouse.mods.shift and !self.mouseShiftCapture(false))`, and
-/// `mouse-shift-capture`'s own doc comment says its default value `false`
-/// means "the shift key is not sent with the mouse protocol and will
-/// extend the selection" -- i.e. Shift always wins locally unless the
-/// *user* explicitly reconfigures that default, which this app doesn't
-/// expose a setting for, so Shift always wins here).
-pub fn is_click_reporting_active(mouse_mode: MouseMode, shift_held: bool) -> bool {
-    mouse_mode.tracking.is_active() && mouse_mode.sgr && !shift_held
+/// this module's doc comment for why SGR-less tracking is out of scope.
+///
+/// The remaining tie-break between "forward to the child" and "local
+/// selection" depends on `prefer_local_selection`
+/// (`AppSettings::prefer_local_selection`, wave 20 -- "テキスト選択を優先"):
+///
+/// - `false` (default): Shift held forces local selection, otherwise a
+///   plain drag is forwarded. Matches real Ghostty's own default
+///   `mouse-shift-capture` behavior (confirmed by reading the vendored
+///   Ghostty source's `Surface.zig`: `mouseButtonCallback` gates its
+///   mouse-report branch on `!(self.mouse.mods.shift and
+///   !self.mouseShiftCapture(false))`, and `mouse-shift-capture`'s own doc
+///   comment says its default value `false` means "the shift key is not
+///   sent with the mouse protocol and will extend the selection").
+/// - `true`: inverted -- a plain drag is always local selection (so
+///   `⌘C`-after-drag works even inside a mouse-capturing full-screen
+///   program like Claude Code's own TUI), and Shift held is what forwards
+///   to the child instead. Opt-in because it's the opposite of Ghostty's
+///   own convention; see `AppSettings::prefer_local_selection`'s doc
+///   comment for why a whole-app toggle (rather than some smarter
+///   per-program heuristic) is what's offered.
+///
+/// Either way, an inactive tracking mode always means local selection --
+/// `prefer_local_selection` only changes which case wins when the child
+/// *has* requested mouse tracking, same as Shift already only mattered in
+/// that case.
+pub fn is_click_reporting_active(
+    mouse_mode: MouseMode,
+    shift_held: bool,
+    prefer_local_selection: bool,
+) -> bool {
+    if !(mouse_mode.tracking.is_active() && mouse_mode.sgr) {
+        return false;
+    }
+    if prefer_local_selection {
+        // Inverted: Shift is what forwards to the child now; a plain drag
+        // stays local.
+        shift_held
+    } else {
+        // Default: Shift forces local selection; a plain drag forwards.
+        !shift_held
+    }
 }
 
 /// Whether `mouse_mode` means a scroll-wheel/trackpad event should be
@@ -246,13 +275,15 @@ mod tests {
 
     #[test]
     fn click_reporting_requires_active_tracking_and_sgr() {
-        assert!(!is_click_reporting_active(MouseMode::OFF, false));
+        assert!(!is_click_reporting_active(MouseMode::OFF, false, false));
         assert!(!is_click_reporting_active(
             mode(MouseTracking::Normal, false),
+            false,
             false
         ));
         assert!(is_click_reporting_active(
             mode(MouseTracking::Normal, true),
+            false,
             false
         ));
     }
@@ -260,11 +291,41 @@ mod tests {
     #[test]
     fn click_reporting_is_overridden_by_shift() {
         let active = mode(MouseTracking::Any, true);
-        assert!(is_click_reporting_active(active, false));
+        assert!(is_click_reporting_active(active, false, false));
         assert!(
-            !is_click_reporting_active(active, true),
+            !is_click_reporting_active(active, true, false),
             "Shift held should force local selection even though tracking+SGR are active"
         );
+    }
+
+    /// The full 8-case truth table for [`is_click_reporting_active`]:
+    /// tracking (inactive/active) x Shift held x
+    /// `prefer_local_selection`. Pins the wave-20 "テキスト選択を優先"
+    /// inversion (an active tracking mode's Shift/report mapping flips
+    /// when the setting is on) alongside the two pre-existing facts the
+    /// tests above already cover individually: inactive tracking always
+    /// wins (regardless of Shift or the setting), and the setting itself
+    /// is inert whenever tracking is inactive.
+    #[test]
+    fn click_reporting_truth_table() {
+        let inactive = MouseMode::OFF;
+        let active = mode(MouseTracking::Any, true);
+
+        // Tracking inactive: never reports, no matter Shift or the setting.
+        assert!(!is_click_reporting_active(inactive, false, false));
+        assert!(!is_click_reporting_active(inactive, false, true));
+        assert!(!is_click_reporting_active(inactive, true, false));
+        assert!(!is_click_reporting_active(inactive, true, true));
+
+        // Tracking active, setting off (default Ghostty convention):
+        // Shift held forces local selection, a plain drag forwards.
+        assert!(is_click_reporting_active(active, false, false));
+        assert!(!is_click_reporting_active(active, true, false));
+
+        // Tracking active, setting on (inverted): a plain drag stays
+        // local, Shift held is what forwards to the child.
+        assert!(!is_click_reporting_active(active, false, true));
+        assert!(is_click_reporting_active(active, true, true));
     }
 
     #[test]

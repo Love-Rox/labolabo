@@ -517,6 +517,29 @@ impl TaskDatabase {
         self.set_app_state(version, Self::KEY_IGNORED_UPDATE_VERSION)
     }
 
+    // MARK: - App state (prefer local text selection, wave 20)
+    //
+    // One `appState` key backing "テキスト選択を優先" (settings screen):
+    // whether a plain click/drag over a mouse-tracking-aware program (e.g.
+    // Claude Code's own TUI) selects text locally instead of forwarding to
+    // that program -- see `labolabo-app::mouse_report::
+    // is_click_reporting_active`'s doc comment for the full behavior.
+
+    /// `appState` key backing "テキスト選択を優先".
+    const KEY_PREFER_LOCAL_SELECTION: &'static str = "preferLocalSelection";
+
+    /// `None` if never set (caller should apply `false` -- Ghostty's own
+    /// convention, and this port's behavior before this setting existed).
+    pub fn prefer_local_selection(&self) -> StoreResult<Option<bool>> {
+        Ok(self
+            .app_state(Self::KEY_PREFER_LOCAL_SELECTION)?
+            .map(|v| v != "0"))
+    }
+
+    pub fn set_prefer_local_selection(&self, enabled: bool) -> StoreResult<()> {
+        self.set_app_state(Some(bool_flag(enabled)), Self::KEY_PREFER_LOCAL_SELECTION)
+    }
+
     // MARK: - App state (Swift-import confirmation prompt, 第8波d)
     //
     // One `appState` key backing `labolabo-app::import_prompt`'s first-launch
@@ -971,6 +994,18 @@ mod tests {
         assert_eq!(db.update_check_enabled().unwrap(), Some(false));
         db.set_update_check_enabled(true).unwrap();
         assert_eq!(db.update_check_enabled().unwrap(), Some(true));
+    }
+
+    // MARK: - App state (prefer local text selection, wave 20)
+
+    #[test]
+    fn prefer_local_selection_defaults_to_none_until_set() {
+        let db = TaskDatabase::open_in_memory().unwrap();
+        assert_eq!(db.prefer_local_selection().unwrap(), None);
+        db.set_prefer_local_selection(true).unwrap();
+        assert_eq!(db.prefer_local_selection().unwrap(), Some(true));
+        db.set_prefer_local_selection(false).unwrap();
+        assert_eq!(db.prefer_local_selection().unwrap(), Some(false));
     }
 
     #[test]
