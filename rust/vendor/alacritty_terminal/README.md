@@ -31,9 +31,15 @@ uninterrupted `CSI > <flags> u` pushes with no intervening pop (`CSI < u`)
 build in this workspace that reaches this backend, including the default
 `backend-alacritty` feature and any release binary built from it.
 
-No upstream issue has been filed yet
-(https://github.com/alacritty/alacritty) -- that's a separate decision,
-not made as part of this patch.
+Upstream status (checked 2026-07-18): the exact bug was already reported as
+https://github.com/alacritty/alacritty/issues/8957 ("keyboard mode stack
+panic", same copy-paste diagnosis) and **closed by the maintainers** with
+"There's no point in trying to defend against a DOS from a malicious
+application." -- i.e. upstream knows and declines to fix. Don't re-file a
+duplicate; this vendored patch is expected to stay for as long as the
+`backend-alacritty` feature ships with `kitty_keyboard: true`. Re-check
+that issue (and the `title_stack.remove(0)` line, see below) when bumping
+the pinned version, in case upstream changes their mind.
 
 Everything else in this directory (`src/`, `Cargo.toml`, `LICENSE-APACHE`)
 is the unmodified published crate source, copied verbatim from
