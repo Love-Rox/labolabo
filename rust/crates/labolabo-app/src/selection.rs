@@ -140,8 +140,19 @@ pub fn selected_text(snapshot: &GridSnapshot, selection: &Selection) -> String {
 /// `row`'s text from `col_start` to `col_end` (both inclusive; callers
 /// guarantee `col_start <= col_end < snapshot.cols` and `row <
 /// snapshot.rows`), blank cells rendered as spaces and trailing whitespace
-/// trimmed -- the same convention as `GridSnapshot::row_text`, just
-/// column-bounded.
+/// trimmed -- mostly the same convention as `GridSnapshot::row_text`, just
+/// column-bounded, with one deliberate difference: a **wide-character
+/// spacer cell** (the empty cell the VT grid places after a
+/// display-width-2 grapheme -- CJK, emoji) is skipped instead of being
+/// rendered as a space. `CellSnapshot` carries no explicit spacer flag, so
+/// the spacer is inferred the same way the grid painter does: an empty
+/// cell immediately following a cell whose text has display width >= 2.
+/// Without this, copying 日本語 yields "日 本 語" (a stray half-width
+/// space after every wide character). Genuine blank cells (empty cell
+/// after a width-1 cell or another blank) still become spaces, preserving
+/// column alignment in copied output. `row_text` itself is left unchanged
+/// -- it is the backend tests' literal-grid representation, where the
+/// spacer column *should* stay visible.
 fn row_range_text(snapshot: &GridSnapshot, row: u16, col_start: u16, col_end: u16) -> String {
     if row >= snapshot.rows || col_start > col_end {
         return String::new();
@@ -151,14 +162,35 @@ fn row_range_text(snapshot: &GridSnapshot, row: u16, col_start: u16, col_end: u1
     let start = (row_base + col_start as usize).min(snapshot.cells.len());
     let end = (row_base + col_end as usize + 1).min(snapshot.cells.len());
     let mut out = String::new();
+    // A selection can start *on* a spacer cell (clicking the right half of
+    // a wide glyph), so the "previous cell was wide" state has to be seeded
+    // from the cell just left of the range, not assumed false.
+    let mut after_wide = start > row_base
+        && snapshot
+            .cells
+            .get(start - 1)
+            .is_some_and(|c| cell_is_wide(&c.text));
     for cell in &snapshot.cells[start..end] {
         if cell.text.is_empty() {
-            out.push(' ');
+            if !after_wide {
+                out.push(' ');
+            }
+            after_wide = false;
         } else {
             out.push_str(&cell.text);
+            after_wide = cell_is_wide(&cell.text);
         }
     }
     out.trim_end().to_string()
+}
+
+/// Whether `text` (one cell's grapheme cluster) occupies two grid columns,
+/// i.e. is followed by a spacer cell in the snapshot. Same
+/// `unicode-width`-based classification `render.rs`/`ime.rs` already use
+/// for wide-glyph layout.
+fn cell_is_wide(text: &str) -> bool {
+    use unicode_width::UnicodeWidthStr;
+    UnicodeWidthStr::width(text) >= 2
 }
 
 // MARK: - double-click word selection / triple-click line selection (W5j #3)
@@ -664,5 +696,103 @@ mod tests {
         let snap = snapshot_from_rows(&["hello world"], 20);
         let sel = selection_for_click(&snap, CellPos { row: 0, col: 8 }, 4);
         assert_eq!(selected_text(&snap, &sel), "hello world");
+    }
+
+    // MARK: - wide-character (CJK/emoji) spacer cells in copied text
+
+    /// Like `snapshot_from_rows`, but lays wide graphemes out the way the
+    /// real VT grid does: a display-width-2 grapheme occupies its cell
+    /// *plus* an empty spacer cell right after it. `' '` in the input still
+    /// means a genuine blank cell.
+    fn snapshot_with_spacers(rows: &[&str], cols: u16) -> GridSnapshot {
+        use unicode_width::UnicodeWidthStr;
+        let mut cells = Vec::with_capacity(rows.len() * cols as usize);
+        for row in rows {
+            let mut row_cells: Vec<CellSnapshot> = Vec::new();
+            for ch in row.chars() {
+                let mut cell = CellSnapshot::blank();
+                let wide = UnicodeWidthStr::width(ch.to_string().as_str()) >= 2;
+                if ch != ' ' {
+                    cell.text = ch.to_string();
+                }
+                row_cells.push(cell);
+                if wide {
+                    row_cells.push(CellSnapshot::blank());
+                }
+            }
+            row_cells.truncate(cols as usize);
+            row_cells.resize(cols as usize, CellSnapshot::blank());
+            cells.extend(row_cells);
+        }
+        GridSnapshot {
+            cols,
+            rows: rows.len() as u16,
+            background: Rgb::BLACK,
+            cells,
+            cursor: CursorSnapshot {
+                col: 0,
+                row: 0,
+                visible: true,
+                color: None,
+            },
+            scroll_offset: 0,
+            scrollback_len: 0,
+        }
+    }
+
+    fn full_row_selection(cols: u16) -> Selection {
+        Selection {
+            anchor: CellPos { row: 0, col: 0 },
+            cursor: CellPos {
+                row: 0,
+                col: cols - 1,
+            },
+        }
+    }
+
+    /// The reported bug: copying 日本語 from a pane yielded "日 本 語" --
+    /// each wide glyph's spacer cell leaked into the clipboard as a space.
+    #[test]
+    fn wide_chars_copy_without_spacer_spaces() {
+        let snap = snapshot_with_spacers(&["日本語"], 10);
+        assert_eq!(selected_text(&snap, &full_row_selection(10)), "日本語");
+    }
+
+    /// A genuine blank cell between glyphs is still a space -- only the
+    /// spacer directly after a wide glyph is skipped.
+    #[test]
+    fn genuine_blanks_survive_next_to_wide_chars() {
+        let snap = snapshot_with_spacers(&["a 日b"], 10);
+        assert_eq!(selected_text(&snap, &full_row_selection(10)), "a 日b");
+    }
+
+    /// Runs of real blank cells keep their width (column alignment), and
+    /// ASCII-only rows are byte-identical to before.
+    #[test]
+    fn blank_runs_and_ascii_rows_are_unchanged() {
+        let snap = snapshot_with_spacers(&["x  y"], 8);
+        assert_eq!(selected_text(&snap, &full_row_selection(8)), "x  y");
+    }
+
+    /// Emoji are display-width 2 like CJK -- same spacer, same skip.
+    #[test]
+    fn emoji_spacer_is_skipped_too() {
+        let snap = snapshot_with_spacers(&["🍣x"], 8);
+        assert_eq!(selected_text(&snap, &full_row_selection(8)), "🍣x");
+    }
+
+    /// A selection can *start on* a spacer cell (clicking the right half of
+    /// a wide glyph): the seed peek at `col_start - 1` must classify it as
+    /// a spacer, not render a stray leading space.
+    #[test]
+    fn selection_starting_on_a_spacer_has_no_leading_space() {
+        // cells: [日][sp][本][sp][語][sp] -- select col 1 (日's spacer)
+        // through col 4 (語).
+        let snap = snapshot_with_spacers(&["日本語"], 10);
+        let sel = Selection {
+            anchor: CellPos { row: 0, col: 1 },
+            cursor: CellPos { row: 0, col: 4 },
+        };
+        assert_eq!(selected_text(&snap, &sel), "本語");
     }
 }
