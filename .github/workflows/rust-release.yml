@@ -109,10 +109,10 @@ jobs:
       run:
         working-directory: rust
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
 
       - name: Checkout vancluever/ghostty (pinned)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.1
         with:
           repository: vancluever/ghostty
           ref: ${{ env.GHOSTTY_REF }}
@@ -120,11 +120,11 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - uses: mlugg/setup-zig@v2
+      - uses: mlugg/setup-zig@v2.2.1
         with:
           version: 0.16.0
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: swatinem/rust-cache@v2.9.3
         with:
           workspaces: rust
 
@@ -132,7 +132,7 @@ jobs:
         run: ./scripts/bundle-macos.sh "${{ needs.resolve-version.outputs.version }}"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: LaboLabo-macos
           path: rust/target/bundle/*.zip
@@ -151,10 +151,10 @@ jobs:
       run:
         working-directory: rust
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
 
       - name: Checkout vancluever/ghostty (pinned)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.1
         with:
           repository: vancluever/ghostty
           ref: ${{ env.GHOSTTY_REF }}
@@ -171,11 +171,11 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - uses: mlugg/setup-zig@v2
+      - uses: mlugg/setup-zig@v2.2.1
         with:
           version: 0.16.0
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: swatinem/rust-cache@v2.9.3
         with:
           workspaces: rust
 
@@ -183,7 +183,7 @@ jobs:
         run: ./scripts/package-linux.sh "${{ needs.resolve-version.outputs.version }}"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: LaboLabo-linux
           path: rust/target/package/*.tar.gz
@@ -203,11 +203,11 @@ jobs:
       run:
         working-directory: rust
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: swatinem/rust-cache@v2.9.3
         with:
           workspaces: rust
 
@@ -216,7 +216,7 @@ jobs:
         run: ./scripts/package-windows.ps1 -Version "${{ needs.resolve-version.outputs.version }}"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: LaboLabo-windows
           path: rust/target/package/*.zip
@@ -229,10 +229,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
 
       - name: Download all platform artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8.0.2
         with:
           path: artifacts
 
