@@ -17,7 +17,7 @@ jobs:
     # 無限ハングする。各試行を 7 分で打ち切り最大 3 回リトライ、全体上限 25 分の保険を掛ける。
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
       - name: Show toolchain
         run: swift --version
       - name: Run tests (retry on flaky runner hang)
@@ -53,7 +53,7 @@ jobs:
     runs-on: ubuntu-latest
     container: swift:6.0
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
       - name: Show toolchain
         run: swift --version
       - name: swift test (LaboLaboEngine only on Linux)
@@ -81,11 +81,11 @@ jobs:
       run:
         working-directory: rust
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: swatinem/rust-cache@v2.9.3
         with:
           workspaces: rust
       - name: cargo fmt --check
@@ -107,11 +107,11 @@ jobs:
       run:
         working-directory: rust
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: swatinem/rust-cache@v2.9.3
         with:
           workspaces: rust
       - name: cargo fmt --check
@@ -142,7 +142,7 @@ jobs:
       run:
         working-directory: rust
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
       - name: Install system dependencies (gpui link-time deps)
         run: |
           sudo apt-get update
@@ -152,7 +152,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: swatinem/rust-cache@v2.9.3
         with:
           workspaces: rust
       - name: cargo fmt --check
@@ -181,11 +181,11 @@ jobs:
       run:
         working-directory: rust
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: swatinem/rust-cache@v2.9.3
         with:
           workspaces: rust
       - name: cargo fmt --check
@@ -234,9 +234,9 @@ jobs:
       GHOSTTY_SOURCE_DIR: ${{ github.workspace }}/ghostty-src
       LIBGHOSTTY_VT_SYS_OPTIMIZE: ReleaseFast
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
       - name: Checkout vancluever/ghostty (pinned)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.1
         with:
           repository: vancluever/ghostty
           ref: ${{ env.GHOSTTY_REF }}
@@ -244,10 +244,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - uses: mlugg/setup-zig@v2
+      - uses: mlugg/setup-zig@v2.2.1
         with:
           version: 0.16.0
-      - uses: Swatinem/rust-cache@v2
+      - uses: swatinem/rust-cache@v2.9.3
         with:
           workspaces: rust
       - name: cargo test (backend-ghostty-vt)
@@ -262,7 +262,7 @@ jobs:
     name: app build & test
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
       - name: Show toolchain
         run: |
           swift --version
